@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · Асинхронность: async/await и Task</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="index.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch05-di.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Часть II · Исполнение: потоки и асинхронность</div>
+    <h1>Глава 4. Асинхронность: async/await и Task</h1>
+    <p class="sublead">Главный инструмент серверной разработки на .NET: как с малым числом потоков
+      обслуживать много запросов и не превратить это в «стоп-кран».</p>
+
+    <h2>Суть: I/O-bound против CPU-bound</h2>
+    <ul>
+      <li><strong>I/O-bound</strong> — операция ждёт внешний ресурс (БД, сеть, диск). Ждать нужно
+        <em>асинхронно</em> — поток при этом свободен. Это 90% серверного кода.</li>
+      <li><strong>CPU-bound</strong> — операция считает. Здесь помогает <em>параллелизм</em>, но с осторожностью.</li>
+    </ul>
+
+    <h2>Как работает async/await</h2>
+    <p>Компилятор превращает метод с <code>async</code> в <strong>машину состояний</strong>. В точке
+      <code>await</code> метод не блокирует поток, а сохраняет своё состояние и возвращает управление
+      вызывающему. Когда операция завершится, продолжение выполнится (возможно, на другом потоке).</p>
+
+    <div class="codewrap">
+      <pre><code class="language-csharp">public async Task&lt;UserDto&gt; GetUserAsync(int id, CancellationToken ct)
+{
+    var user = await _repo.GetByIdAsync(id, ct); // поток освобождается здесь
+    return user;                                  // продолжение после завершения I/O
+}</code></pre>
+    </div>
+
+    <h2>Правило №1: async до конца</h2>
+    <p>Если метод асинхронный — он должен быть таким на всём пути, от эндпоинта до последнего слоя.
+      Смешивание async и синхронного ожидания — главная ошибка новичков и причина «голодания» пула
+      (глава 3).</p>
+
+    <h2>Что полезно знать</h2>
+    <table>
+      <thead><tr><th>Тема</th><th>Коротко</th></tr></thead>
+      <tbody>
+        <tr><td><code>async void</code></td><td>Только для UI-событий. В сервере — нет: исключения не поймать.</td></tr>
+        <tr><td><code>Task.Run</code></td><td>Не нужен «чтобы было асинхронно» на сервере — это лишняя работа.</td></tr>
+        <tr><td><code>ConfigureAwait(false)</code></td><td>В библиотеках — чтобы не возвращаться в исходный контекст. В ASP.NET Core контекста нет, поэтому там менее критично.</td></tr>
+        <tr><td><code>ValueTask</code></td><td>Экономит аллокацию, когда результат часто готов сразу (кэш). Обычно хватает <code>Task</code>.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Параллелизм — но контролируемый</h2>
+    <div class="codewrap">
+      <p class="cap">Независимые вызовы — параллельно</p>
+      <pre><code class="language-csharp">// ✘ последовательно: 2 × 100 мс = 200 мс
+var a = await GetAAsync(ct);
+var b = await GetBAsync(ct);
+
+// ✔ параллельно: ~100 мс
+var ta = GetAAsync(ct);
+var tb = GetBAsync(ct);
+await Task.WhenAll(ta, tb);</code></pre>
+    </div>
+
+    <div class="box warn">
+      <span class="t">Обязательно ограничивайте веер</span>
+      <p>Неограниченный <code>Task.WhenAll</code> на тысячи элементов исчерпает пул соединений к БД и обрушит
+        задержки. Ограничивайте степень параллелизма:</p>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">private static readonly SemaphoreSlim Gate = new(8); // не более 8 сразу
+
+await Gate.WaitAsync(ct);
+try   { await ProcessOneAsync(id, ct); }
+finally { Gate.Release(); }</code></pre>
+    </div>
+
+    <h2>Потоковая обработка — <code>IAsyncEnumerable</code></h2>
+    <p>Для больших результатов отдавайте данные потоком, а не грузите всё в память:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public async IAsyncEnumerable&lt;OrderDto&gt; StreamAsync(
+    [EnumeratorCancellation] CancellationToken ct)
+{
+    await foreach (var o in _db.Orders.AsNoTracking()
+                       .Select(x =&gt; new OrderDto(x.Id, x.Total))
+                       .AsAsyncEnumerable()
+                       .WithCancellation(ct))
+    {
+        yield return o;
+    }
+}</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>Async/await позволяет не занимать поток во время I/O — это основа высокой пропускной способности.
+        Правило «async до конца» + ограничение параллелизма закрывают большинство проблем производительности.</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch03-threads.html">← <span class="sp">Потоки и пул потоков</span></a>
+      <a href="ch05-di.html"><span class="sp">Внедрение зависимостей</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

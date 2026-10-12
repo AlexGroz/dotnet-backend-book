@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · Внедрение зависимостей и жизненные циклы</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="index.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch06-config.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Часть III · Структура приложения</div>
+    <h1>Глава 5. Внедрение зависимостей и жизненные циклы</h1>
+    <p class="sublead">DI в .NET Core встроен и обязателен. Разберём жизненные циклы и самую частую
+      ошибку — Captive Dependency.</p>
+
+    <h2>Идея внедрения зависимостей</h2>
+    <p>Вместо того чтобы класс сам создавал зависимости (<code>new</code>) или доставал их из статики,
+      зависимости передаются ему извне — обычно через <strong>конструктор</strong>. Это делает код
+      тестируемым и управляемым.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ класс сам создаёт зависимость
+public class OrderService
+{
+    private readonly IRepository _repo = new SqlRepository("..."); // привязка к реализации
+}
+
+// ✔ зависимость приходит извне
+public class OrderService(IRepository repo)
+{
+    public Task&lt;Order&gt; GetAsync(int id) =&gt; repo.GetAsync(id);
+}</code></pre>
+    </div>
+
+    <h2>Жизненные циклы</h2>
+    <table>
+      <thead><tr><th>Lifetime</th><th>Сколько живёт</th><th>Типичный пример</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Transient</strong></td><td>Новый на каждое обращение</td><td>мапперы, лёгкие сервисы без состояния</td></tr>
+        <tr><td><strong>Scoped</strong></td><td>Один на HTTP-запрос (на «scope»)</td><td><code>DbContext</code>, репозитории</td></tr>
+        <tr><td><strong>Singleton</strong></td><td>Один на всё приложение</td><td>конфиг, кэши, инфраструктура (потокобезопасна!)</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddTransient&lt;IMapper, Mapper&gt;();
+builder.Services.AddScoped&lt;IOrderRepository, OrderRepository&gt;();
+builder.Services.AddSingleton&lt;IClock, SystemClock&gt;();
+
+// DbContext по умолчанию — Scoped
+builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Золотое правило</span>
+      <p>Долгоживущий сервис не должен зависеть от короткоживущего.
+        <strong>Singleton не зависит от Scoped.</strong></p>
+    </div>
+
+    <h2>Captive Dependency</h2>
+    <p>Это ситуация, когда долгоживущий сервис «захватывает» короткоживущий. Самый частый случай —
+      <strong>Singleton держит <code>DbContext</code></strong> (а он Scoped).</p>
+    <div class="codewrap">
+      <p class="cap">Опасный пример</p>
+      <pre><code class="language-csharp">builder.Services.AddSingleton&lt;ReportService&gt;();     // живёт всё приложение
+builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs)); // Scoped!
+
+public sealed class ReportService(AppDbContext db) // Scoped попал в Singleton → captive
+{
+    public Task&lt;Report&gt; BuildAsync() =&gt; db.Reports.FirstAsync();
+}</code></pre>
+    </div>
+    <p><strong>Чем плохо:</strong> рост памяти (контекст живёт вечно), ошибки конкурентности
+      («<em>A second operation started on this context…</em>»), устаревшие данные.</p>
+
+    <h3>Как правильно, если Singleton нужен доступ к БД</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class ReportService(IServiceScopeFactory scopeFactory)
+{
+    public async Task&lt;Report&gt; BuildAsync(CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateScope(); // свой scope на операцию
+        var db = scope.ServiceProvider.GetRequiredService&lt;AppDbContext&gt;();
+        return await db.Reports.AsNoTracking().FirstAsync(ct);
+    }
+}</code></pre>
+    </div>
+    <h2>Как отлавливать Captive Dependency</h2>
+    <ol>
+      <li><strong>Валидация графа на старте</strong> — главный способ:
+        <div class="codewrap">
+          <pre><code class="language-csharp">builder.Host.UseDefaultServiceProvider(o =&gt;
+{
+    o.ValidateScopes = true;    // ловит: Singleton → Scoped
+    o.ValidateOnBuild = true;   // проверяет весь граф при старте
+});</code></pre>
+        </div>
+      </li>
+      <li><strong>Тест-«сторож»</strong>, который резолвит все сервисы внутри scope.</li>
+      <li><strong>Код-ревью:</strong> Singleton — только stateless; красные флаги — <code>IServiceProvider</code>
+        или <code>DbContext</code> в Singleton.</li>
+    </ol>
+
+    <h2>Фоновые сервисы</h2>
+    <p><code>BackgroundService</code> — Singleton, поэтому scope нужно создавать на каждую итерацию:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using (var scope = scopeFactory.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService&lt;AppDbContext&gt;();
+    await db.CleanupAsync(ct);
+}</code></pre>
+    </div>
+
+    <div class="box note">
+      <span class="t">Связь с другими главами</span>
+      <p>Lifetimes у <code>IOptions*</code> — в главе 6. История миграции legacy-приложения (почему
+        DI/lifetimes болит сильнее всего) — в главе 17.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>Transient / Scoped / Singleton; долгоживущий не зависит от короткоживущего. Частая ошибка —
+        Singleton→<code>DbContext</code>. Ловим через <code>ValidateScopes</code>/<code>ValidateOnBuild</code>,
+        чиним через <code>IServiceScopeFactory</code>.</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch04-async.html">← <span class="sp">Асинхронность: async/await</span></a>
+      <a href="ch06-config.html"><span class="sp">Конфигурация и опции</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
