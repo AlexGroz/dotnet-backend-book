@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 9 · Общие данные и синхронизация</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,81 @@
   <div class="chapter">
     <div class="part">Часть III · Конкурентность</div>
     <h1>Глава 9. Общие данные и синхронизация</h1>
-    <p class="sublead">Гонки, lock, SemaphoreSlim, Interlocked — база перед асинхронностью</p>
-    <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Потоки делят память. Это значит, что два потока могут менять одни и те же данные —
+      и получать непредсказуемый результат. Разберёмся, как с этим быть.</p>
+
+    <h2>Гонка (race condition)</h2>
+    <p>Операция, которая «выглядит одной», на самом деле состоит из шагов: прочитать значение, изменить,
+      записать обратно. Если два потока делают это одновременно, изменения теряются.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ Увеличение из нескольких потоков теряет изменения
+private int _counter;
+public void Increment() => _counter++; // один поток может «затереть» другой</code></pre>
     </div>
+    <p>Ошибка коварна тем, что проявляется не всегда: под нагрузкой и на многоядерной машине —
+      чаще, а на тестах и одном ядре может «работать».</p>
+
+    <h2>Инструменты синхронизации</h2>
+    <table>
+      <thead><tr><th>Инструмент</th><th>Для чего</th></tr></thead>
+      <tbody>
+        <tr><td><code>lock</code></td><td>Защитить короткий участок кода, чтобы в него входил только один поток</td></tr>
+        <tr><td><code>Interlocked</code></td><td>Атомарные простые операции над числом/ссылкой, без блокировки</td></tr>
+        <tr><td><code>SemaphoreSlim</code></td><td>Ограничить число одновременных операций; умеет ждать асинхронно</td></tr>
+        <tr><td><code>Concurrent*</code>-коллекции</td><td>Потокобезопасные словари/очереди и т. п.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✔ защита участка блокировкой
+private readonly object _gate = new();
+private int _counter;
+
+public void Increment()
+{
+    lock (_gate) { _counter++; }
+}
+
+// ✔ или атомарная операция — дешевле блокировки
+private int _counter2;
+public void Increment2() => Interlocked.Increment(ref _counter2);</code></pre>
+    </div>
+
+    <h2>Правила работы с блокировками</h2>
+    <ul>
+      <li><strong>Держать блокировку коротко.</strong> Чем дольше она удерживается, тем больше потоков ждут.</li>
+      <li><strong>Не делать ввод-вывод под блокировкой.</strong> Запрос в БД под <code>lock</code> — все
+        остальные потоки замерли.</li>
+      <li><strong>Нельзя <code>await</code> внутри <code>lock</code>.</strong> Язык это запрещает — и не зря:
+        ожидание внутри блокировки остановило бы весь процесс.</li>
+    </ul>
+
+    <div class="box note">
+      <span class="t">Если нужно «ждать» внутри защиты</span>
+      <p>Для асинхронных сценариев используют <code>SemaphoreSlim</code> с <code>WaitAsync</code> — он умеет
+        освобождать поток на время ожидания. Это тот же <code>SemaphoreSlim</code>, которым мы будем
+        ограничивать параллелизм в главе 12.</p>
+    </div>
+
+    <h2>Лучшая синхронизация — её отсутствие</h2>
+    <p>Самая быстрая блокировка — та, которой нет. Поэтому хороший приём — <strong>иммутабельные
+      (неизменяемые) данные</strong>: если объект нельзя изменить, то и делить между потоками безопасно.
+      Также помогают локальные данные и передача копий вместо общей изменяемой структуры.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>Потоки делят память → возможны гонки. Защищайтесь <code>lock</code>, <code>Interlocked</code>,
+        <code>SemaphoreSlim</code> или конкурентными коллекциями. Блокировку держите коротко и никогда не
+        ждите под ней ввода-вывода. А ещё синхронизация нужна потому, что потоки <em>ждут</em> — об этом в
+        следующей главе.</p>
+    </div>
+
     <div class="pager">
-      <a href="ch08-thread-pool.html">← <span class="sp">Пул потоков и thread pool starvation</span></a>
+      <a href="ch08-thread-pool.html">← <span class="sp">Пул потоков</span></a>
       <a href="ch10-io.html"><span class="sp">Ввод-вывод: блокирующее и неблокирующее ожидание</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

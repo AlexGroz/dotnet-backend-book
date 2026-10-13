@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 6 · Аллокации на практике: строки, коллекции, пули</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,101 @@
   <div class="chapter">
     <div class="part">Часть II · Память</div>
     <h1>Глава 6. Аллокации на практике: строки, коллекции, пули</h1>
-    <p class="sublead">Как сократить мусор: boxing, StringBuilder, ArrayPool</p>
-    <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Зная, что под нагрузкой дорог не объём памяти, а скорость создания объектов, посмотрим,
+      как сократить мусор конкретными приёмами.</p>
+
+    <h2>Упаковка (boxing)</h2>
+    <p>Упаковка — это превращение значимого типа в объект в куче. Часто она «невидима».</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ ArrayList упаковывает каждый int в объект → мусор
+var list = new ArrayList();
+list.Add(42);
+
+// ✔ generic-коллекция: int хранится как int, без упаковки
+var list2 = new List&lt;int&gt;();
+list2.Add(42);</code></pre>
     </div>
+    <p>Похожая ловушка — сравнение структур через обычный <code>Equals</code>: упаковка происходит, если у
+      типа нет <code>IEquatable&lt;T&gt;</code>. Поэтому значимые типы стоит делать <code>readonly struct</code>
+      с реализацией <code>IEquatable&lt;T&gt;</code>.</p>
+
+    <h2>Строки</h2>
+    <p>Строки неизменяемы: каждая операция «изменения» создаёт <em>новую</em> строку. В цикле это превращается
+      в лавину мусора.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ строка на каждой итерации
+string s = "";
+for (int i = 0; i &lt; 1000; i++) s += i + ",";
+
+// ✔ один буфер → одна итоговая строка
+var sb = new StringBuilder(4096);
+for (int i = 0; i &lt; 1000; i++) sb.Append(i).Append(',');
+string result = sb.ToString();</code></pre>
+    </div>
+
+    <h2>Коллекции</h2>
+    <ul>
+      <li>Задавайте <strong>начальную ёмкость</strong>, если знаете размер: <code>new List&lt;T&gt;(count)</code> —
+        меньше промежуточных расширений и копирований.</li>
+      <li>Предпочитайте <strong>generic-коллекции</strong> не-generic (нет упаковки, нет приведения типов).</li>
+      <li>Не создавайте копии без нужды: лишний <code>ToList()</code> — это новый список.</li>
+    </ul>
+
+    <h2>Пули (pools): переиспользование вместо создания</h2>
+    <p>Крупные буферы (от ~85 КБ) попадают в LOH и дороги. Их лучше брать из пула и возвращать обратно.</p>
+    <div class="codewrap">
+      <span class="cap">ArrayPool для буферов</span>
+      <pre><code class="language-csharp">var pool = ArrayPool&lt;byte&gt;.Shared;
+
+byte[] buffer = pool.Rent(4096); // может вернуть массив и больше запрошенного
+try
+{
+    int read = await stream.ReadAsync(buffer.AsMemory(0, 4096), ct);
+    Process(buffer.AsSpan(0, read));
+}
+finally
+{
+    pool.Return(buffer); // обязательно вернуть в пул
+}</code></pre>
+    </div>
+    <p>Для «дорогих в создании» объектов (например, <code>StringBuilder</code>) есть <code>ObjectPool</code>
+      из <code>Microsoft.Extensions.ObjectPool</code>.</p>
+
+    <h2>Span&lt;T&gt;: работать с памятью без аллокаций</h2>
+    <p><code>Span&lt;T&gt;</code> — это «окно» в уже существующую память. Взятие части (слайсинг) не создаёт
+      новых объектов. Особенно полезно при разборе строк и протоколов.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// string.Split создаёт массив строк; проход по Span — нет
+ReadOnlySpan&lt;char&gt; line = input.AsSpan();
+int commas = 0;
+foreach (char c in line)
+    if (c == ',') commas++;</code></pre>
+    </div>
+
+    <h2>Исключения — не для управления потоком</h2>
+    <p>Бросок исключения дорог (создаётся объект, строится трассировка). Для ожидаемых ситуаций используйте
+      методы-проверки: <code>int.TryParse</code> вместо <code>catch (FormatException)</code>.</p>
+
+    <div class="box warn">
+      <span class="t">Правило хорошего тона</span>
+      <p>Всё это — только для <strong>горячих путей</strong>, и только по результатам измерений (глава 20).
+        Преждевременно усложнять обычный код <code>Span</code> и пулами — вредно: теряется читаемость без
+        заметной выгоды.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>Меньше мусора — меньше работы GC. Основные приёмы: не упаковывать (generics, <code>IEquatable</code>),
+        строить строки через <code>StringBuilder</code>, задавать ёмкость коллекций, брать крупные буферы из
+        <code>ArrayPool</code>, работать со <code>Span</code> без копий. И всё это — по замерам.</p>
+    </div>
+
     <div class="pager">
       <a href="ch05-gc.html">← <span class="sp">Сборка мусора и цена аллокаций</span></a>
-      <a href="ch07-threads.html"><span class="sp">Потоки, ядра и планировщик: почему поток дорогой</span> →</a>
+      <a href="ch07-threads.html"><span class="sp">Потоки, ядра и планировщик</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
