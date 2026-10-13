@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 11 · Асинхронность: async/await и Task</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="index.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch12-parallelism.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Часть III · Конкурентность</div>
+    <h1>Глава 11. Асинхронность: async/await и Task</h1>
+    <p class="sublead">Главный инструмент серверной разработки на .NET: как обслуживать много запросов малым
+      числом потоков и не превратить это в «стоп-кран».</p>
+
+    <h2>Как работает async/await</h2>
+    <p>Компилятор превращает метод с <code>async</code> в <strong>машину состояний</strong>. В точке
+      <code>await</code> метод не блокирует поток: он сохраняет своё состояние и возвращает управление
+      вызывающему (поток уходит обслуживать другие запросы). Когда операция завершится, продолжение
+      выполнится — возможно, на другом потоке.</p>
+
+    <div class="codewrap">
+      <pre><code class="language-csharp">public async Task&lt;UserDto&gt; GetUserAsync(int id, CancellationToken ct)
+{
+    var user = await _repo.GetByIdAsync(id, ct); // поток освобождён на время I/O
+    return user;                                  // продолжение после завершения
+}</code></pre>
+    </div>
+
+    <h2>Правило №1: async до конца</h2>
+    <p>Если метод асинхронный — он должен быть таким на всём пути, от эндпоинта до последнего слоя.
+      Смешивание async и синхронного ожидания — причина «голодания» пула из главы 8.</p>
+
+    <h2>Что полезно знать</h2>
+    <table>
+      <thead><tr><th>Тема</th><th>Коротко</th></tr></thead>
+      <tbody>
+        <tr><td><code>Task</code></td><td>«Обещание» результата. Обычный возвращаемый тип async-метода.</td></tr>
+        <tr><td><code>async void</code></td><td>Только для UI-событий. В серверном коде — нет: исключения не поймать.</td></tr>
+        <tr><td><code>ValueTask</code></td><td>Экономит аллокацию, когда результат часто готов сразу (например, кэш). Обычно хватает <code>Task</code>.</td></tr>
+        <tr><td><code>ConfigureAwait(false)</code></td><td>В библиотеках — чтобы не возвращаться в исходный контекст. В ASP.NET Core своего контекста нет, поэтому там менее критично.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Не нужен <code>Task.Run</code> «чтобы стало асинхронно»</span>
+      <p>На сервере оборачивание кода в <code>Task.Run</code> не ускоряет его, а просто переносит работу на
+        другой поток пула + добавляет аллокацию. Async оправдан там, где есть настоящее ожидание ввода-вывода.</p>
+    </div>
+
+    <h2>Отмена операций</h2>
+    <p>Асинхронные методы принимают <code>CancellationToken</code> — это позволяет прекратить работу, если
+      клиент отключился или истёк таймаут. Не игнорируйте его: под нагрузкой это освобождает ресурсы.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await _repo.GetByIdAsync(id, ct); // ct пробрасываем во все вложенные вызовы</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>async/await позволяет не занимать поток во время ввода-вывода — это основа высокой пропускной
+        способности. Держите путь асинхронным от начала до конца и пробрасывайте отмену. Как запускать
+        несколько операций сразу и как это ограничивать — в главе 12.</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch10-io.html">← <span class="sp">Ввод-вывод: блокирующее и неблокирующее ожидание</span></a>
+      <a href="ch12-parallelism.html"><span class="sp">Параллелизм с ограничениями</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

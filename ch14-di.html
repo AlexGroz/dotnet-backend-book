@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 5 · Внедрение зависимостей и жизненные циклы</title>
+<title>Глава 14 · Внедрение зависимостей и жизненные циклы</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,32 +13,31 @@
 <div class="topbar"><div class="in">
   <a href="index.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch06-config.html">Далее →</a>
+  <a href="ch15-hosting.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
-    <div class="part">Часть III · Структура приложения</div>
-    <h1>Глава 5. Внедрение зависимостей и жизненные циклы</h1>
-    <p class="sublead">DI в .NET Core встроен и обязателен. Разберём жизненные циклы и самую частую
-      ошибку — Captive Dependency.</p>
+    <div class="part">Часть IV · Сборка приложения</div>
+    <h1>Глава 14. Внедрение зависимостей и жизненные циклы</h1>
+    <p class="sublead">Как собирать приложение из слабосвязанных частей и не сломать его жизненными
+      циклами объектов.</p>
 
-    <h2>Идея внедрения зависимостей</h2>
-    <p>Вместо того чтобы класс сам создавал зависимости (<code>new</code>) или доставал их из статики,
-      зависимости передаются ему извне — обычно через <strong>конструктор</strong>. Это делает код
-      тестируемым и управляемым.</p>
+    <h2>Как это выглядит в коде</h2>
+    <p>Идею (из главы 13) контейнер реализует так: вы <strong>регистрируете</strong> сервисы, а он
+      <strong>сам собирает</strong> их и передаёт в конструкторы.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// ✘ класс сам создаёт зависимость
-public class OrderService
-{
-    private readonly IRepository _repo = new SqlRepository("..."); // привязка к реализации
-}
+      <pre><code class="language-csharp">// регистрация
+builder.Services.AddScoped&lt;IOrderRepository, OrderRepository&gt;();
+builder.Services.AddScoped&lt;OrderService&gt;();
 
-// ✔ зависимость приходит извне
-public class OrderService(IRepository repo)
+// класс просто просит то, что ему нужно
+public class OrderService(IOrderRepository repo)
 {
     public Task&lt;Order&gt; GetAsync(int id) =&gt; repo.GetAsync(id);
 }</code></pre>
     </div>
+    <p>Если зависимость не зарегистрирована — приложение падает <strong>на старте</strong>, а не «где-то
+      потом». Это заставляет держать граф зависимостей в порядке.</p>
 
     <h2>Жизненные циклы</h2>
     <table>
@@ -65,11 +64,11 @@ builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));</cod
     </div>
 
     <h2>Captive Dependency</h2>
-    <p>Это ситуация, когда долгоживущий сервис «захватывает» короткоживущий. Самый частый случай —
+    <p>Нарушение правила: долгоживущий сервис «захватывает» короткоживущий. Самый частый случай —
       <strong>Singleton держит <code>DbContext</code></strong> (а он Scoped).</p>
     <div class="codewrap">
       <p class="cap">Опасный пример</p>
-      <pre><code class="language-csharp">builder.Services.AddSingleton&lt;ReportService&gt;();     // живёт всё приложение
+      <pre><code class="language-csharp">builder.Services.AddSingleton&lt;ReportService&gt;();                  // живёт всё приложение
 builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs)); // Scoped!
 
 public sealed class ReportService(AppDbContext db) // Scoped попал в Singleton → captive
@@ -77,16 +76,18 @@ public sealed class ReportService(AppDbContext db) // Scoped попал в Singl
     public Task&lt;Report&gt; BuildAsync() =&gt; db.Reports.FirstAsync();
 }</code></pre>
     </div>
-    <p><strong>Чем плохо:</strong> рост памяти (контекст живёт вечно), ошибки конкурентности
-      («<em>A second operation started on this context…</em>»), устаревшие данные.</p>
+    <p><strong>Чем плохо:</strong> контекст живёт вечно (растёт память, копятся отслеживаемые сущности),
+      появляются ошибки конкурентности («<em>A second operation started on this context…</em>») и устаревшие
+      данные.</p>
 
     <h3>Как правильно, если Singleton нужен доступ к БД</h3>
+    <p>Не инжектить <code>DbContext</code>, а создавать scope <strong>на операцию</strong>:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">public sealed class ReportService(IServiceScopeFactory scopeFactory)
 {
     public async Task&lt;Report&gt; BuildAsync(CancellationToken ct)
     {
-        using var scope = scopeFactory.CreateScope(); // свой scope на операцию
+        using var scope = scopeFactory.CreateScope(); // свой scope
         var db = scope.ServiceProvider.GetRequiredService&lt;AppDbContext&gt;();
         return await db.Reports.AsNoTracking().FirstAsync(ct);
     }
@@ -102,8 +103,12 @@ public sealed class ReportService(AppDbContext db) // Scoped попал в Singl
     o.ValidateOnBuild = true;   // проверяет весь граф при старте
 });</code></pre>
         </div>
+        <p><code>ValidateScopes</code> в момент создания Singleton увидит попытку получить Scoped и бросит
+          понятную ошибку. <code>ValidateOnBuild</code> проверяет весь граф при старте — ловит и captive, и
+          забытые регистрации.</p>
       </li>
-      <li><strong>Тест-«сторож»</strong>, который резолвит все сервисы внутри scope.</li>
+      <li><strong>Тест-«сторож»</strong>: построить провайдер из реальных регистраций и попытаться получить
+        каждый сервис внутри scope.</li>
       <li><strong>Код-ревью:</strong> Singleton — только stateless; красные флаги — <code>IServiceProvider</code>
         или <code>DbContext</code> в Singleton.</li>
     </ol>
@@ -120,8 +125,9 @@ public sealed class ReportService(AppDbContext db) // Scoped попал в Singl
 
     <div class="box note">
       <span class="t">Связь с другими главами</span>
-      <p>Lifetimes у <code>IOptions*</code> — в главе 6. История миграции legacy-приложения (почему
-        DI/lifetimes болит сильнее всего) — в главе 17.</p>
+      <p>Всё это «включается» в конкретном месте приложения — в точке входа и хостинге (глава 15).
+        Lifetimes у конфигурации и опций — в главе 16. История миграции, где DI болит сильнее всего, —
+        в главе 29.</p>
     </div>
 
     <div class="box gold">
@@ -132,8 +138,8 @@ public sealed class ReportService(AppDbContext db) // Scoped попал в Singl
     </div>
 
     <div class="pager">
-      <a href="ch04-async.html">← <span class="sp">Асинхронность: async/await</span></a>
-      <a href="ch06-config.html"><span class="sp">Конфигурация и опции</span> →</a>
+      <a href="ch13-loose-coupling.html">← <span class="sp">Слабая связанность</span></a>
+      <a href="ch15-hosting.html"><span class="sp">Точка входа и хостинг</span> →</a>
     </div>
   </div>
 </div>

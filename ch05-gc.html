@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · Сборка мусора и цена аллокаций</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="index.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch06-allocations.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Часть II · Память</div>
+    <h1>Глава 5. Сборка мусора и цена аллокаций</h1>
+    <p class="sublead">Теперь, когда мы знаем, где живут объекты, разберём, как их убирает GC и почему под
+      нагрузкой важна не «память вообще», а скорость создания объектов.</p>
+
+    <h2>Идея сборщика мусора</h2>
+    <p>Вы не освобождаете память вручную. За вас это делает <strong>Garbage Collector</strong>: он
+      отслеживает, какие объекты ещё достижимы (на них есть ссылки), а остальные считает мусором и
+      освобождает. Это снижает число утечек, но у работы GC есть цена — процессорное время.</p>
+
+    <h2>Поколения: почему сборка дешёвая</h2>
+    <p>GC построен на наблюдаемом факте: большинство объектов умирает молодыми. Поэтому объекты делят по
+      «возрасту»:</p>
+    <table>
+      <thead><tr><th>Поколение</th><th>Что там</th><th>Стоимость сборки</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Gen0</strong></td><td>Молодые объекты (DTO, строки на запрос)</td><td>Часто и дёшево</td></tr>
+        <tr><td><strong>Gen1</strong></td><td>Пережившие одну сборку (буфер)</td><td>Дёшево</td></tr>
+        <tr><td><strong>Gen2</strong></td><td>Долгоживущие (кэши, синглтоны)</td><td>Редко и дороже; может давать паузы</td></tr>
+        <tr><td><strong>LOH</strong></td><td>Крупные объекты (массивы от ~85 КБ)</td><td>Собирается вместе с Gen2</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Главная мысль</span>
+      <p>Gen0-сборка дешёвая, потому что почти все молодые объекты мертвы. Но <strong>каждый запрос создаёт
+        мусор</strong>. Чем больше мусора в секунду — тем чаще сборки — тем больше CPU уходит на GC, а не на
+        полезную работу.</p>
+    </div>
+
+    <h2>Server GC vs Workstation GC</h2>
+    <p>Для серверных приложений (ASP.NET Core) обычно включён <strong>Server GC</strong>: отдельная куча и
+      поток GC на ядро. Это повышает пропускную способность ценой большего потребления памяти.</p>
+    <div class="codewrap">
+      <pre><code class="language-xml">&lt;PropertyGroup&gt;
+  &lt;ServerGarbageCollection&gt;true&lt;/ServerGarbageCollection&gt;
+&lt;/PropertyGroup&gt;</code></pre>
+    </div>
+
+    <h2>Крупные объекты (LOH)</h2>
+    <p>Массивы и буферы от ~85 КБ попадают в <strong>Large Object Heap</strong> и собираются только вместе
+      с Gen2. Поэтому большие временные буферы дороги: их лучше не создавать заново, а переиспользовать
+      (об этом — глава 6).</p>
+
+    <h2>Что создаёт «лишний» мусор</h2>
+    <table>
+      <thead><tr><th>Источник</th><th>Чем заменить</th></tr></thead>
+      <tbody>
+        <tr><td>Упаковка (boxing)</td><td>generic-коллекции: <code>List&lt;int&gt;</code></td></tr>
+        <tr><td>Конкатенация строк в цикле</td><td><code>StringBuilder</code></td></tr>
+        <tr><td>Исключения как поток управления</td><td>методы <code>Try*</code> (<code>TryParse</code>)</td></tr>
+        <tr><td>Крупные временные буферы</td><td><code>ArrayPool&lt;T&gt;</code></td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>Под нагрузкой важна <strong>скорость аллокаций</strong>, а не объём памяти. Gen0 дёшев, Gen2 и LOH
+        дороже. Практический вывод: не создавать лишний мусор на горячем пути. Как именно — в главе 6;
+        измерять — в главе 20.</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch04-stack-heap-types.html">← <span class="sp">Стек, куча и типы</span></a>
+      <a href="ch06-allocations.html"><span class="sp">Аллокации на практике</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

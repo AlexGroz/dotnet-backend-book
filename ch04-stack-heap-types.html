@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · Стек, куча и типы: где живут данные</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="index.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch05-gc.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Часть II · Память</div>
+    <h1>Глава 4. Стек, куча и типы: где живут данные</h1>
+    <p class="sublead">Чтобы понять сборку мусора и стоимость аллокаций, сначала нужно увидеть, где в
+      программе вообще лежат данные.</p>
+
+    <h2>Две области памяти</h2>
+    <ul>
+      <li><strong>Стек</strong> — быстрая область для локальных переменных и вызовов методов. Растёт и
+        сжимается автоматически, освобождается при выходе из метода.</li>
+      <li><strong>Куча</strong> — область, где живут объекты. Объект живёт в куче до тех пор, пока на него
+        есть ссылки; очисткой занимается сборщик мусора (глава 5).</li>
+    </ul>
+
+    <h2>Ссылочные и значимые типы</h2>
+    <table>
+      <thead><tr><th></th><th>Ссылочный тип (class)</th><th>Значимый тип (struct)</th></tr></thead>
+      <tbody>
+        <tr><td>Где живёт</td><td>В куче, а переменная хранит <em>ссылку</em> на него</td><td>Значение — «прямо в переменной»</td></tr>
+        <tr><td>Присваивание</td><td>Копируется ссылка (тот же объект)</td><td>Копируется всё значение</td></tr>
+        <tr><td>Может быть null</td><td>Да</td><td>Нет (кроме <code>Nullable&lt;T&gt;</code> / <code>int?</code>)</td></tr>
+        <tr><td>Стоимость</td><td>Аллокация в куче</td><td>Обычно без аллокации</td></tr>
+      </tbody>
+    </table>
+
+    <div class="codewrap">
+      <p class="cap">Разница наглядно</p>
+      <pre><code class="language-csharp">class PointClass { public int X; }    // ссылочный
+struct PointStruct { public int X; }  // значимый
+
+var a = new PointClass { X = 1 };
+var b = a;        // b ссылается на ТОТ ЖЕ объект
+b.X = 99;         // a.X тоже станет 99
+
+var c = new PointStruct { X = 1 };
+var d = c;        // d — независимая копия
+d.X = 99;         // c.X останется 1</code></pre>
+    </div>
+
+    <div class="box note">
+      <span class="t">Почему это важно для нагрузки</span>
+      <p>Ссылочный тип — это объект в куче, то есть работа для GC. Значимый тип обычно дешевле. Но если
+        значимый тип «упаковать» в объект, преимущество теряется — об этом дальше.</p>
+    </div>
+
+    <h2>Ссылка и «null»</h2>
+    <p>Переменная ссылочного типа хранит <strong>адрес</strong> объекта. Несколько переменных могут
+      указывать на один объект — поэтому изменение через одну видно через другую. Если ссылка нулевая
+      (<code>null</code>), объекта нет.</p>
+
+    <h2>Первое знакомство с упаковкой (boxing)</h2>
+    <p>Иногда значимый тип нужно воспринять как <code>object</code>. Тогда рантайм создаёт объект в куче
+      и копирует туда значение — это и есть <strong>упаковка</strong>. Обратно — <strong>распаковка</strong>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">int n = 42;
+object boxed = n;       // упаковка: аллокация в куче
+int back = (int)boxed;  // распаковка</code></pre>
+    </div>
+    <p>Упаковка — частый источник «невидимого» мусора. Подробно и с примерами — в главе 6.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>Локальные переменные и вызовы — на стеке; объекты — в куче. Путь к пониманию памяти: ссылочные
+        типы живут в куче (работа для GC), значимые — дешевле, но могут «упаковываться» в объект.</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch03-dotnet-runtime.html">← <span class="sp">Как .NET исполняет код</span></a>
+      <a href="ch05-gc.html"><span class="sp">Сборка мусора и цена аллокаций</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

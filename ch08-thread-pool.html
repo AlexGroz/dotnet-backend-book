@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 8 · Пул потоков и thread pool starvation</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="index.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch09-synchronization.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Часть III · Конкурентность</div>
+    <h1>Глава 8. Пул потоков и thread pool starvation</h1>
+    <p class="sublead">Потоки создавать дорого, поэтому .NET их переиспользует. Разберём, как устроен пул
+      и что такое «голодание», которое убивает задержки.</p>
+
+    <h2>Зачем нужен пул</h2>
+    <p>Если создавать поток под каждый входящий запрос, сервер быстро упрётся в накладные расходы. Поэтому
+      .NET держит <strong>пул потоков</strong> — набор готовых потоков, которые переиспользуются. По
+      умолчанию потоков примерно <strong>по числу ядер</strong>.</p>
+
+    <h2>Две группы потоков в пуле</h2>
+    <ul>
+      <li><strong>Worker threads</strong> — выполняют ваш код и продолжения после <code>await</code>.</li>
+      <li><strong>I/O completion threads</strong> — обрабатывают завершение асинхронных операций ввода-вывода.</li>
+    </ul>
+
+    <div class="box note">
+      <span class="t">Ключевая идея</span>
+      <p>Пока идёт настоящая асинхронная I/O-операция (запрос в БД, HTTP-вызов), <strong>поток не занят</strong> —
+        об этом позже сообщит операционная система. Один поток обслуживает множество «ожидающих» операций.
+        Это и есть источник высокой пропускной способности.</p>
+    </div>
+
+    <h2>Thread pool starvation («голодание» пула)</h2>
+    <p>Если внутри потока пула делать <strong>блокирующее ожидание</strong> (<code>.Result</code>,
+      <code>.Wait()</code>, <code>Thread.Sleep</code>, синхронный вызов БД), поток занят, но ничего не делает.
+      Когда запросов больше, чем потоков, остальные встают в очередь, а новые потоки пул добавляет медленно
+      (примерно по одному за 500 мс). Итог — задержка в секунды при свободном процессоре.</p>
+
+    <div class="codewrap">
+      <p class="cap">Антипаттерн №1 в серверном коде</p>
+      <pre><code class="language-csharp">// ✘ поток пула застревает в ожидании
+var data = GetDataAsync(id).Result;   // или .Wait()
+
+// ✔ блокировки нет — поток освобождается на время I/O
+var data2 = await GetDataAsync(id);</code></pre>
+    </div>
+
+    <div class="box warn">
+      <span class="t">Как распознать голодание</span>
+      <p>Растёт <strong>очередь пула</strong> и <strong>число потоков</strong>, а задержка огромная. Ищем
+        блокирующие вызовы. Поднять <code>ThreadPool.SetMinThreads</code> можно лишь как временную меру —
+        это лечение симптома, а не причины.</p>
+    </div>
+
+    <h2>Вывод: чего нельзя делать</h2>
+    <ul>
+      <li>Не вызывать <code>.Result</code> и <code>.Wait()</code> на асинхронных операциях.</li>
+      <li>Не спать в потоке пула (<code>Thread.Sleep</code>) — для ожидания есть <code>await Task.Delay</code>.</li>
+      <li>Не держать поток на время долгого ввода-вывода.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>Потоки берутся из пула и их нельзя занимать бесполезным ожиданием. Именно поэтому дальше мы
+        перейдём к синхронизации (глава 9), природе ввода-вывода (глава 10) и асинхронности (глава 11).</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch07-threads.html">← <span class="sp">Потоки, ядра и планировщик</span></a>
+      <a href="ch09-synchronization.html"><span class="sp">Общие данные и синхронизация</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

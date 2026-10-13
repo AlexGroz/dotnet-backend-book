@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Как .NET исполняет код: CLR, IL, JIT</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="index.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch04-stack-heap-types.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Часть I · Как всё устроено</div>
+    <h1>Глава 3. Как .NET исполняет код: CLR, IL, JIT</h1>
+    <p class="sublead">От исходника на C# до машинных инструкций. Без этой картины непонятно, почему код
+      «прогревается» и откуда берётся стоимость объектов.</p>
+
+    <h2>Путь кода: C# → IL → машинный код</h2>
+    <ol>
+      <li><strong>Компилятор C# (Roslyn)</strong> переводит исходник не в машинный код, а в промежуточный
+        язык <strong>IL</strong> и метаданные. Итог — сборка <code>.dll</code>.</li>
+      <li><strong>CLR</strong> (Common Language Runtime) загружает сборку и во время выполнения
+        <strong>JIT-компилирует</strong> методы из IL в машинный код того процессора, на котором запущено
+        приложение.</li>
+      <li>Дальше метод исполняется уже как «родной» машинный код.</li>
+    </ol>
+
+    <div class="box note">
+      <span class="t">Следствие, важное для практики</span>
+      <p>Раз метод компилируется <em>во время выполнения</em>, у кода есть <strong>прогрев</strong>: первые
+        вызовы медленнее. Поэтому микробенчмарки всегда делают с разогревом (глава 20), а «первый запрос
+        после старта» может быть медленнее последующих.</p>
+    </div>
+
+    <h2>Tiered compilation: быстро стартовать, быстро работать</h2>
+    <p>.NET использует многоуровневую компиляцию: сначала метод компилируется «быстро и просто», чтобы
+      приложение стартовало без задержек. Если метод оказался горячим — его пересоздают уже с полными
+      оптимизациями. Так приложение быстро запускается и быстро работает под нагрузкой.</p>
+
+    <h3>Что такое «горячий путь» (hot path)</h3>
+    <p>Это код, который выполняется <strong>очень часто</strong> — например, обработка каждого запроса.
+      Именно на нём важны все оптимизации из этой книги. Единичный, редко вызываемый код оптимизировать
+      не нужно — выигрыш незаметен, а читаемость падает.</p>
+
+    <h2>AOT и ReadyToRun — кратко</h2>
+    <ul>
+      <li><strong>ReadyToRun</strong> — часть кода скомпилирована заранее, чтобы сократить старт.</li>
+      <li><strong>Native AOT</strong> — сборка сразу в машинный код, без JIT. Полезно для CLI и функций,
+        где важен мгновенный старт.</li>
+    </ul>
+    <p>Для обычного сервера под нагрузкой это чаще деталь, а не необходимость: горячий код всё равно
+      получит полные оптимизации через tiered compilation.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <p>Код компилируется в <strong>IL</strong> и <strong>JIT-компилируется во время выполнения</strong>,
+        поэтому есть «прогрев». Оптимизировать стоит только <strong>горячие пути</strong>. Как устроена
+        память и почему объекты стоят денег — в следующей главе.</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch02-computer-execution.html">← <span class="sp">Как компьютер исполняет программу</span></a>
+      <a href="ch04-stack-heap-types.html"><span class="sp">Стек, куча и типы</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
