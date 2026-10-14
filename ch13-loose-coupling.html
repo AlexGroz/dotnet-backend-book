@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 13 · Слабая связанность: зачем внедрять зависимости</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,76 @@
   <div class="chapter">
     <div class="part">.NET · Часть IV · Сборка приложения</div>
     <h1>Глава 13. Слабая связанность: зачем внедрять зависимости</h1>
-    <p class="sublead">Интерфейсы, тестируемость и цена жёстких связей</p>
-    <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Начинаем часть про сборку приложения. Прежде чем говорить о контейнере зависимостей
+      (глава 14), ответим на вопрос «зачем вообще всё это нужно».</p>
+
+    <h2>Жёсткая связь — это проблема</h2>
+    <p>Класс, который сам создаёт свои зависимости, «прибит» к конкретным реализациям:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ OrderService жёстко связан с SqlRepository и строкой подключения
+public class OrderService
+{
+    private readonly SqlRepository _repo = new("Host=db;...");
+
+    public Order Get(int id) =&gt; _repo.Find(id);
+}</code></pre>
     </div>
+    <p>Что здесь плохо:</p>
+    <ul>
+      <li>нельзя подставить другую реализацию (кэш, тестовый двойник);</li>
+      <li>нельзя протестировать <code>OrderService</code> без настоящей базы;</li>
+      <li>изменения (другая БД, другой способ хранения) задевают этот класс;</li>
+      <li>строка подключения «зашита» внутрь логики.</li>
+    </ul>
+
+    <h2>Интерфейс как контракт</h2>
+    <p>Решение — зависеть от <strong>абстракции</strong> (интерфейса), а не от конкретного класса:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public interface IOrderRepository
+{
+    Order? Find(int id);
+}
+
+// ✔ класс зависит от контракта и получает его извне
+public class OrderService(IOrderRepository repo)
+{
+    public Order? Get(int id) =&gt; repo.Find(id);
+}</code></pre>
+    </div>
+    <p>Теперь <code>OrderService</code> не знает, откуда приходят данные: база, кэш или заглушка в тесте.
+      Это и есть <strong>слабая связанность</strong>.</p>
+
+    <h2>Что это даёт на практике</h2>
+    <table>
+      <thead><tr><th>Выгода</th><th>Что это значит в работе</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Тестируемость</strong></td><td>В тестах подставляем поддельный <code>IOrderRepository</code> вместо БД</td></tr>
+        <tr><td><strong>Заменяемость</strong></td><td>Меняем реализацию (БД → кэш → внешний API), не трогая потребителя</td></tr>
+        <tr><td><strong>Изоляция изменений</strong></td><td>Правки в одной части системы не расползаются по коду</td></tr>
+        <tr><td><strong>Параллельная работа</strong></td><td>Команды договариваются об интерфейсах и работают независимо</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Теперь зависимости нужно «собирать»</span>
+      <p>Как только класс перестал создавать зависимости сам, кто-то должен их ему <strong>передать</strong>.
+        Раньше это делали вручную или через статику — и это превращалось в кашу. Поэтому нужен
+        <strong>контейнер</strong>, который сам собирает объекты и раздаёт зависимости. О нём — глава 14.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Жёсткая связь (класс сам делает <code>new</code> своих зависимостей) мешает тестам и изменениям.
+        Слабая связь — это «зависеть от интерфейса, зависимость получать извне». Именно это и обслуживает
+        внедрение зависимостей в .NET Core.</p>
+    </div>
+
     <div class="pager">
-      <a href="ch12-parallelism.html">← <span class="sp">Параллелизм с ограничениями и потоковая обработка</span></a>
+      <a href="ch12-parallelism.html">← <span class="sp">Параллелизм с ограничениями</span></a>
       <a href="ch14-di.html"><span class="sp">Внедрение зависимостей и жизненные циклы</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

@@ -3,8 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 12 · Параллелизм с ограничениями и потоковая обработка</title>
+<title>Глава 12 · Параллелизм с ограничениями</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,90 @@
   <div class="chapter">
     <div class="part">.NET · Часть III · Конкурентность</div>
     <h1>Глава 12. Параллелизм с ограничениями и потоковая обработка</h1>
-    <p class="sublead">WhenAll, SemaphoreSlim, IAsyncEnumerable и backpressure</p>
-    <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Мы умеем не блокировать поток (глава 11). Теперь — как запускать несколько операций
+      сразу и почему это обязательно ограничивать.</p>
+
+    <h2>Независимые операции — параллельно</h2>
+    <p>Если два обращения к БД независимы, нет смысла ждать их по очереди. Их запускают вместе и ждут оба:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ последовательно: 2 × 100 мс = 200 мс
+var a = await GetAAsync(ct);
+var b = await GetBAsync(ct);
+
+// ✔ параллельно: ~100 мс
+var ta = GetAAsync(ct);
+var tb = GetBAsync(ct);
+await Task.WhenAll(ta, tb);</code></pre>
     </div>
+    <p><code>Task.WhenAll</code> подходит для <strong>небольшого фиксированного</strong> набора операций —
+      двух-пяти. Для длинных списков он опасен (см. ниже).</p>
+
+    <h2>Почему веер запросов обязательно ограничивать</h2>
+    <p>Соблазнительно написать «запустить всё сразу» на тысячу элементов. Но ресурсы конечны:</p>
+    <ul>
+      <li><strong>пул соединений к БД</strong> — их десятки, а не тысячи (глава 22 книги SQL);</li>
+      <li><strong>потоки пула</strong> — их нельзя плодить бесконечно (глава 8);</li>
+      <li><strong>сеть и внешние сервисы</strong> — у них свои лимиты.</li>
+    </ul>
+    <p>Если запросов больше, чем «мест», остальные встают в очередь, задержка растёт, а дальше начинаются
+      таймауты. Это называется отсутствием <strong>обратного давления (backpressure)</strong>.</p>
+
+    <h2>Ограничение параллелизма</h2>
+    <div class="codewrap">
+      <p class="cap">Вариант 1: SemaphoreSlim</p>
+      <pre><code class="language-csharp">private static readonly SemaphoreSlim Gate = new(initialCount: 8);
+
+await Gate.WaitAsync(ct);
+try   { await ProcessOneAsync(id, ct); }
+finally { Gate.Release(); }</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Вариант 2 (.NET 6+): Parallel.ForEachAsync — встроенный лимит</p>
+      <pre><code class="language-csharp">await Parallel.ForEachAsync(
+    ids,
+    new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+    async (id, token) =&gt; await ProcessOneAsync(id, token));</code></pre>
+    </div>
+
+    <h2>Потоковая обработка: IAsyncEnumerable</h2>
+    <p>Если результат большой, не нужно грузить его целиком в память — можно отдавать по мере чтения:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public async IAsyncEnumerable&lt;OrderDto&gt; StreamAsync(
+    [EnumeratorCancellation] CancellationToken ct)
+{
+    await foreach (var o in _db.Orders.AsNoTracking()
+                       .Select(x =&gt; new OrderDto(x.Id, x.Total))
+                       .AsAsyncEnumerable()
+                       .WithCancellation(ct))
+    {
+        yield return o;   // отдаём по мере чтения, память O(1)
+    }
+}</code></pre>
+    </div>
+
+    <table>
+      <thead><tr><th>Сценарий</th><th>Инструмент</th></tr></thead>
+      <tbody>
+        <tr><td>Пара независимых вызовов</td><td><code>Task.WhenAll</code></td></tr>
+        <tr><td>Ограничить веер операций</td><td><code>SemaphoreSlim</code> / <code>Parallel.ForEachAsync</code></td></tr>
+        <tr><td>Большой результат / поток данных</td><td><code>IAsyncEnumerable</code></td></tr>
+        <tr><td>Развязка «принять» и «обработать»</td><td><code>Channel&lt;T&gt;</code> (глава 25)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Распараллеливать стоит только <strong>независимые</strong> операции, и всегда <strong>с ограничением</strong>.
+        Это и есть backpressure: лучше подождать в очереди на входе, чем обрушить пул соединений и получить
+        каскадные таймауты.</p>
+    </div>
+
     <div class="pager">
-      <a href="ch11-async.html">← <span class="sp">Асинхронность: async/await и Task</span></a>
-      <a href="ch13-loose-coupling.html"><span class="sp">Слабая связанность: зачем внедрять зависимости</span> →</a>
+      <a href="ch11-async.html">← <span class="sp">Асинхронность: async/await</span></a>
+      <a href="ch13-loose-coupling.html"><span class="sp">Слабая связанность</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

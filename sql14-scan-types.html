@@ -3,8 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 14 · Способы сканирования: Seq, Index, Index Only, Bitmap</title>
+<title>Глава 14 · Способы сканирования</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,80 @@
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
     <h1>Глава 14. Способы сканирования: Seq, Index, Index Only, Bitmap</h1>
-    <p class="sublead">Когда таблицу читают целиком, а когда точечно</p>
-    <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Читать план научились (глава 13). Теперь разберём главные узлы доступа к данным —
+      именно им чаще всего обязаны «тормоза».</p>
+
+    <h2>Seq Scan — последовательное чтение</h2>
+    <p>Читает таблицу целиком, страница за страницей.</p>
+    <ul>
+      <li><strong>Хорош, когда:</strong> таблица маленькая, или из неё нужно <em>большую часть</em> строк
+        (тогда индекс только добавит работы).</li>
+      <li><strong>Плох, когда:</strong> таблица большая, а нужна малая доля строк — читаем миллионы строк,
+        чтобы выбросить почти всё.</li>
+      <li><strong>Сигнал:</strong> <code>Seq Scan</code> на большой таблице + огромный
+        <code>Rows Removed by Filter</code>.</li>
+    </ul>
+
+    <h2>Index Scan — поиск по индексу</h2>
+    <p>Идёт по индексу (глава 8) и обращается к таблице за нужными строками.</p>
+    <ul>
+      <li><strong>Хорош, когда:</strong> нужна малая доля строк — читаем не всё, а точечно.</li>
+      <li><strong>Плох, когда:</strong> строк по индексу набирается много — каждое обращение к таблице это
+        «случайное» чтение (page), а их тысячи. Тогда Seq Scan может оказаться дешевле.</li>
+      <li><strong>Сигнал:</strong> большой <code>Index Scan</code> с большим <code>actual rows</code>.</li>
+    </ul>
+
+    <h2>Index Only Scan — всё нужное в индексе</h2>
+    <p>Если все запрашиваемые колонки есть в индексе (покрывающий индекс, глава 9), к таблице можно совсем
+      не ходить.</p>
+    <ul>
+      <li><strong>Хорош, когда:</strong> индекс «покрывает» запрос.</li>
+      <li><strong>Нюанс:</strong> работает в полную силу, только если подходит <strong>карта видимости</strong>
+        (<code>visibility map</code>) — иначе в плане видно <code>Heap Fetches</code>, и он превращается в
+        обычный доступ к таблице.</li>
+    </ul>
+
+    <h2>Bitmap Index Scan + Bitmap Heap Scan</h2>
+    <p>Промежуточный вариант: сначала собирается «карта» подходящих страниц, потом страницы читаются в
+      порядке возрастания (а не вразнобой, как в Index Scan).</p>
+    <ul>
+      <li><strong>Хорош, когда:</strong> строк среднее количество — не мало и не «почти вся таблица».</li>
+      <li><strong>Плюс:</strong> меньше «случайных» чтений, чем у обычного Index Scan.</li>
+      <li><strong>Минус:</strong> теряется порядок (сортировка может потребоваться заново).</li>
+    </ul>
+
+    <table>
+      <thead><tr><th>Способ</th><th>Когда выбирается</th><th>Когда становится проблемой</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Seq Scan</strong></td><td>Мало строк в таблице или нужна большая доля</td><td>Большая таблица + малая выборка</td></tr>
+        <tr><td><strong>Index Scan</strong></td><td>Нужна малая доля строк</td><td>Много строк → много случайных чтений</td></tr>
+        <tr><td><strong>Index Only Scan</strong></td><td>Индекс покрывает все нужные колонки</td><td>Карта видимости не актуальна → <code>Heap Fetches</code></td></tr>
+        <tr><td><strong>Bitmap</strong></td><td>Средняя селективность</td><td>Потеря порядка, лишний этап</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Почему планировщик «иногда не использует индекс»</span>
+      <p>Он сравнивает <strong>стоимость</strong>: у индекса есть цена — случайные чтения страниц таблицы.
+        Если строк по индексу набирается много, последовательное чтение (Seq Scan) дешевле. Именно это и
+        происходит, когда <em>нет подходящего индекса</em> или <em>изменились данные</em>, а статистика не
+        обновилась. Параметр <code>random_page_cost</code> (для SSD его снижают, глава 18) тоже влияет на
+        этот выбор.</p>
     </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Seq Scan — «читаю всё», Index Scan — «ищу точечно», Index Only Scan — «всё в индексе», Bitmap —
+        «средний случай». Смотрим не на «красивость» способа, а на его <strong>стоимость на этих данных</strong>:
+        <code>Seq Scan</code> на большой таблице при малой выборке — повод проверить индекс и статистику.</p>
+    </div>
+
     <div class="pager">
-      <a href="sql13-explain.html">← <span class="sp">EXPLAIN и EXPLAIN ANALYZE: читаем план</span></a>
-      <a href="sql15-join-algorithms.html"><span class="sp">Алгоритмы соединений: Nested Loop, Hash, Merge</span> →</a>
+      <a href="sql13-explain.html">← <span class="sp">EXPLAIN и EXPLAIN ANALYZE</span></a>
+      <a href="sql15-join-algorithms.html"><span class="sp">Алгоритмы соединений</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 13 · EXPLAIN и EXPLAIN ANALYZE: читаем план</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,93 @@
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
     <h1>Глава 13. EXPLAIN и EXPLAIN ANALYZE: читаем план</h1>
-    <p class="sublead">Дерево узлов, оценка против факта</p>
-    <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Мы знаем, что планировщик выбирает план по стоимости (глава 11). Теперь — как этот план
+      прочитать: без этого оптимизация невозможна.</p>
+
+    <h2>Что такое план</h2>
+    <p>План — это <strong>дерево узлов</strong>. Каждый узел делает одну операцию: прочитать таблицу, найти
+      строки по индексу, отсортировать, соединить, сгруппировать. Узлы вложены: родитель получает данные
+      от дочерних.</p>
+
+    <h2>EXPLAIN vs EXPLAIN ANALYZE</h2>
+    <ul>
+      <li><code>EXPLAIN</code> — только <strong>предполагаемый</strong> план (запрос не выполняется).</li>
+      <li><code>EXPLAIN ANALYZE</code> — <strong>выполняет</strong> запрос и добавляет фактические метрики.
+        Именно это нужно для оптимизации.</li>
+      <li><code>BUFFERS</code> — добавить статистику по страницам (из кэша / с диска).</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS) SELECT ... ;</code></pre>
     </div>
+    <div class="box warn">
+      <span class="t">ВАЖНО</span>
+      <p><code>EXPLAIN ANALYZE</code> <strong>реально выполняет</strong> запрос. Для тяжёлых запросов на
+        продакшене — снимайте план на реплике или в транзакции: <code>BEGIN; EXPLAIN ANALYZE …; ROLLBACK;</code></p>
+    </div>
+
+    <h2>Как читать метрики узла</h2>
+    <div class="codewrap">
+      <pre><code class="language-text">Seq Scan on orders  (cost=0.00..8000.0 rows=5000 width=24)
+                    (actual time=0.02..380.9 rows=480000 loops=1)
+      ▲ оценка планировщика                     ▲ фактические значения</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Часть</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>cost=начало..итого</code></td><td>Стоимость «до первой строки» и «до последней» (в условных единицах)</td></tr>
+        <tr><td><code>rows</code></td><td><strong>Оценка</strong> числа строк на выходе узла</td></tr>
+        <tr><td><code>width</code></td><td>Средний размер строки в байтах</td></tr>
+        <tr><td><code>actual time=старт..итого</code></td><td>Фактическое время: до первой строки и до конца</td></tr>
+        <tr><td><code>actual rows</code></td><td><strong>Фактическое</strong> число строк</td></tr>
+        <tr><td><code>loops</code></td><td>Сколько раз узел выполнялся</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Главная формула чтения</span>
+      <p><strong>Общее время узла ≈ <code>actual time</code> × <code>loops</code>.</strong> Узел с маленьким
+        <code>actual time</code>, но большим <code>loops</code>, может «съедать» всё время. И наоборот —
+        не пугайтесь большого <code>actual time</code> у узла с <code>loops = 1</code>, если он
+        «тяжёлый» сам по себе.</p>
+    </div>
+
+    <h2>Порядок разбора плана</h2>
+    <ol>
+      <li>Смотрим <code>Execution Time</code> — сколько выполняется запрос.</li>
+      <li>Находим узлы с наибольшим <strong>total time</strong> (<code>actual time × loops</code>) — это
+        «горячие точки».</li>
+      <li>Сравниваем <code>rows</code> (оценка) и <code>actual rows</code> (факт). <strong>Большое
+        расхождение</strong> = плохая статистика = неверный план (глава 12).</li>
+      <li>Смотрим способ доступа к данным (<code>Seq Scan</code>, <code>Index Scan</code>…) — глава 14.</li>
+      <li>Смотрим, как соединены таблицы (глава 15).</li>
+    </ol>
+
+    <div class="codewrap">
+      <p class="cap">Пример: что здесь не так?</p>
+      <pre><code class="language-text">Hash Join  (cost=1120.5..9430.1 rows=50 width=40)
+           (actual time=8.311..402.774 rows=50 loops=1)
+  -&gt; Seq Scan on orders o  (cost=0.00..8000.0 rows=5000 width=24)
+                           (actual time=0.02..380.9 rows=480000 loops=1)
+        Filter: (status = 'NEW'::text)
+        Rows Removed by Filter: 4520000
+→ Оценка: 5 000 строк. Факт: 480 000. Расхождение почти в 100 раз:
+  статистика устарела → план неверный → Seq Scan вместо Index Scan.</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>План — дерево узлов; <code>EXPLAIN ANALYZE</code> показывает <strong>факт</strong>. Читаем: находим
+        дорогой узел по <code>actual time × loops</code> и сравниваем <code>rows</code> с
+        <code>actual rows</code>. Именно это расхождение — самая частая причина плохих планов.
+        Детальный список полей и «красные флаги» — в главе 17.</p>
+    </div>
+
     <div class="pager">
-      <a href="sql12-cardinality.html">← <span class="sp">Оценка кардинальности: почему планы ошибаются</span></a>
-      <a href="sql14-scan-types.html"><span class="sp">Способы сканирования: Seq, Index, Index Only, Bitmap</span> →</a>
+      <a href="sql12-cardinality.html">← <span class="sp">Оценка кардинальности</span></a>
+      <a href="sql14-scan-types.html"><span class="sp">Способы сканирования</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

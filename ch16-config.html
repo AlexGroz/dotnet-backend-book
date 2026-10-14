@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 16 · Конфигурация и опции</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,83 @@
   <div class="chapter">
     <div class="part">.NET · Часть IV · Сборка приложения</div>
     <h1>Глава 16. Конфигурация и опции</h1>
-    <p class="sublead">IConfiguration, IOptions* и их lifetimes</p>
-    <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Настройки приложения: откуда они берутся, как их читать и почему у «опций» тоже есть
+      жизненные циклы.</p>
+
+    <h2>Откуда берётся конфигурация</h2>
+    <p>Хост собирает <code>IConfiguration</code> из нескольких <strong>источников</strong>. Источники
+      применяются по порядку, и <strong>последний перекрывает предыдущие</strong>:</p>
+    <ol>
+      <li><code>appsettings.json</code> — базовые значения;</li>
+      <li><code>appsettings.{Environment}.json</code> — переопределения для окружения (глава 15);</li>
+      <li><strong>переменные окружения</strong> — то, что задаётся в контейнере/на сервере;</li>
+      <li><strong>аргументы командной строки</strong>;</li>
+      <li>секреты разработчика (локально) — <code>dotnet user-secrets</code>.</li>
+    </ol>
+
+    <div class="box warn">
+      <span class="t">Секреты — не в файле в репозитории</span>
+      <p>Пароли и ключи <strong>не хранят</strong> в <code>appsettings.json</code>. Локально — user-secrets,
+        в проде — переменные окружения или менеджер секретов.</p>
     </div>
+
+    <h2>Опции: привязка конфигурации к классу</h2>
+    <p>Читать строки конфигурации по всему коду — плохо. Значения <strong>привязывают к классу</strong> и
+      инжектят его через DI:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class OrderOptions
+{
+    public int    PageSize  { get; init; } = 50;
+    public string ConnectionString { get; init; } = "";
+}
+
+builder.Services
+    .AddOptions&lt;OrderOptions&gt;()
+    .Bind(builder.Configuration.GetSection("Orders"))
+    .ValidateDataAnnotations()   // проверка значений
+    .ValidateOnStart();          // падать на старте, а не в рантайме</code></pre>
+    </div>
+
+    <h2>Три варианта чтения опций (и их lifetimes!)</h2>
+    <p>Здесь мы возвращаемся к жизненным циклам из главы 14 — у опций они тоже есть:</p>
+    <table>
+      <thead><tr><th>Тип</th><th>Lifetime</th><th>Когда брать</th></tr></thead>
+      <tbody>
+        <tr><td><code>IOptions&lt;T&gt;</code></td><td>Singleton</td><td>Значения не меняются на ходу (обычный случай)</td></tr>
+        <tr><td><code>IOptionsSnapshot&lt;T&gt;</code></td><td><strong>Scoped</strong></td><td>Нужно перечитывать значения на каждый запрос</td></tr>
+        <tr><td><code>IOptionsMonitor&lt;T&gt;</code></td><td>Singleton</td><td>Нужны уведомления об изменении настроек</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Типичная ошибка</span>
+      <p>Уверенно сказать «конфигурацию читаю через <code>IConfiguration</code> везде» — устаревший подход.
+        Правильно: один раз привязать к классу и инжектить <code>IOptions&lt;T&gt;</code>. Так настройки
+        валидируются, типизированы и не разбросаны по коду.</p>
+    </div>
+
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class OrderService(IOptions&lt;OrderOptions&gt; options)
+{
+    private readonly OrderOptions _opt = options.Value;
+    public int PageSize =&gt; _opt.PageSize;
+}</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Конфигурация собирается из нескольких источников (последний побеждает), секреты — не в репозитории.
+        Значения привязываем к классу и получаем через <code>IOptions&lt;T&gt;</code> /
+        <code>IOptionsSnapshot&lt;T&gt;</code> / <code>IOptionsMonitor&lt;T&gt;</code>, помня про их lifetimes и
+        валидацию на старте.</p>
+    </div>
+
     <div class="pager">
-      <a href="ch15-hosting.html">← <span class="sp">Точка входа и хостинг приложения</span></a>
+      <a href="ch15-hosting.html">← <span class="sp">Точка входа и хостинг</span></a>
       <a href="ch17-http-kestrel.html"><span class="sp">HTTP и веб-сервер: сокеты и Kestrel</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
