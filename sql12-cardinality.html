@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 12 · Оценка кардинальности: почему планы ошибаются</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,98 @@
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
     <h1>Глава 12. Оценка кардинальности: почему планы ошибаются</h1>
-    <p class="sublead">Главная причина плохих планов — неверная оценка строк</p>
-    <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Это ключ ко всей оптимизации. Почти все «плохие планы» — следствие одной ошибки: СУБД
+      неверно оценила, сколько строк получится.</p>
+
+    <h2>Что такое кардинальность</h2>
+    <p><strong>Кардинальность</strong> — сколько строк «пройдёт» через часть запроса. Именно это планировщик
+      оценивает (глава 11) и на это опирается, выбирая план.</p>
+    <p>Считает он примерно так: берёт общее число строк в таблице и умножает на <strong>селективность</strong>
+      — предполагаемую <em>долю</em> строк, которые подойдут под условие.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Оценка строк ≈ (всего строк в таблице) × селективность условия
+
+Пример: 5 000 000 строк × 0.001 = 5 000 строк</code></pre>
     </div>
+    <p>Селективность берётся из статистики: например, если по колонке <code>status</code> есть 3 разных
+      значения и они встречаются равномерно — «вес» одного значения ≈ 1/3.</p>
+
+    <div class="box note">
+      <span class="t">Важно понимать</span>
+      <p>Это <strong>догадка</strong>, а не подсчёт реальных строк. Планировщик не идёт и не считает — он
+        пользуется статистикой. Если данные неоднородные или статистика устарела — догадка оказывается далеко
+        от правды.</p>
+    </div>
+
+    <h2>Почему это критично</h2>
+    <p>Ошибка в оценке → ошибка в выборе плана. Логика простая:</p>
+    <ul>
+      <li><strong>Планировщик думает, что строк МАЛО</strong> (недооценка) → выбирает <code>Nested Loop</code>
+        и <code>Index Scan</code>. Если строк на деле миллионы — это тысячи циклов, катастрофа (глава 15).</li>
+      <li><strong>Планировщик думает, что строк МНОГО</strong> (переоценка) → выбирает полное сканирование и
+        <code>Hash Join</code>, хотя хватило бы индекса. Медленнее, чем могло быть.</li>
+    </ul>
+
+    <h2>Когда оценка ломается</h2>
+    <table>
+      <thead><tr><th>Причина</th><th>Что происходит</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Устаревшая статистика</strong></td><td>Данные изменились, а числа в статистике — старые. Самая частая причина</td></tr>
+        <tr><td><strong>Коррелированные колонки</strong></td><td>Условия считаются <em>независимыми</em>. Пример: <code>city='Сургут' AND region='ХМАО'</code> — одно влечёт другое, доля строк сильно недооценивается</td></tr>
+        <tr><td><strong>Функция над колонкой</strong></td><td><code>WHERE lower(email) = '…'</code> не попадает в статистику колонки → грубая оценка</td></tr>
+        <tr><td><strong>Неравномерные данные</strong></td><td>Не всех значений хватает в списке частых (<code>most_common_vals</code>), «хвост» оценивается наугад</td></tr>
+        <tr><td><strong>Соединения таблиц</strong></td><td>Ошибки накапливаются: недооценил каждую из двух таблиц — сильно недооценил результат</td></tr>
+      </tbody>
+    </table>
+    <h2>Как увидеть проблему в плане</h2>
+    <p>Это — то, зачем нужны оценки в <code>EXPLAIN</code> (глава 13). Сравниваем <strong>оценку</strong> и
+      <strong>факт</strong> по числу строк:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Seq Scan on orders  (cost=0.00..8000.00 rows=5000 width=24)
+                    (actual time=0.02..380.90 rows=480000 loops=1)
+                                      └─ оценка    └─ факт
+Оценка 5 000, факт 480 000 → расхождение ≈ в 96 раз
+</code></pre>
+    </div>
+    <p>Если расхождение <strong>в разы и порядки</strong> — планировщик «слеп», и план почти наверняка
+      неоптимален. Если оценка близка к факту — план выбран «правильно», и искать надо в другом месте.</p>
+
+    <h2>Как это чинить</h2>
+    <ol>
+      <li><strong>Обновить статистику:</strong> <code>ANALYZE orders;</code> — самый простой и частый шаг.</li>
+      <li><strong>Повысить детальность:</strong>
+        <code>ALTER TABLE orders ALTER COLUMN status SET STATISTICS 500;</code> — при больших и неоднородных
+        распределениях.</li>
+      <li><strong>Расширенная статистика по коррелированным колонкам:</strong>
+        <div class="codewrap">
+          <pre><code class="language-sql">CREATE STATISTICS st_city_region (dependencies)
+ON city, region FROM addresses;
+ANALYZE addresses;</code></pre>
+        </div>
+        Это лечение случая «city и region связаны».</li>
+      <li><strong>Убрать функцию над колонкой</strong> из условия (или сделать функциональный индекс, глава 9).</li>
+    </ol>
+
+    <div class="box note">
+      <span class="t">Как это связано с другими главами</span>
+      <p>Мы разобрались, <em>почему</em> оценки ошибаются. Дальше учимся <strong>видеть</strong> это в плане
+        (глава 13), понимать <strong>типы узлов</strong> (главы 14–15) и <strong>чинить</strong> (глава 18).</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Кардинальность — это <strong>оценка числа строк</strong>, и почти все плохие планы родом из неё.
+        Смотрим в плане расхождение оценки и факта по <code>rows</code>: в разы → проблема. Чиним статистикой
+        (<code>ANALYZE</code>, <code>target</code>, <code>CREATE STATISTICS</code>) и убираем функции над
+        колонками.</p>
+    </div>
+
     <div class="pager">
-      <a href="sql11-planner-stats.html">← <span class="sp">Как планировщик выбирает план: стоимость и статистика</span></a>
-      <a href="sql13-explain.html"><span class="sp">EXPLAIN и EXPLAIN ANALYZE: читаем план</span> →</a>
+      <a href="sql11-planner-stats.html">← <span class="sp">Как планировщик выбирает план</span></a>
+      <a href="sql13-explain.html"><span class="sp">EXPLAIN и EXPLAIN ANALYZE</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

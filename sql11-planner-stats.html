@@ -3,8 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 11 · Как планировщик выбирает план: стоимость и статистика</title>
+<title>Глава 11 · Как планировщик выбирает план</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,91 @@
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
     <h1>Глава 11. Как планировщик выбирает план: стоимость и статистика</h1>
-    <p class="sublead">Откуда берётся стоимость и при чём тут статистика</p>
-    <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Прежде чем читать планы (главы 13–17), нужно понять, кто их составляет и на основе чего.
+      Эта глава — подводка ко всей части.</p>
+
+    <h2>Задача планировщика</h2>
+    <p>Один и тот же запрос можно выполнить по-разному: читать таблицу целиком или по индексу, соединять
+      таблицы тем или иным способом, в каком порядке. Способы выполнения в PostgreSQL называются
+      <strong>планами</strong>.</p>
+    <p><strong>Планировщик</strong> (planner) перебирает варианты и выбирает тот, который считает самым дешёвым.
+      Именно этот план ты видишь в <code>EXPLAIN</code> (глава 13).</p>
+
+    <h2>Что такое «стоимость» и почему это не миллисекунды</h2>
+    <p>Планировщик не знает заранее реальное время (оно зависит от дисков, кэша, нагрузки). Поэтому он
+      пользуется <strong>условными единицами</strong> — <em>стоимостью</em>. В основе — простые предположения:</p>
+    <ul>
+      <li>прочитать страницу данных последовательно — <code>seq_page_cost</code> (по умолчанию 1.0);</li>
+      <li>прочитать страницу «вразнобой» (по индексу) — <code>random_page_cost</code> (по умолчанию 4.0);</li>
+      <li>обработать строку процессором — <code>cpu_tuple_cost</code> и т. п.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Отсюда — практический вывод</span>
+      <p>Индекс побеждает, когда строк мало (несколько «случайных» чтений дешевле полного сканирования).
+        А когда строк много, <code>Seq Scan</code> может оказаться дешевле по этим самым условным единицам
+        (глава 14).</p>
     </div>
+    <p>Посмотреть настройки можно так:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SHOW seq_page_cost;      -- 1
+SHOW random_page_cost;   -- 4   (для SSD часто снижают до ~1.1)
+SHOW cpu_tuple_cost;     -- 0.01</code></pre>
+    </div>
+
+    <h2>Откуда планировщик берёт числа — статистика</h2>
+    <p>Чтобы оценить стоимость, нужно знать, <strong>сколько строк</strong> придётся обработать. Это берётся из
+      <strong>статистики</strong>, которую PostgreSQL собирает по таблицам:</p>
+    <ul>
+      <li><code>pg_class.reltuples</code> — приблизительное число строк в таблице;</li>
+      <li><code>pg_stats</code> — подробности по каждой колонке (см. ниже).</li>
+    </ul>
+
+    <table>
+      <thead><tr><th>Что хранит статистика</th><th>Зачем планировщику</th></tr></thead>
+      <tbody>
+        <tr><td><code>n_distinct</code> — сколько различных значений</td><td>Оценить, насколько «селективно» условие</td></tr>
+        <tr><td><code>null_frac</code> — доля NULL</td><td>Понять, сколько строк отсечёт проверка на NULL</td></tr>
+        <tr><td>гистограмма значений</td><td>Оценить диапазонные условия (<code>&gt;</code>, <code>BETWEEN</code>)</td></tr>
+        <tr><td><code>most_common_vals</code> — частые значения</td><td>Оценить условие по конкретному значению</td></tr>
+        <tr><td><code>correlation</code> — «упорядоченность» данных</td><td>Понять, будут ли чтения по индексу последовательными</td></tr>
+      </tbody>
+    </table>
+
+    <div class="codewrap">
+      <p class="cap">Посмотреть статистику по колонке</p>
+      <pre><code class="language-sql">SELECT attname, n_distinct, null_frac, correlation
+FROM   pg_stats
+WHERE  tablename = 'orders';</code></pre>
+    </div>
+
+    <h2>Когда статистика собирается</h2>
+    <ul>
+      <li><strong><code>ANALYZE</code></strong> — собирает статистику вручную (можно по одной таблице:
+        <code>ANALYZE orders;</code>).</li>
+      <li><strong><code>autovacuum</code></strong> — запускает анализ автоматически после изменений (глава 23).</li>
+      <li><strong><code>default_statistics_target</code></strong> — «детальность» статистики (по умолчанию 100).
+        Чем выше, тем точнее оценка, но дольше сбор.</li>
+    </ul>
+
+    <div class="box warn">
+      <span class="t">Главная ловушка</span>
+      <p>Если данные изменились, а статистика устарела — планировщик оценит строки <strong>неверно</strong> и
+        выберет плохой план. Это самая частая причина «внезапно медленных» запросов. Подробно — глава 12.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Планировщик выбирает план по <strong>стоимости</strong> (условные единицы, не миллисекунды), а стоимость
+        считает по <strong>статистике</strong>. Если статистика неверна — план будет плохим. Как именно это
+        проявляется — в главе 12, а как увидеть в плане — в главе 13.</p>
+    </div>
+
     <div class="pager">
       <a href="sql10-index-types-cost.html">← <span class="sp">Другие типы индексов и их цена</span></a>
-      <a href="sql12-cardinality.html"><span class="sp">Оценка кардинальности: почему планы ошибаются</span> →</a>
+      <a href="sql12-cardinality.html"><span class="sp">Оценка кардинальности</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

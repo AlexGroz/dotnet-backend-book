@@ -19,85 +19,228 @@
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
     <h1>Глава 13. EXPLAIN и EXPLAIN ANALYZE: читаем план</h1>
-    <p class="sublead">Мы знаем, что планировщик выбирает план по стоимости (глава 11). Теперь — как этот план
-      прочитать: без этого оптимизация невозможна.</p>
+    <p class="sublead">Разбираем главный инструмент оптимизации — по шагам и на конкретных числах.
+      К концу главы ты сможешь прочитать план и назвать, что именно в нём не так.</p>
 
-    <h2>Что такое план</h2>
-    <p>План — это <strong>дерево узлов</strong>. Каждый узел делает одну операцию: прочитать таблицу, найти
-      строки по индексу, отсортировать, соединить, сгруппировать. Узлы вложены: родитель получает данные
-      от дочерних.</p>
+    <h2>Сначала — зачем это нужно</h2>
+    <p>Планировщик перед выполнением запроса <strong>прикидывает</strong>, как его выполнить: с чего начать,
+      какие таблицы читать целиком, какие — по индексу, как соединить. Этот «план» и есть <code>EXPLAIN</code>.
+      Проблема в том, что планировщик часто <strong>ошибается в оценках</strong> (глава 12) — и тогда план
+      получается плохим. Наша задача — увидеть это расхождение.</p>
 
-    <h2>EXPLAIN vs EXPLAIN ANALYZE</h2>
+    <h2>EXPLAIN и EXPLAIN ANALYZE — в чём разница</h2>
     <ul>
-      <li><code>EXPLAIN</code> — только <strong>предполагаемый</strong> план (запрос не выполняется).</li>
-      <li><code>EXPLAIN ANALYZE</code> — <strong>выполняет</strong> запрос и добавляет фактические метрики.
-        Именно это нужно для оптимизации.</li>
-      <li><code>BUFFERS</code> — добавить статистику по страницам (из кэша / с диска).</li>
+      <li><code>EXPLAIN</code> — показывает только <strong>предположение</strong> планировщика. Запрос
+        <em>не выполняется</em>.</li>
+      <li><code>EXPLAIN ANALYZE</code> — запрос <strong>реально выполняется</strong>, и в вывод добавляются
+        <strong>фактические измерения</strong> (и время выполнения внизу).</li>
+      <li><code>BUFFERS</code> — добавляет, сколько страниц читалось из кэша и с диска.</li>
     </ul>
-    <div class="codewrap">
-      <pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS) SELECT ... ;</code></pre>
-    </div>
     <div class="box warn">
-      <span class="t">ВАЖНО</span>
-      <p><code>EXPLAIN ANALYZE</code> <strong>реально выполняет</strong> запрос. Для тяжёлых запросов на
-        продакшене — снимайте план на реплике или в транзакции: <code>BEGIN; EXPLAIN ANALYZE …; ROLLBACK;</code></p>
+      <span class="t">Важно</span>
+      <p><code>EXPLAIN ANALYZE</code> <strong>выполняет запрос по-настоящему</strong> — то есть меняет данные,
+        если это <code>UPDATE</code>/<code>DELETE</code>, и создаёт нагрузку. Для «тяжёлых» запросов на
+        продакшене снимайте план на реплике или так: <code>BEGIN; EXPLAIN ANALYZE …; ROLLBACK;</code></p>
     </div>
 
-    <h2>Как читать метрики узла</h2>
+    <h2>Как выглядит вывод (полный пример)</h2>
+    <p>Вот запрос и его план целиком. Ниже разберём каждую строчку.</p>
     <div class="codewrap">
-      <pre><code class="language-text">Seq Scan on orders  (cost=0.00..8000.0 rows=5000 width=24)
-                    (actual time=0.02..380.9 rows=480000 loops=1)
-      ▲ оценка планировщика                     ▲ фактические значения</code></pre>
+      <pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS)
+SELECT o.id, c.name
+FROM   orders o
+JOIN   customers c ON c.id = o.customer_id
+WHERE  o.status = 'NEW'
+ORDER  BY o.created_at DESC
+LIMIT  50;</code></pre>
     </div>
+    <div class="codewrap">
+      <p class="cap">Вывод (план)</p>
+      <pre><code class="language-text">Limit  (cost=9430.10..9430.22 rows=50 width=40)
+       (actual time=405.771..405.779 rows=50 loops=1)
+  -&gt;  Sort  (cost=9430.10..9430.22 rows=50 width=40)
+            (actual time=405.770..405.772 rows=50 loops=1)
+        Sort Key: o.created_at DESC
+        Sort Method: quicksort  Memory: 28kB
+        -&gt;  Hash Join  (cost=1120.50..9428.90 rows=50 width=40)
+                       (actual time=8.311..402.774 rows=50 loops=1)
+              Hash Cond: (c.id = o.customer_id)
+              -&gt;  Seq Scan on orders o  (cost=0.00..8000.00 rows=5000 width=24)
+                                        (actual time=0.02..380.90 rows=480000 loops=1)
+                    Filter: (status = 'NEW'::text)
+                    Rows Removed by Filter: 4520000
+              -&gt;  Hash  (cost=1020.00..1020.00 rows=200 width=20)
+                         (actual time=8.10..8.10 rows=200 loops=1)
+                    -&gt;  Seq Scan on customers c  (cost=0.00..1020.00 rows=200 width=20)
+                                                 (actual time=0.01..5.00 rows=200 loops=1)
+Planning Time: 1.204 ms
+Execution Time: 405.771 ms</code></pre>
+    </div>
+    <p>План читается <strong>как дерево</strong>: строки со стрелками <code>-&gt;</code> — это «дети»;
+      они выполняются раньше родителя. То есть данные текут снизу вверх: сначала читаются таблицы, потом
+      соединяются, потом сортируются, потом берётся <code>LIMIT</code>.</p>
+    <h2>Главное: в строке узла — ДВА набора чисел</h2>
+    <p>Это самое важное в главе. Посмотри на строку одного узла:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Seq Scan on orders o  (cost=0.00..8000.00 rows=5000 width=24)
+                      (actual time=0.02..380.90 rows=480000 loops=1)
+                      └──────────────┬──────────────┘
+                        вторая скобка начинается со слова "actual"
+</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Правило, которое всё объясняет</span>
+      <p>У узла <strong>две скобки</strong>:</p>
+      <ul>
+        <li><strong>Первая скобка</strong> (до слова <code>actual</code>) — это <strong>ОЦЕНКА</strong>:
+          то, что планировщик <em>предполагал</em> <strong>ДО</strong> выполнения.</li>
+        <li><strong>Вторая скобка</strong> (после <code>actual</code>) — это <strong>ФАКТ</strong>: то, что
+          <em>реально</em> получилось <strong>ВО ВРЕМЯ</strong> выполнения.</li>
+      </ul>
+      <p>«Оценка» нужна планировщику, чтобы выбрать план. «Факт» нужен <em>нам</em> — чтобы понять, угадал он
+        или нет.</p>
+    </div>
+
+    <h3>Что означает каждый кусочек строки</h3>
     <table>
-      <thead><tr><th>Часть</th><th>Что означает</th></tr></thead>
+      <thead><tr><th>Что видно</th><th>Это оценка или факт?</th><th>Что означает</th><th>В примере</th></tr></thead>
       <tbody>
-        <tr><td><code>cost=начало..итого</code></td><td>Стоимость «до первой строки» и «до последней» (в условных единицах)</td></tr>
-        <tr><td><code>rows</code></td><td><strong>Оценка</strong> числа строк на выходе узла</td></tr>
-        <tr><td><code>width</code></td><td>Средний размер строки в байтах</td></tr>
-        <tr><td><code>actual time=старт..итого</code></td><td>Фактическое время: до первой строки и до конца</td></tr>
-        <tr><td><code>actual rows</code></td><td><strong>Фактическое</strong> число строк</td></tr>
-        <tr><td><code>loops</code></td><td>Сколько раз узел выполнялся</td></tr>
+        <tr><td><code>cost=0.00..8000.00</code></td><td>ОЦЕНКА</td><td>Стоимость в условных единицах (не миллисекунды!)</td><td>—</td></tr>
+        <tr><td>первое <code>rows=5000</code></td><td>ОЦЕНКА</td><td>Сколько строк планировщик <em>ожидал</em> получить</td><td>5 000</td></tr>
+        <tr><td><code>width=24</code></td><td>ОЦЕНКА</td><td>Средний размер строки в байтах</td><td>24 б</td></tr>
+        <tr><td><code>actual time=0.02..380.90</code></td><td>ФАКТ</td><td>Миллисекунды: до первой строки .. до последней</td><td>380,9 мс</td></tr>
+        <tr><td>второе <code>rows=480000</code><br><small>(внутри <code>actual …</code>)</small></td><td>ФАКТ</td><td>Сколько строк <em>реально</em> прошло через узел</td><td>480 000</td></tr>
+        <tr><td><code>loops=1</code></td><td>ФАКТ</td><td>Сколько раз узел выполнялся</td><td>1</td></tr>
       </tbody>
     </table>
 
-    <div class="box note">
-      <span class="t">Главная формула чтения</span>
-      <p><strong>Общее время узла ≈ <code>actual time</code> × <code>loops</code>.</strong> Узел с маленьким
-        <code>actual time</code>, но большим <code>loops</code>, может «съедать» всё время. И наоборот —
-        не пугайтесь большого <code>actual time</code> у узла с <code>loops = 1</code>, если он
-        «тяжёлый» сам по себе.</p>
+    <div class="box tip">
+      <span class="t">Про «actual rows»</span>
+      <p>Слов «actual rows» в выводе <strong>нет</strong> — это просто разговорное название для
+        <strong>второго <code>rows=…</code></strong> (того, что стоит внутри <code>actual …</code>).
+        В примере: оценка <code>rows=5000</code>, факт <code>rows=480000</code>.</p>
     </div>
 
-    <h2>Порядок разбора плана</h2>
+    <h2>Где искать Execution Time</h2>
+    <p><code>Execution Time</code> и <code>Planning Time</code> печатаются <strong>в самом низу</strong> вывода
+      — и <strong>только</strong> если указан <code>ANALYZE</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Planning Time: 1.204 ms      ← сколько планировщик строил план
+Execution Time: 405.771 ms   ← сколько запрос реально выполнялся</code></pre>
+    </div>
+    <ul>
+      <li><strong>Execution Time</strong> — «сколько всего выполнялся запрос». С него начинаем разбор.</li>
+      <li><strong>Planning Time</strong> — сколько строился план. Важно, если запрос простой, а время большое.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Без ANALYZE этих строк не будет</span>
+      <p>При обычном <code>EXPLAIN</code> вывод обрывается на последнем узле: ни <code>actual …</code>,
+        ни <code>Execution Time</code> там нет. Поэтому для оптимизации всегда используем
+        <code>EXPLAIN (ANALYZE, BUFFERS)</code>.</p>
+    </div>
+
+    <h2>Как найти «горячий» узел (где уходит время)</h2>
+    <p>Читаем правило: <code>actual time=A..B</code> — узел выполнялся от <code>A</code> до <code>B</code>
+      миллисекунд, <strong>включая работу своих детей</strong>. Поэтому:</p>
     <ol>
-      <li>Смотрим <code>Execution Time</code> — сколько выполняется запрос.</li>
-      <li>Находим узлы с наибольшим <strong>total time</strong> (<code>actual time × loops</code>) — это
-        «горячие точки».</li>
-      <li>Сравниваем <code>rows</code> (оценка) и <code>actual rows</code> (факт). <strong>Большое
-        расхождение</strong> = плохая статистика = неверный план (глава 12).</li>
-      <li>Смотрим способ доступа к данным (<code>Seq Scan</code>, <code>Index Scan</code>…) — глава 14.</li>
-      <li>Смотрим, как соединены таблицы (глава 15).</li>
+      <li>Если <code>loops</code> больше 1 — умножаем итоговое время на число циклов:
+        <strong>суммарное время ≈ <code>B × loops</code></strong>.</li>
+      <li>Чтобы понять <strong>собственную</strong> работу узла, вычитаем из его времени время детей.</li>
+    </ol>
+    <p>Разберём наш план — выпишем времена и посчитаем:</p>
+    <table>
+      <thead><tr><th>Узел</th><th><code>actual time</code> (B)</th><th><code>loops</code></th><th>Время узла</th><th>Своя работа</th></tr></thead>
+      <tbody>
+        <tr><td><code>Seq Scan on orders</code></td><td>380,90</td><td>1</td><td>≈ 380,9 мс</td><td><strong>≈ 380,9 мс</strong> (детей нет)</td></tr>
+        <tr><td><code>Hash</code></td><td>8,10</td><td>1</td><td>≈ 8,1 мс</td><td>≈ 8,1 мс</td></tr>
+        <tr><td><code>Hash Join</code></td><td>402,77</td><td>1</td><td>≈ 402,8 мс</td><td>≈ 402,8 − 380,9 − 8,1 ≈ <strong>14 мс</strong></td></tr>
+        <tr><td><code>Sort</code></td><td>405,77</td><td>1</td><td>≈ 405,8 мс</td><td>≈ 405,8 − 402,8 ≈ <strong>3 мс</strong></td></tr>
+      </tbody>
+    </table>
+    <p><strong>Вывод:</strong> почти всё время (≈ 381 мс из 406) съедает один узел —
+      <code>Seq Scan on orders</code>. У остальных «своя» работа измеряется милисекундами. Значит, смотреть надо
+      именно на него.</p>
+
+    <div class="box tip">
+      <span class="t">Пример, где спасает умножение на loops</span>
+      <p>Бывает так, что у узла <em>маленькое</em> время, но он выполняется тысячи раз:</p>
+      <pre><code class="language-text">-&gt;  Index Scan on items  (actual time=0.02..0.90 rows=5 loops=1000)
+                            per_loop 0.90 мс × 1000 циклов ≈ 900 мс суммарно</code></pre>
+      <p>0,9 мс выглядит безобидно, но <code>loops=1000</code> превращает это в 900 мс. Поэтому
+        <strong>всегда смотрим на <code>loops</code></strong>.</p>
+    </div>
+    <h2>Разбор примера по шагам (с ответом)</h2>
+    <p>Ниже — тот же план, но разобранный по шагам. Сначала попробуй сам, потом сравни с ответом.</p>
+
+    <h3>Шаг 1. Сколько выполняется запрос?</h3>
+    <p>Смотрим в самый низ: <code>Execution Time: 405.771 ms</code> — запрос идёт <strong>≈ 406 мс</strong>.</p>
+
+    <h3>Шаг 2. Где уходит время?</h3>
+    <p>Считаем «свою работу» узлов (как в таблице выше): главный вклад —
+      <code>Seq Scan on orders</code>, <strong>≈ 381 мс</strong>. Остальные узлы — миллисекунды. Значит,
+      проблема именно здесь.</p>
+
+    <h3>Шаг 3. Угадал ли планировщик?</h3>
+    <p>Сравниваем оценку и факт у этого узла:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">rows=5000     ← ОЦЕНКА: планировщик думал, что подойдёт 5 000 строк
+rows=480000   ← ФАКТ:  реально подошло 480 000 строк
+
+Расхождение ≈ в 96 раз (недооценка)</code></pre>
+    </div>
+    <p>Это <strong>и есть «неверная оценка кардинальности»</strong> (глава 12): планировщик считал, что строк
+      мало, и выбрал план, подходящий для маленького набора.</p>
+
+    <h3>Шаг 4. Что ещё видно</h3>
+    <div class="codewrap">
+      <pre><code class="language-text">Filter: (status = 'NEW'::text)
+Rows Removed by Filter: 4520000</code></pre>
+    </div>
+    <p>Узел прочитал <strong>5 000 000 строк</strong> (480 000 + 4 520 000), чтобы оставить 480 000. То есть
+      таблица читается <strong>целиком</strong> (Seq Scan), а фильтр по <code>status</code> отбрасывает
+      почти всё уже <em>после</em> чтения.</p>
+
+    <div class="box gold">
+      <span class="t">★ Ответ: что здесь не так</span>
+      <p><strong>Проблема:</strong> у таблицы <code>orders</code> нет индекса по <code>status</code>, а
+        статистика устарела — планировщик недооценил число строк в 96 раз и выбрал <code>Seq Scan</code>
+        (полное чтение таблицы).</p>
+      <p><strong>Что делать:</strong></p>
+      <ol>
+        <li>Обновить статистику: <code>ANALYZE orders;</code></li>
+        <li>Добавить индекс под фильтр и сортировку: <code>CREATE INDEX ON orders (status, created_at DESC);</code></li>
+        <li>Снова снять <code>EXPLAIN (ANALYZE, BUFFERS)</code> и проверить: должно появиться
+          <code>Index Scan</code> вместо <code>Seq Scan</code>, а расхождение <code>rows</code> — исчезнуть.</li>
+      </ol>
+    </div>
+
+    <h2>Алгоритм: как читать любой план</h2>
+    <ol>
+      <li><strong>Внизу</strong> находим <code>Execution Time</code> — общее время запроса.</li>
+      <li><strong>Находим горячий узел:</strong> для каждого узла считаем <code>actual time</code> ×
+        <code>loops</code>; вычитаем время детей, чтобы получить «свою работу». Самый большой — проблема.</li>
+      <li><strong>Сравниваем</strong> оценку <code>rows</code> и факт <code>rows</code> (внутри
+        <code>actual</code>). Расхождение в разы → плохая статистика (глава 12).</li>
+      <li><strong>Смотрим тип узла:</strong> <code>Seq Scan</code> на большой таблице — плохо (глава 14).</li>
+      <li><strong>Смотрим соединения:</strong> <code>loops</code> у Nested Loop, <code>Batches</code> у Hash
+        (глава 15).</li>
+      <li><strong>Смотрим память:</strong> <code>Sort Method: external merge Disk</code> и
+        <code>Batches &gt; 1</code> — мало <code>work_mem</code> (глава 17).</li>
     </ol>
 
-    <div class="codewrap">
-      <p class="cap">Пример: что здесь не так?</p>
-      <pre><code class="language-text">Hash Join  (cost=1120.5..9430.1 rows=50 width=40)
-           (actual time=8.311..402.774 rows=50 loops=1)
-  -&gt; Seq Scan on orders o  (cost=0.00..8000.0 rows=5000 width=24)
-                           (actual time=0.02..380.9 rows=480000 loops=1)
-        Filter: (status = 'NEW'::text)
-        Rows Removed by Filter: 4520000
-→ Оценка: 5 000 строк. Факт: 480 000. Расхождение почти в 100 раз:
-  статистика устарела → план неверный → Seq Scan вместо Index Scan.</code></pre>
+    <div class="box note">
+      <span class="t">Что дальше</span>
+      <p>Здесь мы учились <em>читать</em> план. Полный список полей и «красных флагов» — в главе 17;
+        как чинить найденное — в главе 18; типы соединений — в главе 15; способы сканирования — в главе 14.
+        А почему оценки вообще ошибаются — в главе 12.</p>
     </div>
 
     <div class="box gold">
       <span class="t">★ Что запомнить</span>
-      <p>План — дерево узлов; <code>EXPLAIN ANALYZE</code> показывает <strong>факт</strong>. Читаем: находим
-        дорогой узел по <code>actual time × loops</code> и сравниваем <code>rows</code> с
-        <code>actual rows</code>. Именно это расхождение — самая частая причина плохих планов.
-        Детальный список полей и «красные флаги» — в главе 17.</p>
+      <p>У каждого узла <strong>две скобки</strong>: до <code>actual</code> — <strong>оценка</strong>
+        планировщика, после <code>actual</code> — <strong>факт</strong>. <code>Execution Time</code> — в самом
+        низу (и только с <code>ANALYZE</code>). Горячий узел ищем через <code>actual time × loops</code> и
+        вычитание детей. Главный признак проблемы — расхождение <strong>оценки и факта по числу строк</strong>.</p>
     </div>
 
     <div class="pager">
