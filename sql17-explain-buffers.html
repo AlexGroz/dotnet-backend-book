@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 17 · Что искать в EXPLAIN (ANALYZE, BUFFERS)</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql18-fixes.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть V · Оптимизация запросов</div>
+    <h1>Глава 17. Что искать в EXPLAIN (ANALYZE, BUFFERS)</h1>
+    <p class="sublead">План — основной инструмент оптимизации. Разберём, какие поля читать и какие значения
+      считать «красными флагами».</p>
+
+    <h2>Оценка против факта</h2>
+    <p>У каждого узла есть <strong>оценка</strong> планировщика и — если указан <code>ANALYZE</code> —
+      <strong>факт</strong>. Весь смысл в сравнении этих двух чисел.</p>
+
+    <div class="codewrap">
+      <p class="cap">Пример вывода (фрагмент)</p>
+      <pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS)
+SELECT o.id, c.name
+FROM   orders o
+JOIN   customers c ON c.id = o.customer_id
+WHERE  o.status = 'NEW'
+ORDER  BY o.created_at DESC
+LIMIT  50;
+
+Hash Join  (cost=1120.5..9430.1 rows=50 width=40)
+           (actual time=8.311..402.774 rows=50 loops=1)
+  Hash Cond: (c.id = o.customer_id)
+  Buffers: shared hit=20114 read=5832
+  -&gt;  Seq Scan on orders o  (cost=0.00..8000.0 rows=5000 width=24)
+                             (actual time=0.02..380.9 rows=480000 loops=1)
+        Filter: (status = 'NEW'::text)
+        Rows Removed by Filter: 4520000
+        Buffers: shared hit=19500 read=5800
+  -&gt;  Hash  (actual time=8.1..8.1 rows=200 loops=1)
+        Buckets: 1024  Batches: 4  Memory Usage: 1024kB
+Sort Method: external merge  Disk: 25120kB
+Planning Time: 1.204 ms
+Execution Time: 405.771 ms</code></pre>
+    </div>
+
+    <p>Здесь сразу три «красных флага»: <code>Seq Scan</code> с огромным <code>Rows Removed by Filter</code>
+      (читаем миллионы строк, чтобы оставить часть), <code>Batches: 4</code> у Hash (не хватило памяти) и
+      сортировка на диск (<code>external merge Disk</code>).</p>
+
+    <h2>Поля, по которым читаем план</h2>
+    <table>
+      <thead><tr><th>Поле</th><th>Что означает и на что смотреть</th></tr></thead>
+      <tbody>
+        <tr><td><code>cost=.. rows=..</code></td><td>Оценка планировщика: полная стоимость и число строк</td></tr>
+        <tr><td><code>actual time=.. rows=.. loops=..</code></td><td>Факт. Общее время узла ≈ <code>actual time × loops</code></td></tr>
+        <tr><td><code>rows</code> vs <code>actual rows</code></td><td><strong>Главный сигнал.</strong> Расхождение в разы/порядки → плохая статистика → неверный план</td></tr>
+        <tr><td><code>loops</code></td><td>Сколько раз выполнялся узел. Большое значение у Nested Loop = неявный цикл</td></tr>
+        <tr><td><code>Buffers: hit / read</code></td><td><code>hit</code> — из кэша, <code>read</code> — с диска. Много <code>read</code> → много I/O</td></tr>
+        <tr><td><code>Rows Removed by Filter</code></td><td>Столько строк прочитали и <strong>выбросили</strong> → читаем лишнее, нужен индекс</td></tr>
+        <tr><td><code>Sort Method</code></td><td><code>Memory</code> — хорошо; <code>external merge Disk</code> — не хватило <code>work_mem</code></td></tr>
+        <tr><td><code>Hash: Batches / Memory Usage</code></td><td><code>Batches = 1</code> — всё в памяти; больше 1 → hash на диск</td></tr>
+        <tr><td><code>temp read/written</code></td><td>Временные файлы на диске (сортировки, hash, материализация)</td></tr>
+        <tr><td><code>Planning Time</code> / <code>Execution Time</code></td><td>Отделить построение плана от выполнения</td></tr>
+        <tr><td><code>Heap Fetches</code> (index-only scan)</td><td>Сколько раз всё же пришлось идти в таблицу</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Чек-лист «красных флагов»</span>
+      <ul>
+        <li><strong>Seq Scan</strong> на большой таблице там, где ожидался Index Scan.</li>
+        <li><strong>Nested Loop</strong> с большим числом <code>loops</code> (выбран из-за недооценки строк).</li>
+        <li><strong>Оценка строк сильно расходится</strong> с фактом (в разы или порядки).</li>
+        <li><strong>Sort / Hash на диск</strong> (<code>external merge</code>, <code>Batches &gt; 1</code>) — мало <code>work_mem</code>.</li>
+        <li><strong>Много <code>shared read</code></strong> — данные не в кэше.</li>
+        <li><strong>Огромный <code>Rows Removed by Filter</code></strong> — фильтр отсекает почти всё после чтения.</li>
+      </ul>
+    </div>
+
+    <div class="box warn">
+      <span class="t">Про <code>ANALYZE</code> на продакшене</span>
+      <p><code>EXPLAIN ANALYZE</code> <strong>выполняет</strong> запрос по-настоящему. Для тяжёлых запросов —
+        снимайте план на реплике или в транзакции: <code>BEGIN; EXPLAIN ANALYZE ...; ROLLBACK;</code></p>
+    </div>
+
+    <div class="pager">
+      <a href="sql16-diagnose.html">← <span class="sp">Диагностика медленного запроса</span></a>
+      <a href="sql18-fixes.html"><span class="sp">Как чинить</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 27 · Конвертация PL/SQL</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql28-convert-types-syntax.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть VII · Миграция из Oracle</div>
+    <h1>Глава 27. Конвертация PL/SQL: пакеты, автономные транзакции, NULL</h1>
+    <p class="sublead">Три самые болезненные вещи при переносе кода из Oracle. Именно о них спрашивают в
+      интервью.</p>
+
+    <h2>1. NULL и пустая строка</h2>
+    <p>В Oracle <strong>пустая строка <code>''</code> и NULL — это одно и то же</strong>. В PostgreSQL
+      <code>''</code> — <strong>обычная пустая строка</strong>, не NULL. Это ломает логику:</p>
+    <ul>
+      <li>проверки <code>IS NULL</code> перестают срабатывать для пустых строк;</li>
+      <li>ограничение <code>NOT NULL</code> в PostgreSQL <strong>пропустит</strong> пустую строку;</li>
+      <li>уникальность: в Oracle <code>''</code> = NULL, а NULL-ы в уникальном индексе допустимы; в PostgreSQL
+        NULL-ы по умолчанию <em>различны</em> (можно изменить через <code>NULLS NOT DISTINCT</code>, PG15+);</li>
+      <li>конкатенация: <code>NULL || 'x'</code> в Oracle даёт <code>'x'</code>, в PostgreSQL — NULL.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Что делали</span>
+      <p>Приводили данные при миграции (пустые строки → NULL там, где так было в Oracle), добавляли
+        <code>CHECK (col &lt;&gt; '')</code> или <code>NULLIF(col,'')</code> и переписывали проверки в коде.
+        Ошибки тут «тихие» — проявляются не сразу, поэтому это проверяют тестами эквивалентности (глава 28).</p>
+    </div>
+
+    <h2>2. PACKAGE — прямого аналога нет</h2>
+    <p>В Oracle пакет — это группа процедур/функций плюс состояние сессии (package variables). В PostgreSQL
+      <strong>пакетов нет</strong>. Варианты:</p>
+    <ul>
+      <li><strong>Схема как пространство имён</strong> — группировали функции в схему
+        (<code>pkg_orders.calculate_total(...)</code>).</li>
+      <li><strong>Префиксы в именах</strong> функций/процедур, если схема не подходила.</li>
+      <li><strong>Состояние сессии</strong> (package variables) эмулировали через временные таблицы или
+        <code>set_config</code>/GUC — либо (правильнее) убирали глобальное состояние.</li>
+      <li>В <strong>PostgreSQL 11+</strong> появились настоящие процедуры (<code>CREATE PROCEDURE</code>) с
+        управлением транзакциями — это помогло там, где раньше были только функции.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Честная формулировка для интервью</span>
+      <p>«Полноценных пакетов в PostgreSQL нет: функции группировали в схемы, а состояние сессии — либо
+        эмулировали, либо избавлялись от него при рефакторинге».</p>
+    </div>
+
+    <h2>3. PRAGMA AUTONOMOUS_TRANSACTION</h2>
+    <p>Автономная транзакция нужна, когда операция (например, запись в аудит/лог) должна
+      <strong>зафиксироваться независимо</strong> от основной транзакции — в том числе если основная
+      откатится. В PostgreSQL функции не управляют транзакциями так, как это делал Oracle.</p>
+    <ul>
+      <li><strong>Обходной путь:</strong> писать через <strong>отдельное соединение</strong> — расширение
+        <code>dblink</code> (или background worker): это отдельная сессия, значит своя транзакция.</li>
+      <li><strong>Архитектурно лучше:</strong> вынести аудит/логирование из транзакции — писать события в
+        очередь (таблица-очередь + фоновый воркер) или в отдельную лог-систему.</li>
+      <li>Формулировка: «точного аналога нет; где-то использовали <code>dblink</code>, где-то меняли
+        архитектуру, чтобы лог не зависел от основной транзакции».</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Три «боли» из вопроса: <strong><code>''</code> ≠ NULL</strong>, <strong>нет PACKAGE</strong>,
+        <strong>нет AUTONOMOUS_TRANSACTION</strong>. Каждая имеет обходной путь — но об этом надо честно
+        рассказать, а не делать вид, что «переносится один в один».</p>
+    </div>
+
+    <div class="pager">
+      <a href="sql26-locks-oracle-vs-pg.html">← <span class="sp">Блокировки: Oracle vs PostgreSQL</span></a>
+      <a href="sql28-convert-types-syntax.html"><span class="sp">Типы, синтаксис и план миграции</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

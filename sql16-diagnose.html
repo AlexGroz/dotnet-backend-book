@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 16 · Диагностика медленного запроса</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql17-explain-buffers.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть V · Оптимизация запросов</div>
+    <h1>Глава 16. Диагностика медленного запроса по шагам</h1>
+    <p class="sublead">Здесь начинается часть, посвящённая вопросу с собеседования. Принцип один:
+      <strong>сначала измерить и локализовать, потом менять</strong>.</p>
+
+    <h2>Порядок действий</h2>
+    <ol>
+      <li><strong>Убедиться, что тормозит именно SQL.</strong> Разложить время эндпоинта: приложение, сеть,
+        сериализация или база. По базе смотрят <code>pg_stat_statements</code> (запросы с наибольшим
+        <code>total_exec_time</code> / <code>mean_exec_time</code>), логи
+        (<code>log_min_duration_statement</code>), трейсы APM. Это сразу отсекает половину ложных версий.</li>
+      <li><strong>Снять реальный план выполнения.</strong> <code>EXPLAIN (ANALYZE, BUFFERS)</code> на
+        <strong>реальных</strong> параметрах: план зависит от значений в запросе. Важно: <code>ANALYZE</code>
+        реально <em>выполняет</em> запрос, поэтому на продакшене — осторожно (реплика или транзакция с
+        <code>ROLLBACK</code>).</li>
+      <li><strong>Найти самый дорогой узел.</strong> Идём по дереву плана и ищем, где сосредоточено время:
+        <code>actual time × loops</code>. Часто один-два узла «съедают» почти всё.</li>
+      <li><strong>Понять причину.</strong> Типичные корни: устаревшая статистика (плохая оценка
+        кардинальности, глава 12), отсутствие индекса (глава 7–9), <code>Seq Scan</code> на большой таблице
+        (глава 14), функция/приведение над колонкой в <code>WHERE</code>, нехватка памяти под сортировку или
+        хеш, неудачный тип соединения (глава 15), bloat (глава 23).</li>
+      <li><strong>Исправить и перепроверить.</strong> Индекс, статистика, переписанный запрос или настройки —
+        и снова план. Сравнить «до/после» по плану <em>и</em> по реальной нагрузке.</li>
+      <li><strong>Проверить эффект в приложении.</strong> Убедиться, что упала задержка эндпоинта (p95/p99),
+        а не только «время запроса в консоли», и что нет регрессий.</li>
+    </ol>
+
+    <div class="box tip">
+      <span class="t">Как найти «виновника» среди всех запросов</span>
+      <pre><code class="language-sql">-- 1) включить сбор статистики (нужно расширение pg_stat_statements)
+SELECT query, calls, mean_exec_time, total_exec_time
+FROM   pg_stat_statements
+ORDER  BY total_exec_time DESC
+LIMIT  20;</code></pre>
+    </div>
+
+    <div class="box warn">
+      <span class="t">Отдельная проблема: запрос перенесён из Oracle</span>
+      <p>В таком запросе часто осталась «оракловская» логика: соединения через <code>(+)</code>,
+        <code>ROWNUM</code>, <code>NVL</code>/<code>DECODE</code>, неявные преобразования типов, подсказки
+        (hints). В PostgreSQL подсказок нет, а неявные преобразования убивают использование индексов. Это
+        первое, что стоит проверить (подробно — глава 28).</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Порядок: <strong>локализовать → снять план → найти дорогой узел → понять причину → исправить →
+        измерить</strong>. Никогда не «оптимизируем наугад» — особенно для запроса, план которого в Oracle
+        был другим.</p>
+    </div>
+
+    <div class="pager">
+      <a href="sql15-join-algorithms.html">← <span class="sp">Алгоритмы соединений</span></a>
+      <a href="sql17-explain-buffers.html"><span class="sp">Что искать в EXPLAIN (ANALYZE, BUFFERS)</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

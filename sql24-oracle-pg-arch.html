@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 24 · Архитектурные различия Oracle и PostgreSQL</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql25-mvcc-oracle-vs-pg.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть VII · Миграция из Oracle</div>
+    <h1>Глава 24. Архитектурные различия Oracle и PostgreSQL</h1>
+    <p class="sublead">Прежде чем говорить о MVCC, блокировках и конвертации кода, полезно увидеть, что это
+      вообще за две разные системы. Эта глава — подводка ко всей части.</p>
+
+    <h2>Из чего состоит СУБД</h2>
+    <table>
+      <thead><tr><th></th><th>Oracle</th><th>PostgreSQL</th></tr></thead>
+      <tbody>
+        <tr><td>Модель процессов</td><td>Фоновые процессы инстанса + серверные процессы</td><td>Отдельный процесс на каждое соединение («backend») + фоновые процессы</td></tr>
+        <tr><td>Общая память</td><td>SGA (в т.ч. buffer cache, shared pool)</td><td><code>shared_buffers</code> + ОС-кэш страниц</td></tr>
+        <tr><td>Память на операцию</td><td>PGA, workarea</td><td><code>work_mem</code>, <code>maintenance_work_mem</code></td></tr>
+        <tr><td>Хранение прошлых версий</td><td>Undo-табличное пространство</td><td>Версии строк в самих таблицах</td></tr>
+        <tr><td>Журнал</td><td>Redo log</td><td>WAL (write-ahead log)</td></tr>
+        <tr><td>Обслуживание</td><td>Ассистенты (MMON и др.)</td><td><code>autovacuum</code>, <code>checkpointer</code>, <code>bgwriter</code></td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Что из этого следует практически</span>
+      <p>В PostgreSQL заметно больше «работы по дому» вынесено в отдельные процессы и параметры: очистка
+        старых версий (<code>autovacuum</code>), память на операции (<code>work_mem</code>). В Oracle часть
+        этого скрыта внутри инстанса и undo. Поэтому при миграции <strong>нельзя просто перенести схему</strong> —
+        нужно настроить поведение под новую архитектуру.</p>
+    </div>
+
+    <h2>Транзакции и DDL</h2>
+    <ul>
+      <li>В Oracle <strong>DDL фиксируется автоматически</strong> — его нельзя откатить.</li>
+      <li>В PostgreSQL <strong>DDL транзакционный</strong> — <code>CREATE</code>/<code>ALTER</code> можно
+        откатить, но DDL берёт сильные блокировки (глава 26).</li>
+    </ul>
+
+    <h2>Оптимизатор и статистика</h2>
+    <ul>
+      <li>Обе СУБД используют стоимостной оптимизатор (часть IV), но <strong>модель стоимости разная</strong>.</li>
+      <li>Статистика: Oracle — <code>DBMS_STATS</code>; PostgreSQL — <code>ANALYZE</code> (в том числе
+        автоматически через <code>autovacuum analyze</code>).</li>
+      <li>Подсказки планировщику (hints) в PostgreSQL <strong>отсутствуют</strong> — это одна из главных
+        практических разниц при переносе запросов.</li>
+    </ul>
+
+    <h2>Куда идём дальше</h2>
+    <ul>
+      <li><strong>MVCC</strong> — как хранятся версии данных и что это меняет (глава 25).</li>
+      <li><strong>Блокировки</strong> — как ведут себя чтение и запись (глава 26).</li>
+      <li><strong>Конвертация кода</strong> — пакеты, автономные транзакции, NULL (глава 27).</li>
+      <li><strong>Типы и синтаксис</strong> — <code>DATE</code>, <code>NUMBER</code>, <code>ROWNUM</code>,
+        <code>(+)</code> и план миграции (глава 28).</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Oracle и PostgreSQL — разные архитектуры: по-разному хранят прошлые версии данных, по-разному
+        обращаются с DDL и памятью. Именно поэтому миграция — это перенос <strong>поведения</strong>, а не
+        только схемы.</p>
+    </div>
+
+    <div class="pager">
+      <a href="sql23-vacuum-bloat.html">← <span class="sp">VACUUM, autovacuum и bloat</span></a>
+      <a href="sql25-mvcc-oracle-vs-pg.html"><span class="sp">MVCC: Oracle vs PostgreSQL</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

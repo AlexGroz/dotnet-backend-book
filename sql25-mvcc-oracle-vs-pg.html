@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 25 · MVCC: Oracle vs PostgreSQL</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql26-locks-oracle-vs-pg.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть VII · Миграция из Oracle</div>
+    <h1>Глава 25. MVCC: Oracle vs PostgreSQL</h1>
+    <p class="sublead">Мы уже разобрали MVCC в PostgreSQL (глава 21). Теперь сравним с Oracle — именно об этом
+      спрашивали в интервью.</p>
+
+    <h2>Общее</h2>
+    <p>В обеих СУБД действует один принцип: <strong>читатель видит согласованный снимок данных и не блокирует
+      писателя, а писатель не блокирует читателя</strong>. Различие — <em>где хранятся старые версии строк</em>,
+      и оно определяет поведение системы «в бою».</p>
+
+    <h2>Oracle</h2>
+    <ul>
+      <li>Актуальные данные — в таблицах, а <strong>прошлые версии — в undo</strong> (откатных сегментах).</li>
+      <li>Читатель получает согласованный снимок по <strong>SCN</strong> (system change number).</li>
+      <li>Читатели не блокируют писателей; писатели не блокируют читателей.</li>
+      <li>Если undo «перезаписался», долгий запрос получает
+        <code>ORA-01555: snapshot too old</code>.</li>
+    </ul>
+
+    <h2>PostgreSQL</h2>
+    <ul>
+      <li>MVCC — <strong>в самих страницах таблицы</strong>: у каждой версии строки есть метки видимости
+        (<code>xmin</code>/<code>xmax</code>) — глава 5.</li>
+      <li>При <code>UPDATE</code> создаётся <strong>новая версия строки</strong>; старая остаётся, пока её не
+        уберёт <code>VACUUM</code>.</li>
+      <li>Читатели не блокируют писателей; писатели не блокируют читателей.</li>
+      <li>Обратная сторона — <strong>bloat</strong> (раздувание) и важность <code>autovacuum</code>; долгие
+        транзакции <strong>мешают очистке</strong> (глава 23).</li>
+    </ul>
+
+    <table>
+      <thead><tr><th>Аспект</th><th>Oracle</th><th>PostgreSQL</th></tr></thead>
+      <tbody>
+        <tr><td>Где прошлые версии</td><td>В undo-сегментах</td><td>В самих таблицах (в страницах)</td></tr>
+        <tr><td>Снимок по</td><td>SCN</td><td>Метки видимости <code>xmin</code>/<code>xmax</code></td></tr>
+        <tr><td>Очистка версий</td><td>Автоматически, undo-пространство</td><td><code>VACUUM</code> / <code>autovacuum</code></td></tr>
+        <tr><td>Раздувание таблиц</td><td>Меньшая проблема (растёт undo)</td><td>Реальная проблема (bloat)</td></tr>
+        <tr><td>Опасность долгого запроса</td><td><code>ORA-01555 snapshot too old</code></td><td>Портит горизонт vacuum → тормозит очистку</td></tr>
+        <tr><td><code>UPDATE</code> строки</td><td>Изменение на месте + undo</td><td>Новая версия строки, старая ждёт vacuum</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box warn">
+      <span class="t">Что это значит на практике (главное для ответа)</span>
+      <p>После перехода на PostgreSQL нужно: <strong>настроить autovacuum</strong> под нагрузку,
+        <strong>не держать длинные транзакции</strong> и <strong>следить за bloat</strong>. Интенсивные
+        <code>UPDATE</code>/<code>DELETE</code> плодят версии, и без очистки таблицы и индексы «толстеют»,
+        а запросы замедляются. В Oracle эту работу во многом брало на себя undo-пространство.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Готовый ответ про MVCC (сжато)</span>
+      <p>«MVCC в обеих СУБД даёт главное: читатели не блокируют писателей. Различие — где хранятся прошлые
+        версии. В Oracle — в undo, снимок по SCN. В PostgreSQL — прямо в страницах таблиц
+        (<code>xmin/xmax</code>), а старые версии убирает <code>VACUUM</code>. Отсюда специфика PostgreSQL:
+        bloat, важность <code>autovacuum</code> и то, что долгие транзакции мешают очистке».</p>
+    </div>
+
+    <div class="pager">
+      <a href="sql24-oracle-pg-arch.html">← <span class="sp">Архитектурные различия</span></a>
+      <a href="sql26-locks-oracle-vs-pg.html"><span class="sp">Блокировки: Oracle vs PostgreSQL</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

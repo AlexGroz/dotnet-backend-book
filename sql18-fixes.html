@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 18 · Как чинить</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql19-case-endpoint.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть V · Оптимизация запросов</div>
+    <h1>Глава 18. Как чинить: статистика, индексы, переписывание, work_mem</h1>
+    <p class="sublead">Мы нашли причину в плане. Теперь — соответствие «причина → решение», от самого
+      частого к более редкому.</p>
+
+    <table>
+      <thead><tr><th>Что нашли</th><th>Что делаем</th></tr></thead>
+      <tbody>
+        <tr><td>Плохая оценка строк</td><td><code>ANALYZE</code>; поднять <code>default_statistics_target</code>; <code>CREATE STATISTICS</code> для коррелированных колонок</td></tr>
+        <tr><td><code>Seq Scan</code> на большой таблице</td><td>Индекс под условие фильтра/соединения: составной, частичный, покрывающий (<code>INCLUDE</code>) — глава 9</td></tr>
+        <tr><td>Функция/приведение над колонкой в <code>WHERE</code></td><td>Убрать (или сделать <em>функциональный</em> индекс), чтобы индекс стал применим</td></tr>
+        <tr><td>Sort / Hash на диск</td><td>Поднять <code>work_mem</code> (аккуратно: память на операцию); упростить сортировку</td></tr>
+        <tr><td>Прочитано много строк, оставлено мало</td><td>Частичный/покрывающий индекс, переписать фильтр</td></tr>
+        <tr><td>Дорогой <code>OFFSET</code> в пагинации</td><td>Keyset-пагинация (по <code>created_at, id</code>) вместо больших смещений</td></tr>
+        <tr><td>Очень большая таблица</td><td>Партиционирование (например, по дате); материализованные представления под агрегаты</td></tr>
+        <tr><td>Много I/O (<code>shared read</code>)</td><td>Уменьшить объём чтения (нужные колонки, индексы), проверить кэш и объём данных</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Переписывание запроса — частые приёмы</h2>
+    <ul>
+      <li><strong>Убрать вычисления над колонкой</strong> в условии: <code>WHERE to_char(dt,'YYYY')='2026'</code>
+        мешает индексу — лучше диапазон <code>dt &gt;= ... AND dt &lt; ...</code>.</li>
+      <li><strong><code>OR</code> → <code>UNION ALL</code></strong>, если ветки используют разные индексы.</li>
+      <li><strong><code>IN</code> → <code>EXISTS</code></strong> для больших подзапросов.</li>
+      <li><strong>Убрать лишние <code>JOIN</code></strong>, если таблицу не используем в результате.</li>
+      <li><strong>Ограничить выборку</strong> (<code>LIMIT</code>) и не тянуть лишние колонки.</li>
+      <li><strong>CTE</strong>: в PostgreSQL 12+ обычный <code>WITH</code> «инлайнится»; принудительный
+        <code>MATERIALIZED</code> может как помочь, так и навредить — проверяйте планом.</li>
+    </ul>
+
+    <h2>Настройки, которые реально влияют</h2>
+    <ul>
+      <li><code>work_mem</code> — память на сортировки и хеши (умножается на число операций, осторожно).</li>
+      <li><code>random_page_cost</code> — для SSD ниже (≈1.1), иначе планировщик недооценивает индексы.</li>
+      <li><code>effective_cache_size</code> — сколько данных «примерно в кэше»; влияет на выбор индекса.</li>
+      <li><code>enable_seqscan</code> / <code>enable_hashjoin</code> и т. п. — <strong>только для
+        диагностики</strong>, не как постоянное решение.</li>
+    </ul>
+
+    <div class="box warn">
+      <span class="t">Чего в PostgreSQL нет</span>
+      <p>Подсказок планировщику (как <code>/*+ INDEX(...) */</code> в Oracle). Есть расширение
+        <code>pg_hint_plan</code>, но правильнее починить статистику и индексы, а не «заставлять» план.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Правило оптимизации</span>
+      <p>Меняем <strong>одно</strong> и заново снимаем план. Иначе невозможно понять, что помогло.
+        И обязательно измеряем на реальной нагрузке (глава 30), а не только «в консоли».</p>
+    </div>
+
+    <div class="pager">
+      <a href="sql17-explain-buffers.html">← <span class="sp">Что искать в EXPLAIN (ANALYZE, BUFFERS)</span></a>
+      <a href="sql19-case-endpoint.html"><span class="sp">Кейс: тормозит эндпоинт</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

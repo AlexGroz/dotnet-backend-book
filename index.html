@@ -3,87 +3,45 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Backend на .NET: от кода до высокой нагрузки</title>
+<title>Backend-инженер: .NET и PostgreSQL — конспекты</title>
 <link rel="stylesheet" href="book.css">
 </head>
 <body>
 <div class="container">
 
   <div class="cover">
-    <div class="kicker">Учебник · Backend (.NET)</div>
-    <h1>Backend на .NET:<br>от кода до высокой нагрузки</h1>
-    <p>Постепенное руководство: каждая тема опирается на предыдущие, а перед основными темами идут
-       подводящие главы, без которых их не понять.</p>
-    <p style="margin-top:14px;font-size:14px;opacity:.9">
+    <div class="kicker">Конспекты · Backend</div>
+    <h1>Backend-инженер:<br>.NET и PostgreSQL</h1>
+    <p>Два связанных раздела в одном месте: как устроен высоконагруженный сервис на .NET и как работать с
+       данными в PostgreSQL — от простого запроса до чтения планов и миграции из Oracle.</p>
+    <p style="margin-top:14px;font-size:14px;opacity:.92">
       <span class="tag lead">подводящая</span> готовит почву &nbsp;
       <span class="tag core">основная</span> раскрывает тему</p>
   </div>
 
-  <h2 style="border:none;padding:0;margin:26px 0 4px">Содержание</h2>
-
-  <div class="toc-part">Часть I. Как всё устроено</div>
+  <div class="toc-part">Разделы</div>
   <div class="toc">
-    <a href="ch01-what-is-load.html"><span class="n">Глава 1</span><span class="t">Что такое нагрузка: throughput и latency</span><span class="d"><span class="tag lead">подводящая</span>Цель всей книги и главные метрики, к которым мы будем возвращаться</span></a>
-    <a href="ch02-computer-execution.html"><span class="n">Глава 2</span><span class="t">Как компьютер исполняет программу</span><span class="d"><span class="tag lead">подводящая</span>Процесс, поток, ядро CPU, память: базовая модель, на которой стоит всё дальше</span></a>
-    <a href="ch03-dotnet-runtime.html"><span class="n">Глава 3</span><span class="t">Как .NET исполняет код: CLR, IL, JIT</span><span class="d"><span class="tag lead">подводящая</span>От компиляции до машинного кода; почему код «прогревается»</span></a>
+    <a href="net.html">
+      <span class="n">Раздел 1 · .NET</span>
+      <span class="t">Backend на .NET: от кода до высокой нагрузки</span>
+      <span class="d">8 частей, 30 глав — модель памяти и GC, потоки и асинхронность, DI и жизненные циклы,
+        HTTP-конвейер, данные и кэш, производительность</span>
+    </a>
+    <a href="sql.html">
+      <span class="n">Раздел 2 · SQL</span>
+      <span class="t">SQL и PostgreSQL: от запроса до оптимизации</span>
+      <span class="d">8 частей, 31 глава — хранение и индексы, планировщик и планы, оптимизация запросов,
+        транзакции и MVCC, миграция из Oracle</span>
+    </a>
   </div>
 
-  <div class="toc-part">Часть II. Память</div>
-  <div class="toc">
-    <a href="ch04-stack-heap-types.html"><span class="n">Глава 4</span><span class="t">Стек, куча и типы: где живут данные</span><span class="d"><span class="tag lead">подводящая</span>Значимые и ссылочные типы, ссылки, первое знакомство с упаковкой</span></a>
-    <a href="ch05-gc.html"><span class="n">Глава 5</span><span class="t">Сборка мусора и цена аллокаций</span><span class="d"><span class="tag core">основная</span>Поколения, LOH, Server GC и почему важна скорость создания объектов</span></a>
-    <a href="ch06-allocations.html"><span class="n">Глава 6</span><span class="t">Аллокации на практике: строки, коллекции, пули</span><span class="d"><span class="tag core">основная</span>Как сократить мусор: boxing, StringBuilder, ArrayPool</span></a>
-  </div>
+  <div class="toc-part">Как устроены разделы</div>
+  <p>Внутри каждого раздела главы идут по порядку: сначала <strong>подводящие</strong> темы, затем
+    <strong>основные</strong>. Перед каждой основной темой есть всё необходимое, чтобы её понять, — поэтому
+    читать лучше по порядку.</p>
 
-  <div class="toc-part">Часть III. Конкурентность</div>
-  <div class="toc">
-    <a href="ch07-threads.html"><span class="n">Глава 7</span><span class="t">Потоки, ядра и планировщик: почему поток дорогой</span><span class="d"><span class="tag lead">подводящая</span>Стек потока, переключение контекста, как ОС распределяет время</span></a>
-    <a href="ch08-thread-pool.html"><span class="n">Глава 8</span><span class="t">Пул потоков и thread pool starvation</span><span class="d"><span class="tag core">основная</span>Зачем пул, что такое «голодание» и как его не словить</span></a>
-    <a href="ch09-synchronization.html"><span class="n">Глава 9</span><span class="t">Общие данные и синхронизация</span><span class="d"><span class="tag lead">подводящая</span>Гонки, lock, SemaphoreSlim, Interlocked — база перед асинхронностью</span></a>
-    <a href="ch10-io.html"><span class="n">Глава 10</span><span class="t">Ввод-вывод: блокирующее и неблокирующее ожидание</span><span class="d"><span class="tag lead">подводящая</span>Почему ожидание сети и диска особенное — прямое введение к async</span></a>
-    <a href="ch11-async.html"><span class="n">Глава 11</span><span class="t">Асинхронность: async/await и Task</span><span class="d"><span class="tag core">основная</span>Машина состояний, Task и ValueTask, правило «async до конца»</span></a>
-    <a href="ch12-parallelism.html"><span class="n">Глава 12</span><span class="t">Параллелизм с ограничениями и потоковая обработка</span><span class="d"><span class="tag core">основная</span>WhenAll, SemaphoreSlim, IAsyncEnumerable, backpressure</span></a>
-  </div>
-  <div class="toc-part">Часть IV. Сборка приложения</div>
-  <div class="toc">
-    <a href="ch13-loose-coupling.html"><span class="n">Глава 13</span><span class="t">Слабая связанность: зачем внедрять зависимости</span><span class="d"><span class="tag lead">подводящая</span>Интерфейсы, тестируемость и цена жёстких связей</span></a>
-    <a href="ch14-di.html"><span class="n">Глава 14</span><span class="t">Внедрение зависимостей и жизненные циклы</span><span class="d"><span class="tag core">основная</span>Transient / Scoped / Singleton и Captive Dependency</span></a>
-    <a href="ch15-hosting.html"><span class="n">Глава 15</span><span class="t">Точка входа и хостинг приложения</span><span class="d"><span class="tag lead">подводящая</span>Program, Generic Host, окружения — каркас, в который всё встраивается</span></a>
-    <a href="ch16-config.html"><span class="n">Глава 16</span><span class="t">Конфигурация и опции</span><span class="d"><span class="tag core">основная</span>IConfiguration, IOptions* и их lifetimes</span></a>
-  </div>
-
-  <div class="toc-part">Часть V. Путь запроса</div>
-  <div class="toc">
-    <a href="ch17-http-kestrel.html"><span class="n">Глава 17</span><span class="t">HTTP и веб-сервер: сокеты и Kestrel</span><span class="d"><span class="tag lead">подводящая</span>Как запрос попадает в приложение и что делает веб-сервер</span></a>
-    <a href="ch18-middleware.html"><span class="n">Глава 18</span><span class="t">Конвейер: middleware и маршрутизация</span><span class="d"><span class="tag core">основная</span>Путь запроса через приложение, Minimal API vs MVC</span></a>
-    <a href="ch19-logging.html"><span class="n">Глава 19</span><span class="t">Логирование и наблюдаемость</span><span class="d"><span class="tag core">основная</span>Структурные логи, метрики, трейсы, OpenTelemetry</span></a>
-    <a href="ch20-measurements.html"><span class="n">Глава 20</span><span class="t">Измерения и профилирование</span><span class="d"><span class="tag core">основная</span>p95/p99, dotnet-counters, BenchmarkDotNet, нагрузочные тесты</span></a>
-  </div>
-
-  <div class="toc-part">Часть VI. Данные и интеграции</div>
-  <div class="toc">
-    <a href="ch21-sql.html"><span class="n">Глава 21</span><span class="t">Реляционные БД и SQL: индексы и план запроса</span><span class="d"><span class="tag lead">подводящая</span>Что происходит в базе, прежде чем говорить про EF Core</span></a>
-    <a href="ch22-db-connection.html"><span class="n">Глава 22</span><span class="t">Подключение к БД из .NET: ADO.NET и пул соединений</span><span class="d"><span class="tag lead">подводящая</span>Соединение как ресурс, пул соединений, почему это про нагрузку</span></a>
-    <a href="ch23-ef-core.html"><span class="n">Глава 23</span><span class="t">ORM и EF Core эффективно</span><span class="d"><span class="tag core">основная</span>Tracking, проекции, N+1, массовые операции</span></a>
-    <a href="ch24-cache.html"><span class="n">Глава 24</span><span class="t">Кэширование</span><span class="d"><span class="tag core">основная</span>L1/L2, инвалидация, cache stampede</span></a>
-    <a href="ch25-channels.html"><span class="n">Глава 25</span><span class="t">Очереди и фоновая обработка</span><span class="d"><span class="tag core">основная</span>Channels, батчинг, BackgroundService</span></a>
-  </div>
-
-  <div class="toc-part">Часть VII. Эксплуатация</div>
-  <div class="toc">
-    <a href="ch26-resilience.html"><span class="n">Глава 26</span><span class="t">Устойчивость внешних вызовов</span><span class="d"><span class="tag core">основная</span>Таймауты, retry, circuit breaker, IHttpClientFactory</span></a>
-    <a href="ch27-scaling.html"><span class="n">Глава 27</span><span class="t">Масштабирование и отказоустойчивость</span><span class="d"><span class="tag core">основная</span>Rate limiting, health checks, горизонтальное масштабирование</span></a>
-  </div>
-
-  <div class="toc-part">Часть VIII. Практика</div>
-  <div class="toc">
-    <a href="ch28-case.html"><span class="n">Глава 28</span><span class="t">Сквозной разбор: высоконагруженный эндпоинт</span><span class="d"><span class="tag core">основная</span>Собираем всё вместе на одном примере</span></a>
-    <a href="ch29-migration.html"><span class="n">Глава 29</span><span class="t">Миграция legacy: .NET Framework → .NET Core</span><span class="d"><span class="tag core">основная</span>Боли перехода на практике</span></a>
-    <a href="ch30-interview.html"><span class="n">Глава 30</span><span class="t">Как отвечать на интервью</span><span class="d"><span class="tag core">основная</span>Структура ответа и шпаргалки по всем темам</span></a>
-  </div>
-
-  <p style="color:var(--muted);font-size:14px;margin-top:34px">
-    Книга в работе: главы наполняются постепенно, в порядке следования.
+  <p style="color:var(--muted);font-size:14px;margin-top:30px">
+    Конспекты в работе: главы наполняются постепенно. Материал для личной подготовки.
   </p>
 
 </div>

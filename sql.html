@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL и PostgreSQL: от запроса до оптимизации</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="container">
+  <div class="topbar"><div class="in">
+    <a href="index.html">← Все разделы</a>
+    <span class="booktitle">SQL и PostgreSQL</span>
+    <a href="net.html">Backend на .NET →</a>
+  </div></div>
+
+  <div class="cover">
+    <div class="kicker">Учебник · SQL и PostgreSQL</div>
+    <h1>SQL и PostgreSQL:<br>от запроса до оптимизации</h1>
+    <p>Постепенное руководство: от простого <code>SELECT</code> и устройства хранения — к чтению планов,
+       оптимизации запросов и миграции из Oracle. Каждая тема опирается на предыдущие.</p>
+    <p style="margin-top:14px;font-size:14px;opacity:.92">
+      <span class="tag lead">подводящая</span> готовит почву &nbsp;
+      <span class="tag core">основная</span> раскрывает тему</p>
+  </div>
+
+  <h2 style="border:none;padding:0;margin:26px 0 4px">Содержание</h2>
+
+  <div class="toc-part">SQL · Часть I. Фундамент</div>
+  <div class="toc">
+    <a href="sql01-why-db.html"><span class="n">Глава 1</span><span class="t">Зачем backend-разработчику база данных</span><span class="d"><span class="tag lead">подводящая</span>Роль СУБД в сервисе и почему всё «упирается» в данные</span></a>
+    <a href="sql02-relational-model.html"><span class="n">Глава 2</span><span class="t">Реляционная модель: таблицы, ключи, связи</span><span class="d"><span class="tag lead">подводящая</span>Строки, колонки, первичные и внешние ключи, нормализация</span></a>
+    <a href="sql03-sql-basics.html"><span class="n">Глава 3</span><span class="t">SQL: выборка, фильтрация и изменение данных</span><span class="d"><span class="tag lead">подводящая</span>SELECT, WHERE, ORDER BY, JOIN, INSERT, UPDATE, DELETE</span></a>
+  </div>
+
+  <div class="toc-part">SQL · Часть II. Как PostgreSQL хранит данные</div>
+  <div class="toc">
+    <a href="sql04-pages-heap.html"><span class="n">Глава 4</span><span class="t">Страницы и heap: где физически лежат строки</span><span class="d"><span class="tag lead">подводящая</span>Файлы, страницы по 8 КБ — база для понимания индексов и I/O</span></a>
+    <a href="sql05-row-versions.html"><span class="n">Глава 5</span><span class="t">Версии строк: почему UPDATE «создаёт» строку</span><span class="d"><span class="tag lead">подводящая</span>Мостик к MVCC и VACUUM — без этого не объяснить bloat</span></a>
+    <a href="sql06-data-types.html"><span class="n">Глава 6</span><span class="t">Типы данных и их особенности</span><span class="d"><span class="tag lead">подводящая</span>Числа, строки, дата/время, NULL — важно для миграции</span></a>
+  </div>
+
+  <div class="toc-part">SQL · Часть III. Индексы</div>
+  <div class="toc">
+    <a href="sql07-what-is-index.html"><span class="n">Глава 7</span><span class="t">Что такое индекс и как он ускоряет поиск</span><span class="d"><span class="tag lead">подводящая</span>Идея указателя, аналогия с алфавитным указателем в книге</span></a>
+    <a href="sql08-btree.html"><span class="n">Глава 8</span><span class="t">B-tree и порядок колонок в индексе</span><span class="d"><span class="tag core">основная</span>Как устроен главный индекс и почему порядок важен</span></a>
+    <a href="sql09-index-variants.html"><span class="n">Глава 9</span><span class="t">Составные, частичные, покрывающие и функциональные</span><span class="d"><span class="tag core">основная</span>Приёмы, которые реально ускоряют запросы</span></a>
+    <a href="sql10-index-types-cost.html"><span class="n">Глава 10</span><span class="t">Другие типы индексов и их цена</span><span class="d"><span class="tag core">основная</span>Hash, GIN, GiST, BRIN; во что обходятся индексы при записи</span></a>
+  </div>
+  <div class="toc-part">SQL · Часть IV. Планировщик и планы</div>
+  <div class="toc">
+    <a href="sql11-planner-stats.html"><span class="n">Глава 11</span><span class="t">Как планировщик выбирает план: стоимость и статистика</span><span class="d"><span class="tag lead">подводящая</span>Откуда берётся «стоимость» и при чём тут статистика</span></a>
+    <a href="sql12-cardinality.html"><span class="n">Глава 12</span><span class="t">Оценка кардинальности: почему планы ошибаются</span><span class="d"><span class="tag lead">подводящая</span>Главная причина плохих планов — неверная оценка числа строк</span></a>
+    <a href="sql13-explain.html"><span class="n">Глава 13</span><span class="t">EXPLAIN и EXPLAIN ANALYZE: читаем план</span><span class="d"><span class="tag core">основная</span>Дерево узлов, оценка против факта, порядок чтения</span></a>
+    <a href="sql14-scan-types.html"><span class="n">Глава 14</span><span class="t">Способы сканирования: Seq, Index, Index Only, Bitmap</span><span class="d"><span class="tag core">основная</span>Когда таблицу читают целиком, а когда — точечно</span></a>
+    <a href="sql15-join-algorithms.html"><span class="n">Глава 15</span><span class="t">Алгоритмы соединений: Nested Loop, Hash, Merge</span><span class="d"><span class="tag core">основная</span>Как соединяются таблицы и когда соединение — узкое место</span></a>
+  </div>
+
+  <div class="toc-part">SQL · Часть V. Оптимизация запросов</div>
+  <div class="toc">
+    <a href="sql16-diagnose.html"><span class="n">Глава 16</span><span class="t">Диагностика медленного запроса по шагам</span><span class="d"><span class="tag core">основная</span>Локализовать → снять план → найти узел → понять причину</span></a>
+    <a href="sql17-explain-buffers.html"><span class="n">Глава 17</span><span class="t">Что искать в EXPLAIN (ANALYZE, BUFFERS)</span><span class="d"><span class="tag core">основная</span>Поля, красные флаги и как читать их вместе</span></a>
+    <a href="sql18-fixes.html"><span class="n">Глава 18</span><span class="t">Как чинить: статистика, индексы, переписывание, work_mem</span><span class="d"><span class="tag core">основная</span>От причины к решению, с замером «до/после»</span></a>
+    <a href="sql19-case-endpoint.html"><span class="n">Глава 19</span><span class="t">Кейс: тормозит критический REST-эндпоинт</span><span class="d"><span class="tag core">основная</span>Разбор сквозного примера запроса, перенесённого из Oracle</span></a>
+  </div>
+  <div class="toc-part">SQL · Часть VI. Транзакции и конкурентность</div>
+  <div class="toc">
+    <a href="sql20-transactions-isolation.html"><span class="n">Глава 20</span><span class="t">Транзакции и уровни изоляции</span><span class="d"><span class="tag lead">подводящая</span>ACID, READ COMMITTED, REPEATABLE READ, SERIALIZABLE</span></a>
+    <a href="sql21-mvcc.html"><span class="n">Глава 21</span><span class="t">MVCC в PostgreSQL: версии строк и снимки</span><span class="d"><span class="tag core">основная</span>Как читатели и писатели не мешают друг другу</span></a>
+    <a href="sql22-locks.html"><span class="n">Глава 22</span><span class="t">Блокировки, deadlock и retry</span><span class="d"><span class="tag core">основная</span>Строки, таблицы, DDL и почему ошибки надо повторять</span></a>
+    <a href="sql23-vacuum-bloat.html"><span class="n">Глава 23</span><span class="t">VACUUM, autovacuum и bloat</span><span class="d"><span class="tag core">основная</span>Цена MVCC: очистка версий и «раздувание» таблиц</span></a>
+  </div>
+
+  <div class="toc-part">SQL · Часть VII. Миграция из Oracle</div>
+  <div class="toc">
+    <a href="sql24-oracle-pg-arch.html"><span class="n">Глава 24</span><span class="t">Архитектурные различия Oracle и PostgreSQL</span><span class="d"><span class="tag lead">подводящая</span>Инстанс, память, процессы и как это влияет на поведение</span></a>
+    <a href="sql25-mvcc-oracle-vs-pg.html"><span class="n">Глава 25</span><span class="t">MVCC: Oracle vs PostgreSQL</span><span class="d"><span class="tag core">основная</span>Undo и SCN против версий в страницах и VACUUM</span></a>
+    <a href="sql26-locks-oracle-vs-pg.html"><span class="n">Глава 26</span><span class="t">Блокировки: Oracle vs PostgreSQL</span><span class="d"><span class="tag core">основная</span>Чтение, запись, DDL и транзакционность</span></a>
+    <a href="sql27-convert-plsql.html"><span class="n">Глава 27</span><span class="t">Конвертация PL/SQL: пакеты, автономные транзакции, NULL</span><span class="d"><span class="tag core">основная</span>Где нет прямых аналогов и что делать</span></a>
+    <a href="sql28-convert-types-syntax.html"><span class="n">Глава 28</span><span class="t">Типы, синтаксис и план миграции</span><span class="d"><span class="tag core">основная</span>DATE, NUMBER, ROWNUM, (+) и порядок работ</span></a>
+  </div>
+
+  <div class="toc-part">SQL · Часть VIII. Практика</div>
+  <div class="toc">
+    <a href="sql29-dotnet-npgsql.html"><span class="n">Глава 29</span><span class="t">Работа с PostgreSQL из .NET</span><span class="d"><span class="tag core">основная</span>Npgsql, пул соединений, prepared statements, EF Core</span></a>
+    <a href="sql30-monitoring.html"><span class="n">Глава 30</span><span class="t">Мониторинг и эксплуатация</span><span class="d"><span class="tag core">основная</span>pg_stat_statements, блокировки, bloat, slow query log</span></a>
+    <a href="sql31-interview.html"><span class="n">Глава 31</span><span class="t">Как отвечать на интервью по SQL</span><span class="d"><span class="tag core">основная</span>Структура ответов по оптимизации и миграции</span></a>
+  </div>
+
+  <p style="color:var(--muted);font-size:14px;margin-top:34px">
+    Книга в работе: главы наполняются постепенно, в порядке следования.
+  </p>
+</div>
+</body>
+</html>
