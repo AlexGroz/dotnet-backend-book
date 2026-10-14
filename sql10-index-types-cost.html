@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 10 · Другие типы индексов и их цена</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,88 @@
   <div class="chapter">
     <div class="part">SQL · Часть III · Индексы</div>
     <h1>Глава 10. Другие типы индексов и их цена</h1>
-    <p class="sublead">Hash, GIN, GiST, BRIN и во что индексы обходятся при записи</p>
-    <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">B-tree покрывает почти всё, но бывают задачи и для других типов. И у любого индекса
+      есть цена — поговорим и о ней.</p>
+
+    <h2>Типы индексов в PostgreSQL</h2>
+    <table>
+      <thead><tr><th>Тип</th><th>Для чего</th><th>Когда брать</th></tr></thead>
+      <tbody>
+        <tr><td><strong>B-tree</strong> (по умолчанию)</td><td>Равенство, диапазоны, сортировка, префикс</td><td>95% случаев — начинайте с него</td></tr>
+        <tr><td><strong>Hash</strong></td><td>Только равенство (<code>=</code>)</td><td>Редко: B-tree умеет то же и больше</td></tr>
+        <tr><td><strong>GIN</strong></td><td>«Множества» внутри значения</td><td>Поиск по <code>jsonb</code>, массивам, полнотекстовый поиск</td></tr>
+        <tr><td><strong>GiST</strong></td><td>Сложные типы и «соседство»</td><td>Геоданные, диапазоны, поиск ближайшего</td></tr>
+        <tr><td><strong>BRIN</strong></td><td>Диапазоны блоков</td><td>Огромные таблицы с естественным порядком (например, по дате)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>GIN — когда значение «составное»</h3>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- поиск внутри jsonb
+CREATE INDEX ON events USING gin (payload);
+
+-- полнотекстовый поиск
+CREATE INDEX ON articles USING gin (to_tsvector('russian', body));</code></pre>
     </div>
+    <p>Ещё GIN (через расширение <code>pg_trgm</code>) — единственный способ ускорить
+      <code>LIKE '%фрагмент%'</code>, который B-tree не тянет (глава 8).</p>
+
+    <h3>BRIN — «мини-индекс» для огромных таблиц</h3>
+    <p>BRIN хранит не значения строк, а <strong>краткие диапазоны по блокам страниц</strong>. Занимает
+      копейки, но полезен, только если данные физически упорядочены (типично — таблица, куда пишут «по
+      времени», например журнал событий).</p>
+
+    <h2>Цена индексов</h2>
+    <p>Индекс ускоряет чтение, но у него есть четыре «счёта к оплате»:</p>
+    <table>
+      <thead><tr><th>Что стоит</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Место на диске и в памяти</strong></td><td>Индекс хранится отдельно и тоже кэшируется; иногда он сравним по размеру с таблицей</td></tr>
+        <tr><td><strong>Скорость записи</strong></td><td>Каждый <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code> обновляет <strong>все</strong> индексы таблицы</td></tr>
+        <tr><td><strong>Обслуживание</strong></td><td>Индексы «раздуваются» вместе с таблицей и требуют <code>VACUUM</code> / <code>REINDEX</code> (глава 23)</td></tr>
+        <tr><td><strong>Время планирования</strong></td><td>Чем больше индексов, тем дольше планировщик перебирает варианты (глава 11)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box warn">
+      <span class="t">Правило разумного минимума</span>
+      <p>Индекс должен <strong>отрабатывать конкретные запросы</strong>. Индекс «на всякий случай» только
+        замедляет запись и ест место. Если индекс давно никто не использовал — его стоит удалить.</p>
+    </div>
+
+    <h3>Как найти неиспользуемые индексы</h3>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT indexrelname, idx_scan
+FROM   pg_stat_user_indexes
+WHERE  idx_scan = 0          -- ни разу не использовался
+ORDER  BY pg_relation_size(indexrelid) DESC;</code></pre>
+    </div>
+    <p>Осторожно: «0 использований» может значить и «статистика недавно сброшена». Удаляйте только то, в чём
+      уверены.</p>
+
+    <div class="box note">
+      <span class="t">Как проверить размер индексов</span>
+      <pre><code class="language-sql">SELECT indexrelname,
+       pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM   pg_stat_user_indexes
+ORDER  BY pg_relation_size(indexrelid) DESC
+LIMIT  10;</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Начинайте с <strong>B-tree</strong> — его хватает почти всегда. Другие типы берите под задачу: GIN —
+        для <code>jsonb</code>/массивов/полнотекста, GiST — для гео и диапазонов, BRIN — для огромных
+        «по времени» таблиц. И помните про цену: место, замедление записи, обслуживание. Индексов должно быть
+        ровно столько, сколько нужно.</p>
+    </div>
+
     <div class="pager">
-      <a href="sql09-index-variants.html">← <span class="sp">Составные, частичные, покрывающие и функциональные индексы</span></a>
-      <a href="sql11-planner-stats.html"><span class="sp">Как планировщик выбирает план: стоимость и статистика</span> →</a>
+      <a href="sql09-index-variants.html">← <span class="sp">Составные, частичные, покрывающие индексы</span></a>
+      <a href="sql11-planner-stats.html"><span class="sp">Как планировщик выбирает план</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

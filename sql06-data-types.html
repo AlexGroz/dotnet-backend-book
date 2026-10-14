@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 6 · Типы данных и их особенности</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,103 @@
   <div class="chapter">
     <div class="part">SQL · Часть II · Как PostgreSQL хранит данные</div>
     <h1>Глава 6. Типы данных и их особенности</h1>
-    <p class="sublead">Числа, строки, дата и время, NULL</p>
-    <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Тип данных — это не формальность: он определяет, как значения сравниваются, индексируются
+      и сколько занимают. А при миграции из Oracle неверный тип приводит к «тихим» багам.</p>
+
+    <h2>Числа</h2>
+    <table>
+      <thead><tr><th>Тип</th><th>Для чего</th><th>Нюанс</th></tr></thead>
+      <tbody>
+        <tr><td><code>smallint</code> / <code>int</code> / <code>bigint</code></td><td>Целые числа (2 / 4 / 8 байт)</td><td>Берите с запасом: <code>int</code> хватает не всегда</td></tr>
+        <tr><td><code>numeric</code></td><td>Точные числа — <strong>деньги</strong>, бухгалтерия</td><td>Без ошибок округления, но медленнее целых</td></tr>
+        <tr><td><code>real</code> / <code>double precision</code></td><td>Приближённые (научные) вычисления</td><td><strong>Не для денег</strong>: накопятся копеечные расхождения</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Правило для денег</span>
+      <p>Только <code>numeric</code> (или целое число в минимальных единицах, например копейках).
+        <code>float</code> для денег — классическая ошибка.</p>
     </div>
+    <p>Первичные ключи: <code>GENERATED ... AS IDENTITY</code> (современный способ) или
+      <code>serial</code>/<code>bigserial</code> (старый, но распространённый).</p>
+
+    <h2>Строки</h2>
+    <ul>
+      <li><code>text</code> и <code>varchar(n)</code> — в PostgreSQL <strong>работают одинаково быстро</strong>;
+        разница только в ограничении длины.</li>
+      <li><code>varchar(n)</code> — если длину действительно нужно ограничивать;</li>
+      <li><code>char(n)</code> — <strong>не используйте</strong>: он дополняет строку пробелами до длины
+        <code>n</code>, что даёт странные сравнения.</li>
+    </ul>
+
+    <h2>Дата и время</h2>
+    <table>
+      <thead><tr><th>Тип</th><th>Что хранит</th><th>Когда брать</th></tr></thead>
+      <tbody>
+        <tr><td><code>date</code></td><td>Только дату</td><td>Когда время не нужно</td></tr>
+        <tr><td><code>timestamp</code></td><td>Дату и время <strong>без часового пояса</strong></td><td>Редко — легко перепутать зоны</td></tr>
+        <tr><td><code>timestamptz</code></td><td>Момент времени <strong>с учётом зоны</strong></td><td><strong>Обычный выбор</strong> для «когда это произошло»</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Ловушка из мира Oracle</span>
+      <p>В Oracle тип <code>DATE</code> хранит и дату, и <strong>время</strong>. Если при миграции слепо
+        сопоставить его с PostgreSQL-<code>date</code>, <strong>время потеряется</strong>. Правильный маппинг —
+        <code>timestamp</code> / <code>timestamptz</code> (глава 28).</p>
+    </div>
+    <h2>Логический тип</h2>
+    <p><code>boolean</code> — <code>true</code> / <code>false</code> / <code>NULL</code>. Не заменяйте его
+      «флажками» в виде чисел или символов — читаемость и индексы лучше с настоящим <code>boolean</code>.</p>
+
+    <h2>NULL — самый коварный «тип»</h2>
+    <p><code>NULL</code> — это <strong>«значение неизвестно»</strong>, а не «0» и не «пустая строка». Отсюда
+      два сюрприза:</p>
+    <ul>
+      <li>Любое сравнение с <code>NULL</code> даёт <strong>NULL</strong> (то есть «неизвестно»), а не
+        <code>false</code>. Поэтому проверяют только так:
+        <code>WHERE col IS NULL</code> / <code>IS NOT NULL</code>.</li>
+      <li>В <code>WHERE</code> строка с <code>NULL</code> в условии <strong>не пройдёт</strong> — её как будто
+        нет. Это часто «теряет» данные в отчётах.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- ✘ так ничего не найдётся, даже если в колонке NULL
+SELECT * FROM orders WHERE comment = NULL;
+
+-- ✔ правильно
+SELECT * FROM orders WHERE comment IS NULL;</code></pre>
+    </div>
+
+    <h3>NULL и уникальность</h3>
+    <p>В PostgreSQL <code>NULL</code>-ы в уникальном индексе считаются <strong>разными</strong>, поэтому в
+      колонку с <code>UNIQUE</code> можно вставить много <code>NULL</code> (поведение можно изменить через
+      <code>NULLS NOT DISTINCT</code>, PG15+).</p>
+
+    <h3>Пустая строка &ne; NULL</h3>
+    <p>В PostgreSQL <code>''</code> — это <strong>обычная пустая строка</strong>, а не <code>NULL</code>
+      (в Oracle наоборот). Поэтому ограничение <code>NOT NULL</code> пустую строку <em>пропустит</em>. Это
+      важно при миграции (глава 27).</p>
+
+    <h2>Прочие типы (кратко)</h2>
+    <ul>
+      <li><code>jsonb</code> — для гибких структур; индексируется через GIN (глава 10);</li>
+      <li><code>uuid</code> — идентификаторы без «порядка» и без утечки количества записей;</li>
+      <li>массивы и <code>enum</code> — есть, но применяйте осознанно.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Выбирайте тип по смыслу: деньги — <code>numeric</code>, время — <code>timestamptz</code>, строки —
+        <code>text</code>/<code>varchar</code>. Помните, что <code>NULL</code> — это «неизвестно»: сравнения с
+        ним требуют <code>IS NULL</code>, а <code>''</code> — не <code>NULL</code>. При миграции из Oracle тип
+        <code>DATE</code> содержит время.</p>
+    </div>
+
     <div class="pager">
-      <a href="sql05-row-versions.html">← <span class="sp">Версии строк: почему UPDATE создаёт строку</span></a>
-      <a href="sql07-what-is-index.html"><span class="sp">Что такое индекс и как он ускоряет поиск</span> →</a>
+      <a href="sql05-row-versions.html">← <span class="sp">Версии строк</span></a>
+      <a href="sql07-what-is-index.html"><span class="sp">Что такое индекс</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

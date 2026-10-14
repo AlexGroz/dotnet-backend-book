@@ -3,8 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 5 · Версии строк: почему UPDATE создаёт строку</title>
+<title>Глава 5 · Версии строк: почему UPDATE «создаёт» строку</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -15,18 +18,84 @@
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть II · Как PostgreSQL хранит данные</div>
-    <h1>Глава 5. Версии строк: почему UPDATE создаёт строку</h1>
-    <p class="sublead">Мостик к MVCC и VACUUM: без этого не объяснить bloat</p>
-    <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <h1>Глава 5. Версии строк: почему UPDATE «создаёт» строку</h1>
+    <p class="sublead">Это ключ к пониманию MVCC, VACUUM и «раздувания» таблиц. Без этого не объяснить
+      поведение PostgreSQL под нагрузкой на запись (части VI–VII).</p>
+
+    <h2>Задача: читатели не должны ждать писателей</h2>
+    <p>Представь, что один клиент читает длинный отчёт, а другой в это время меняет строку. Как быть?
+      Можно запретить чтение на время записи — но это убило бы пропускную способность. PostgreSQL решает
+      это иначе: <strong>хранит несколько версий одной строки</strong>.</p>
+
+    <h2>Что происходит при UPDATE</h2>
+    <p>СУБД <strong>не меняет строку на месте</strong>. Вместо этого:</p>
+    <ol>
+      <li>старая строка помечается как «мёртвая» (версия, которую видеть больше не нужно);</li>
+      <li>создаётся <strong>новая версия строки</strong> с новыми значениями.</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-text">Было:   [ строка id=5, сумма=100 ]        ← версия 1 (актуальная)
+UPDATE orders SET amount = 200 WHERE id = 5;
+Стало:  [ строка id=5, сумма=100 ]  мёртвая версия (ждёт VACUUM)
+        [ строка id=5, сумма=200 ]  ← новая версия (актуальная)</code></pre>
     </div>
+    <p><code>DELETE</code> работает похоже: строка просто помечается мёртвой, физически она останется на
+      диске, пока её не уберёт <code>VACUUM</code>.</p>
+
+    <h2>Как СУБД понимает, какую версию видит читатель</h2>
+    <p>У каждой версии есть служебные метки — идентификаторы транзакций:</p>
+    <ul>
+      <li><code>xmin</code> — «кто создал» эту версию;</li>
+      <li><code>xmax</code> — «кто её удалил/заменил» (пусто, если ещё жива).</li>
+    </ul>
+    <p>Правила видимости простые: читатель видит ту версию, которая была создана <strong>до</strong> начала
+      его работы и ещё не удалена. Поэтому <strong>каждый читатель видит свой согласованный «снимок»</strong>,
+      и никому не приходится ждать.</p>
+
+    <div class="box note">
+      <span class="t">Цена этого решения</span>
+      <p>За удобство платим тремя вещами:</p>
+      <ul>
+        <li><strong>Раздувание (bloat):</strong> мёртвые версии занимают место, таблица «толстеет».</li>
+        <li><strong>Нужен VACUUM:</strong> кто-то должен убирать мёртвые версии (иначе таблица только растёт).</li>
+        <li><strong>Долгие транзакции мешают:</strong> пока транзакция «держит» старый снимок, старые версии
+          нельзя удалять.</li>
+      </ul>
+    </div>
+
+    <h2>Почему на запись таблица может «распухнуть»</h2>
+    <p>Если по таблице часто выполняют <code>UPDATE</code>, версии копятся быстрее, чем их успевает убирать
+      <code>VACUUM</code>. Таблица занимает всё больше места, а запросы читают всё больше страниц —
+      то есть <em>тормозят</em>. Именно поэтому при миграции из Oracle важно настроить
+      <code>autovacuum</code> (глава 23).</p>
+
+    <div class="box warn">
+      <span class="t">Ещё одно следствие: ctid нестабилен</span>
+      <p>Мы помним (глава 4), что адрес строки <code>ctid</code> меняется при <code>UPDATE</code> — именно
+        потому, что строка физически переезжает на новое место. Поэтому <code>ctid</code> <strong>нельзя
+        использовать как ключ</strong>.</p>
+    </div>
+
+    <h2>Куда это ведёт дальше</h2>
+    <ul>
+      <li><strong>Часть VI</strong> — как работает MVCC и снимки (глава 21), блокировки (глава 22),
+        <code>VACUUM</code> и bloat (глава 23).</li>
+      <li><strong>Часть VII</strong> — сравнение с Oracle, где прошлые версии хранятся иначе (глава 25).</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p><code>UPDATE</code> <strong>не меняет строку, а создаёт новую версию</strong>, оставляя старую
+        «мёртвой». Благодаря этому читатели и писатели не мешают друг другу. Обратная сторона — «раздувание»
+        таблиц и необходимость <code>VACUUM</code>; долгие транзакции мешают очистке.</p>
+    </div>
+
     <div class="pager">
-      <a href="sql04-pages-heap.html">← <span class="sp">Страницы и heap: где физически лежат строки</span></a>
+      <a href="sql04-pages-heap.html">← <span class="sp">Страницы и heap</span></a>
       <a href="sql06-data-types.html"><span class="sp">Типы данных и их особенности</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

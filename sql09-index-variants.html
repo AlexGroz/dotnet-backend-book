@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 9 · Составные, частичные, покрывающие и функциональные индексы</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,96 @@
   <div class="chapter">
     <div class="part">SQL · Часть III · Индексы</div>
     <h1>Глава 9. Составные, частичные, покрывающие и функциональные индексы</h1>
-    <p class="sublead">Приёмы, которые реально ускоряют запросы</p>
-    <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Это те приёмы, которые реально ускоряют запросы. Каждый — с «когда применять» и
+      примером.</p>
+
+    <h2>1. Составной индекс (composite)</h2>
+    <p>Индекс по нескольким колонкам. Помогает, когда запрос фильтрует <em>и</em> сортирует по ним вместе.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE INDEX ON orders (status, created_at DESC);
+
+-- подходит запросу:
+SELECT id FROM orders
+WHERE status = 'NEW'
+ORDER BY created_at DESC
+LIMIT 50;</code></pre>
     </div>
+    <p><strong>Помните правило «слева направо»</strong> (глава 8): условие должно быть на первых колонках.
+      Индекс <code>(status, created_at)</code> не поможет запросу только по <code>created_at</code>.</p>
+
+    <h2>2. Частичный индекс (partial)</h2>
+    <p>Индексируются <strong>не все строки, а только подходящие под условие</strong>. Индекс получается
+      меньше и быстрее, а его поддерживать дешевле.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- индексируем только «новые» заказы (их мало, а запрашивают часто)
+CREATE INDEX ON orders (created_at DESC)
+WHERE status = 'NEW';</code></pre>
+    </div>
+    <p><strong>Когда применять:</strong> горячее подмножество данных — «активные», «не удалённые»,
+      «не обработанные». Именно по ним идёт основная работа, а остальное — архив.</p>
+
+    <h2>3. Покрывающий индекс (covering, INCLUDE)</h2>
+    <p>В индекс добавляют колонки, которых <em>нет в условии</em>, но которые нужны в результате. Тогда
+      запрос обслуживается <strong>целиком индексом</strong> — это <code>Index Only Scan</code> (глава 14),
+      в таблицу ходить не нужно.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE INDEX ON orders (status) INCLUDE (created_at, total);
+
+-- запросу нужны только status, created_at, total — таблица не читается:
+SELECT created_at, total FROM orders WHERE status = 'NEW';</code></pre>
+    </div>
+    <p><strong>Когда применять:</strong> частый запрос возвращает 1–3 колонки, и вы хотите убрать «прыжки»
+      в таблицу.</p>
+
+    <h2>4. Функциональный индекс (expression)</h2>
+    <p>Индекс не по колонке, а <strong>по выражению</strong>. Нужен, когда условие содержит функцию — иначе
+      обычный индекс не сработает.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- запрос: WHERE lower(email) = 'user@example.com'
+-- обычный индекс по email НЕ поможет, нужен такой:
+CREATE INDEX ON users (lower(email));</code></pre>
+    </div>
+    <p><strong>Когда применять:</strong> поиск без учёта регистра, по части значения, по приведению типа —
+      <em>везде, где над колонкой вызывается функция</em>.</p>
+
+    <h2>5. Уникальный индекс (UNIQUE)</h2>
+    <p>Обеспечивает уникальность и ускоряет поиск. Бывает и <strong>частичным</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- уникальность только среди «активных» (удалённые могут повторяться)
+CREATE UNIQUE INDEX ON users (email) WHERE deleted_at IS NULL;</code></pre>
+    </div>
+
+    <table>
+      <thead><tr><th>Приём</th><th>Что даёт</th><th>Когда применять</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Составной</strong></td><td>Ускоряет фильтр + сортировку вместе</td><td>Запрос фильтрует и сортирует по нескольким колонкам</td></tr>
+        <tr><td><strong>Частичный</strong></td><td>Меньший и более быстрый индекс</td><td>Часто запрашивается лишь подмножество строк</td></tr>
+        <tr><td><strong>Покрывающий</strong></td><td>Убирает обращение к таблице (<code>Index Only Scan</code>)</td><td>Запрос возвращает 1–3 колонки</td></tr>
+        <tr><td><strong>Функциональный</strong></td><td>Делает индекс применимым при функции в условии</td><td><code>lower()</code>, приведение типов и т. п.</td></tr>
+        <tr><td><strong>Уникальный</strong></td><td>Уникальность + скорость</td><td>Естественные ключи (email, код)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box warn">
+      <span class="t">Не переусердствуйте</span>
+      <p>Каждый индекс — это место на диске и замедление записи (глава 10). Индексы ставят под конкретные
+        запросы, а не «на всякий случай». И обязательно проверяют результатом: план должен реально
+        использовать новый индекс (главы 13–14).</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Составной — под фильтр+сортировку (порядок колонок важен). Частичный — когда горячее лишь
+        подмножество. Покрывающий (<code>INCLUDE</code>) — чтобы не ходить в таблицу. Функциональный — когда
+        в условии функция. И всегда проверяем, что индекс действительно используется.</p>
+    </div>
+
     <div class="pager">
-      <a href="sql08-btree.html">← <span class="sp">B-tree и порядок колонок в индексе</span></a>
+      <a href="sql08-btree.html">← <span class="sp">B-tree и порядок колонок</span></a>
       <a href="sql10-index-types-cost.html"><span class="sp">Другие типы индексов и их цена</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

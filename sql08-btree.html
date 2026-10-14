@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 8 · B-tree и порядок колонок в индексе</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,97 @@
   <div class="chapter">
     <div class="part">SQL · Часть III · Индексы</div>
     <h1>Глава 8. B-tree и порядок колонок в индексе</h1>
-    <p class="sublead">Структура главного индекса и почему порядок колонок важен</p>
-    <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">B-tree — индекс по умолчанию и в 95% случаев достаточный. Разберёмся, как он устроен
+      и почему порядок колонок решает, будет ли он полезен.</p>
+
+    <h2>Что такое B-tree</h2>
+    <p><strong>B-tree</strong> — это <strong>сбалансированное дерево</strong>: значения в нём отсортированы,
+      а поиск идёт «спуском» сверху вниз (примерно <code>log N</code> шагов вместо просмотра всего). Это тот
+      самый «алфавитный указатель» из главы 7, только организованный деревом.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE INDEX ON orders (created_at);
+-- по умолчанию создаётся именно B-tree</code></pre>
     </div>
+
+    <h2>Что умеет B-tree</h2>
+    <table>
+      <thead><tr><th>Операция</th><th>Работает?</th><th>Пример</th></tr></thead>
+      <tbody>
+        <tr><td>Равенство</td><td>Да</td><td><code>WHERE status = 'NEW'</code></td></tr>
+        <tr><td>Сравнения и диапазоны</td><td>Да</td><td><code>WHERE created_at &gt;= '2026-01-01'</code></td></tr>
+        <tr><td><code>BETWEEN</code>, <code>IN</code></td><td>Да</td><td><code>WHERE id IN (1,2,3)</code></td></tr>
+        <tr><td><code>IS NULL</code></td><td>Да</td><td><code>WHERE comment IS NULL</code></td></tr>
+        <tr><td>Префикс строки</td><td>Да (только слева)</td><td><code>WHERE name LIKE 'Иван%'</code></td></tr>
+        <tr><td>Сортировка</td><td>Да</td><td><code>ORDER BY created_at DESC</code> — сортировка не нужна</td></tr>
+        <tr><td>Поиск по середине строки</td><td><strong>Нет</strong></td><td><code>LIKE '%Иван%'</code> не ускорит (нужен pg_trgm/GIN, глава 10)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Главное: порядок колонок в составном индексе</h2>
+    <p>Индекс можно построить по нескольким колонкам — и <strong>порядок в них важен</strong>. Работает
+      правило «слева направо»: индекс <code>(a, b, c)</code> помогает условиям на <code>a</code>,
+      <code>a, b</code> и <code>a, b, c</code>, но <strong>не</strong> на одни <code>b</code> или
+      <code>c</code>.</p>
+    <div class="box tip">
+      <span class="t">Аналогия: телефонная книга</span>
+      <p>Справочник отсортирован «по фамилии, затем по имени». Найти всех «Иванов» — легко. Найти всех, кого
+        зовут «Пётр», — нельзя (придётся перелистать всё). Так же и с составным индексом.</p>
+    </div>
+
+    <h3>Пример: индекс под конкретный запрос</h3>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- запрос:
+SELECT id FROM orders
+WHERE  status = 'NEW'
+ORDER  BY created_at DESC
+LIMIT  50;
+
+-- индекс «под него»: сначала равенство, потом сортировка
+CREATE INDEX ON orders (status, created_at DESC);</code></pre>
+    </div>
+    <p>Почему такой порядок: СУБД сначала отберёт строки по <code>status</code> (равенство), а внутри —
+      они уже отсортированы по <code>created_at</code>, поэтому <code>ORDER BY</code> станет бесплатным и
+      <code>LIMIT</code> сработает сразу.</p>
+
+    <div class="box note">
+      <span class="t">Правило выбора порядка колонок</span>
+      <ol>
+        <li><strong>Сначала колонки равенства</strong> (<code>col = …</code>) — они сужают выборку сильнее всего.</li>
+        <li><strong>Потом диапазоны/сортировка</strong> (<code>&gt;</code>, <code>&lt;</code>,
+          <code>ORDER BY</code>).</li>
+        <li>Колонки «на всякий случай» не добавляйте — индекс должен отрабатывать <em>конкретные</em> запросы.</li>
+      </ol>
+    </div>
+
+    <h3>ASC / DESC и NULL</h3>
+    <p>В индексе можно задать направление и положение <code>NULL</code>:
+      <code>CREATE INDEX ON orders (created_at DESC NULLS LAST);</code>. Это нужно, когда запрос сортирует
+      именно так — тогда сортировка не потребуется вовсе.</p>
+
+    <h2>Когда B-tree не поможет, даже если он есть</h2>
+    <ul>
+      <li><strong>Функция над колонкой:</strong> <code>WHERE lower(email) = …</code> — нужен функциональный
+        индекс (глава 9).</li>
+      <li><strong>Несовпадение типов:</strong> сравнение с приведением может «отключить» индекс.</li>
+      <li><strong>Лидирующая колонка не в условии:</strong> индекс <code>(a, b)</code> не поможет условию
+        только по <code>b</code>.</li>
+      <li><strong>Слишком большая выборка:</strong> при этом планировщик честно предпочтёт <code>Seq Scan</code>
+        (глава 14).</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>B-tree — индекс по умолчанию: он умеет равенство, диапазоны, сортировку и префикс строки. В составном
+        индексе <strong>порядок колонок критичен</strong>: сначала равенство, затем диапазон/сортировка, и
+        работает правило «слева направо». Если условие стоит не на первой колонке — индекс не поможет.</p>
+    </div>
+
     <div class="pager">
-      <a href="sql07-what-is-index.html">← <span class="sp">Что такое индекс и как он ускоряет поиск</span></a>
-      <a href="sql09-index-variants.html"><span class="sp">Составные, частичные, покрывающие и функциональные индексы</span> →</a>
+      <a href="sql07-what-is-index.html">← <span class="sp">Что такое индекс</span></a>
+      <a href="sql09-index-variants.html"><span class="sp">Составные, частичные, покрывающие индексы</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
