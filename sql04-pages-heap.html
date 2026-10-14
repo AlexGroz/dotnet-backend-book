@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 4 · Страницы и heap: где физически лежат строки</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,78 @@
   <div class="chapter">
     <div class="part">SQL · Часть II · Как PostgreSQL хранит данные</div>
     <h1>Глава 4. Страницы и heap: где физически лежат строки</h1>
-    <p class="sublead">Файлы и страницы по 8 КБ — база для понимания I/O и индексов</p>
-    <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <p class="sublead">Чтобы понять, почему одни способы чтения быстрые, а другие медленные (глава 14),
+      нужно увидеть, как данные лежат на диске. Здесь — только самое необходимое.</p>
+
+    <h2>Таблица — это файл, разбитый на страницы</h2>
+    <p>Таблица в PostgreSQL физически хранится в файле (или нескольких). Файл разбит на <strong>страницы</strong>
+      фиксированного размера — по умолчанию <strong>8 КБ</strong>.</p>
+    <ul>
+      <li>Строки лежат <strong>внутри страниц</strong> (одна строка не может пересекать границу страницы).</li>
+      <li>Прочитать данные можно только <strong>страницами</strong>: даже если нужна одна строка, с диска
+        (или из кэша) читается <strong>вся страница целиком</strong>.</li>
+    </ul>
+
+    <div class="box note">
+      <span class="t">Главное следствие</span>
+      <p>«Стоимость» чтения измеряется <strong>числом страниц</strong>, а не строк. Прочитать 1 строку из
+        страницы и 50 строк из той же страницы — почти одно и то же по цене. А вот <em>добраться до разных
+        страниц</em> — дорого: каждая новая страница это отдельное обращение.</p>
     </div>
+
+    <h2>Что такое heap (куча)</h2>
+    <p>Сами таблицы в PostgreSQL называют <strong>heap</strong> — «куча». Это <strong>неупорядоченный</strong>
+      набор страниц со строками: они лежат примерно в порядке вставки, но могут «расползаться» по мере
+      изменений (глава 23). То есть <strong>«физического порядка» по колонкам у таблицы нет</strong>.</p>
+    <p>Именно поэтому, чтобы найти строки по условию, СУБД приходится либо просматривать все страницы
+      (<code>Seq Scan</code>), либо пользоваться индексом (глава 14).</p>
+
+    <h2>ctid — физический адрес строки</h2>
+    <p>У каждой строки есть «адрес» — <code>ctid</code>: номер страницы и номер строки внутри неё. Формат —
+      <code>(страница, запись)</code>, например <code>(42,3)</code>.</p>
+    <div class="box warn">
+      <span class="t">ctid нестабилен</span>
+      <p>При <code>UPDATE</code> строка физически переезжает (глава 5), и <code>ctid</code> меняется. Поэтому
+        <strong>использовать <code>ctid</code> как ключ нельзя</strong>. Но именно им пользуются индексы:
+        запись в индексе хранит ключ + <code>ctid</code> строки.</p>
+    </div>
+
+    <h2>Кэш: почему «second run» быстрее</h2>
+    <p>Страницы кэшируются: в <code>shared_buffers</code> (память PostgreSQL) и в кэше страниц операционной
+      системы. В плане это видно строками <code>Buffers:</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Buffers: shared hit=19500 read=5800
+              └─ из кэша     └─ с диска</code></pre>
+    </div>
+    <ul>
+      <li><code>hit</code> — страница уже была в памяти (дёшево);</li>
+      <li><code>read</code> — пришлось читать с диска (дорого).</li>
+    </ul>
+
+    <h2>Отсюда две стратегии чтения</h2>
+    <table>
+      <thead><tr><th>Стратегия</th><th>Как читает</th><th>Когда выгодна</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Последовательно</strong></td><td>Страница за страницей, подряд</td><td>Когда нужна большая часть таблицы: подряд читать дешевле</td></tr>
+        <tr><td><strong>Точечно (по индексу)</strong></td><td>Прыгая к конкретным страницам</td><td>Когда нужна маленькая часть строк</td></tr>
+      </tbody>
+    </table>
+    <p>Первая стратегия — это <code>Seq Scan</code>, вторая — <code>Index Scan</code>. Их подробный разбор —
+      глава 14, а сначала посмотрим, как устроены индексы (главы 7–10).</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Данные лежат <strong>страницами по 8 КБ</strong>; читаем всегда страницами, а не строками. Таблица
+        (heap) неупорядочена, у строки есть физический адрес <code>ctid</code> (нестабильный). Отсюда две
+        стратегии: читать подряд или прыгать по индексу.</p>
+    </div>
+
     <div class="pager">
       <a href="sql03-sql-basics.html">← <span class="sp">SQL: выборка, фильтрация и изменение данных</span></a>
-      <a href="sql05-row-versions.html"><span class="sp">Версии строк: почему UPDATE создаёт строку</span> →</a>
+      <a href="sql05-row-versions.html"><span class="sp">Версии строк</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 14 · Способы сканирования</title>
+<title>Глава 14 · Способы сканирования: Seq, Index, Index Only, Bitmap</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -19,72 +19,186 @@
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
     <h1>Глава 14. Способы сканирования: Seq, Index, Index Only, Bitmap</h1>
-    <p class="sublead">Читать план научились (глава 13). Теперь разберём главные узлы доступа к данным —
-      именно им чаще всего обязаны «тормоза».</p>
+    <p class="sublead">«Scan» — это способ, которым СУБД достаёт строки таблицы. Разберём каждый способ
+      с нуля: как работает, как выбирается и как его изменить.</p>
+
+    <h2>Что такое «сканирование» (scan)</h2>
+    <p>Когда в плане (глава 13) появляется строка вида <code>Seq Scan on orders</code> или
+      <code>Index Scan using orders_pkey on orders</code> — это узел, который <strong>достаёт строки</strong>
+      из таблицы. Способов сделать это несколько, и называется каждый <em>scan</em>.</p>
+    <p>Все способы сводятся к двум стратегиям из главы 4:</p>
+    <ul>
+      <li><strong>читать подряд</strong> — страница за страницей (последовательно);</li>
+      <li><strong>читать точечно</strong> — прыгать к нужным страницам по индексу.</li>
+    </ul>
+
+    <h2>Прямой ответ: когда выбирается Seq Scan</h2>
+    <div class="box note">
+      <span class="t">Seq Scan ≠ «нет индекса»</span>
+      <p>Это <strong>решение по стоимости</strong> (главы 11–12), а не признак отсутствия индекса. Возможны
+        два случая:</p>
+      <ul>
+        <li><strong>Подходящего индекса нет</strong> — тогда выбора просто нет, и будет <code>Seq Scan</code>.</li>
+        <li><strong>Индекс есть, но планировщик считает полное чтение дешевле</strong> — например, запрос
+          выбирает большую часть таблицы. Тогда он <em>сознательно</em> выберет <code>Seq Scan</code>,
+          проигнорировав индекс.</li>
+      </ul>
+      <p>Поэтому если ты видишь <code>Seq Scan</code> — нельзя сразу делать вывод «нет индекса». Сначала
+        смотрим, <strong>сколько строк</strong> реально нужно (глава 13).</p>
+    </div>
 
     <h2>Seq Scan — последовательное чтение</h2>
-    <p>Читает таблицу целиком, страница за страницей.</p>
+    <p>Читает <strong>все страницы таблицы подряд</strong>, строка за строкой, и проверяет каждую на условие.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">-&gt;  Seq Scan on orders o  (cost=0.00..8000.00 rows=5000 width=24)
+                          (actual time=0.02..380.90 rows=480000 loops=1)
+      Filter: (status = 'NEW'::text)
+      Rows Removed by Filter: 4520000        ← прочитали, но выбросили</code></pre>
+    </div>
     <ul>
-      <li><strong>Хорош, когда:</strong> таблица маленькая, или из неё нужно <em>большую часть</em> строк
-        (тогда индекс только добавит работы).</li>
-      <li><strong>Плох, когда:</strong> таблица большая, а нужна малая доля строк — читаем миллионы строк,
-        чтобы выбросить почти всё.</li>
-      <li><strong>Сигнал:</strong> <code>Seq Scan</code> на большой таблице + огромный
+      <li><strong>Хорош, когда:</strong> таблица небольшая, <em>или</em> нужна большая доля её строк —
+        тогда подряд читать дешевле, чем прыгать.</li>
+      <li><strong>Плох, когда:</strong> таблица большая, а нужна малая часть строк: читаем миллионы,
+        выбрасываем почти всё (<code>Rows Removed by Filter</code> огромный).</li>
+      <li><strong>Признак проблемы в плане:</strong> <code>Seq Scan</code> + большая таблица + большой
         <code>Rows Removed by Filter</code>.</li>
     </ul>
 
-    <h2>Index Scan — поиск по индексу</h2>
-    <p>Идёт по индексу (глава 8) и обращается к таблице за нужными строками.</p>
+    <h2>Index Scan — чтение по индексу</h2>
+    <p>Сначала ищет нужные строки <strong>в индексе</strong> (глава 7), получает их адреса (<code>ctid</code>),
+      а затем идёт в таблицу за остальными колонками.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">-&gt;  Index Scan using orders_pkey on orders  (cost=0.42..8.44 rows=1 width=24)
+                                            (actual time=0.02..0.03 rows=1 loops=1)
+      Index Cond: (id = 12345)</code></pre>
+    </div>
     <ul>
-      <li><strong>Хорош, когда:</strong> нужна малая доля строк — читаем не всё, а точечно.</li>
+      <li><strong>Хорош, когда:</strong> нужна <strong>малая часть</strong> строк — читаем точечно.</li>
       <li><strong>Плох, когда:</strong> строк по индексу набирается много — каждое обращение к таблице это
-        «случайное» чтение (page), а их тысячи. Тогда Seq Scan может оказаться дешевле.</li>
-      <li><strong>Сигнал:</strong> большой <code>Index Scan</code> с большим <code>actual rows</code>.</li>
+        «случайное» чтение отдельной страницы, а их тысячи. Тогда <code>Seq Scan</code> может оказаться
+        дешевле — поэтому планировщик его и выбирает.</li>
+      <li><strong>Признак в плане:</strong> узел <code>Index Scan</code> с большим <code>actual rows</code> и
+        большим <code>Buffers: read</code> (много чтений с диска).</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Почему «случайные» чтения дороже</span>
+      <p>Читать страницы <strong>подряд</strong> диск умеет быстро (последовательный доступ). А прыгать
+        к разбросанным страницам — медленнее, и это отражено в настройках: <code>seq_page_cost = 1</code>,
+        <code>random_page_cost = 4</code> (глава 11). Поэтому при большом числе строк индекс проигрывает.</p>
+    </div>
+    <h2>Index Only Scan — «всё нужное в индексе»</h2>
+    <p>Если все колонки, которые нужны запросу, <strong>уже есть в индексе</strong> (это называют
+      <em>покрывающим</em> индексом, глава 9), в таблицу можно вообще не ходить.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">-&gt;  Index Only Scan using orders_status_idx on orders
+      Index Cond: (status = 'NEW')
+      Heap Fetches: 0        ← 0 значит: в таблицу не ходили вообще</code></pre>
+    </div>
+    <ul>
+      <li><strong>Хорош, когда:</strong> индекс «покрывает» запрос — это самый быстрый способ чтения.</li>
+      <li><strong>Нюанс:</strong> работает в полную силу, только если актуальна <strong>карта видимости</strong>
+        (её обновляет <code>VACUUM</code>). Если нет — в плане появится <code>Heap Fetches</code>, то есть
+        СУБД всё равно пойдёт в таблицу.</li>
+      <li><strong>Как получить:</strong> добавить нужные колонки в индекс
+        (<code>CREATE INDEX ON orders (status) INCLUDE (created_at);</code>).</li>
     </ul>
 
-    <h2>Index Only Scan — всё нужное в индексе</h2>
-    <p>Если все запрашиваемые колонки есть в индексе (покрывающий индекс, глава 9), к таблице можно совсем
-      не ходить.</p>
+    <h2>Bitmap — «двухшаговое» чтение</h2>
+    <p>Промежуточный вариант между Index Scan и Seq Scan. Работает в два этапа:</p>
+    <ol>
+      <li><strong>Bitmap Index Scan</strong> — по индексу собирается «карта» подходящих <em>страниц</em>
+        (не строк).</li>
+      <li><strong>Bitmap Heap Scan</strong> — эти страницы читаются <strong>в порядке возрастания</strong>,
+        а не вразнобой.</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-text">-&gt;  Bitmap Heap Scan on orders  (actual rows=12000 loops=1)
+      Recheck Cond: (status = 'NEW')
+      -&gt;  Bitmap Index Scan on orders_status_idx
+            Index Cond: (status = 'NEW')</code></pre>
+    </div>
     <ul>
-      <li><strong>Хорош, когда:</strong> индекс «покрывает» запрос.</li>
-      <li><strong>Нюанс:</strong> работает в полную силу, только если подходит <strong>карта видимости</strong>
-        (<code>visibility map</code>) — иначе в плане видно <code>Heap Fetches</code>, и он превращается в
-        обычный доступ к таблице.</li>
-    </ul>
-
-    <h2>Bitmap Index Scan + Bitmap Heap Scan</h2>
-    <p>Промежуточный вариант: сначала собирается «карта» подходящих страниц, потом страницы читаются в
-      порядке возрастания (а не вразнобой, как в Index Scan).</p>
-    <ul>
-      <li><strong>Хорош, когда:</strong> строк среднее количество — не мало и не «почти вся таблица».</li>
+      <li><strong>Хорош, когда:</strong> строк «средне» — не мало (тогда хватило бы Index Scan) и не почти вся
+        таблица (тогда Seq Scan).</li>
       <li><strong>Плюс:</strong> меньше «случайных» чтений, чем у обычного Index Scan.</li>
-      <li><strong>Минус:</strong> теряется порядок (сортировка может потребоваться заново).</li>
+      <li><strong>Минус:</strong> теряется порядок — если запрос сортирует, сортировку придётся делать
+        отдельно (<code>Sort</code>).</li>
     </ul>
+
+    <h2>Как планировщик выбирает способ</h2>
+    <p>По <strong>стоимости</strong> (главы 11–12). Ключевые факторы: сколько строк вернёт запрос
+      (<em>доля от таблицы</em>), сколько страниц придётся прочитать и насколько чтения «разбросаны».</p>
+
+    <div class="box tip">
+      <span class="t">Пример на числах (таблица 1 000 000 строк)</span>
+      <table>
+        <thead><tr><th>Запрос возвращает</th><th>Что выберет планировщик</th><th>Почему</th></tr></thead>
+        <tbody>
+          <tr><td>10 строк из 1 000 000 (0,001%)</td><td><code>Index Scan</code></td><td>Пара «прыжков» до страниц — дёшево</td></tr>
+          <tr><td>~10 000 строк (1%)</td><td><code>Bitmap</code> (часто) или <code>Index Scan</code></td><td>Средний случай: карта страниц экономит прыжки</td></tr>
+          <tr><td>~700 000 строк (70%)</td><td><code>Seq Scan</code></td><td>Читать почти всю таблицу подряд дешевле, чем прыгать</td></tr>
+        </tbody>
+      </table>
+      <p>Обрати внимание: в третьей строке индекс <strong>есть</strong> — просто он не помогает на такой доле
+        строк.</p>
+    </div>
+
+    <p>Ещё два фактора:</p>
+    <ul>
+      <li><strong>Корреляция</strong> (глава 11, <code>correlation</code>): если данные физически упорядочены
+        по колонке индекса, «прыжки» становятся почти последовательным чтением — и Index Scan дешевеет.</li>
+      <li><strong><code>random_page_cost</code></strong>: на SSD случайные чтения дешевле, поэтому его
+        снижают до ≈1.1 — и планировщик охотнее выбирает индексы.</li>
+    </ul>
+    <h2>Как изменить способ чтения (и можно ли «заставить»)</h2>
+    <p>Прямого «приказа» использовать индекс в PostgreSQL <strong>нет</strong> (подсказок, как в Oracle, —
+      тоже, глава 18). Но на выбор можно влиять. По шагам:</p>
+    <ol>
+      <li><strong>Посчитать долю строк.</strong> Если запрос по факту возвращает больше ~5–10% таблицы —
+        <code>Seq Scan</code> это <em>правильный</em> выбор, «чинить» нечего. Если меньше — идём дальше.</li>
+      <li><strong>Проверить, есть ли подходящий индекс.</strong> Он должен совпадать с условием и порядком
+        колонок (главы 8–9). Нет — создать:
+        <code>CREATE INDEX ON orders (status, created_at DESC);</code></li>
+      <li><strong>Убрать функцию/приведение над колонкой.</strong> <code>WHERE lower(email) = …</code> по
+        индексу на <code>email</code> не пойдёт — либо убираем функцию, либо делаем функциональный индекс.</li>
+      <li><strong>Обновить статистику.</strong> <code>ANALYZE orders;</code> Если оценка доли строк неверна
+        (глава 12), планировщик выберет план «вслепую» — например, посчитает, что строк много, и возьмёт
+        Seq Scan.</li>
+      <li><strong>Сделать индекс покрывающим</strong> — если запросу нужны ещё колонки, добавить их в
+        <code>INCLUDE</code>, чтобы получить <code>Index Only Scan</code>.</li>
+      <li><strong>Настроить <code>random_page_cost</code></strong> под SSD (≈1.1) — тогда индекс станет
+        «дешевле» в глазах планировщика.</li>
+    </ol>
 
     <table>
-      <thead><tr><th>Способ</th><th>Когда выбирается</th><th>Когда становится проблемой</th></tr></thead>
+      <thead><tr><th>Что видно в плане</th><th>Что делать</th></tr></thead>
       <tbody>
-        <tr><td><strong>Seq Scan</strong></td><td>Мало строк в таблице или нужна большая доля</td><td>Большая таблица + малая выборка</td></tr>
-        <tr><td><strong>Index Scan</strong></td><td>Нужна малая доля строк</td><td>Много строк → много случайных чтений</td></tr>
-        <tr><td><strong>Index Only Scan</strong></td><td>Индекс покрывает все нужные колонки</td><td>Карта видимости не актуальна → <code>Heap Fetches</code></td></tr>
-        <tr><td><strong>Bitmap</strong></td><td>Средняя селективность</td><td>Потеря порядка, лишний этап</td></tr>
+        <tr><td><code>Seq Scan</code>, индекса нет</td><td>Создать индекс под условие/сортировку</td></tr>
+        <tr><td><code>Seq Scan</code>, выборка большая (много % строк)</td><td>Ничего — это оптимально. Можно сузить запрос (условие, <code>LIMIT</code>)</td></tr>
+        <tr><td><code>Index Scan</code>, но много <code>Buffers: read</code></td><td>Много случайных чтений: покрывающий/частичный индекс, <code>random_page_cost</code></td></tr>
+        <tr><td>Индекс есть, но план его не использует</td><td>Функция/приведение над колонкой, тип не совпадает, статистика устарела → <code>ANALYZE</code></td></tr>
+        <tr><td>Хочется <code>Index Only Scan</code></td><td>Добавить нужные колонки в <code>INCLUDE</code></td></tr>
       </tbody>
     </table>
 
-    <div class="box note">
-      <span class="t">Почему планировщик «иногда не использует индекс»</span>
-      <p>Он сравнивает <strong>стоимость</strong>: у индекса есть цена — случайные чтения страниц таблицы.
-        Если строк по индексу набирается много, последовательное чтение (Seq Scan) дешевле. Именно это и
-        происходит, когда <em>нет подходящего индекса</em> или <em>изменились данные</em>, а статистика не
-        обновилась. Параметр <code>random_page_cost</code> (для SSD его снижают, глава 18) тоже влияет на
-        этот выбор.</p>
-    </div>
+    <h2>Шпаргалка по способам чтения</h2>
+    <table>
+      <thead><tr><th>Узел в плане</th><th>Как читает</th><th>Когда выбирается</th><th>Когда это проблема</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Seq Scan</strong></td><td>Все страницы подряд</td><td>Мало строк в таблице или нужна большая доля строк</td><td>Большая таблица + малая выборка (+ нет индекса)</td></tr>
+        <tr><td><strong>Index Scan</strong></td><td>Индекс → адреса → страницы таблицы</td><td>Нужна малая доля строк</td><td>Много строк → много случайных чтений</td></tr>
+        <tr><td><strong>Index Only Scan</strong></td><td>Только индекс (в таблицу не ходит)</td><td>Индекс покрывает все нужные колонки</td><td>Не актуальна карта видимости → <code>Heap Fetches</code></td></tr>
+        <tr><td><strong>Bitmap</strong></td><td>Карта страниц → чтение по порядку</td><td>Средняя доля строк</td><td>Теряется порядок (нужна сортировка)</td></tr>
+      </tbody>
+    </table>
 
     <div class="box gold">
       <span class="t">★ Что запомнить</span>
-      <p>Seq Scan — «читаю всё», Index Scan — «ищу точечно», Index Only Scan — «всё в индексе», Bitmap —
-        «средний случай». Смотрим не на «красивость» способа, а на его <strong>стоимость на этих данных</strong>:
-        <code>Seq Scan</code> на большой таблице при малой выборке — повод проверить индекс и статистику.</p>
+      <p>Способ чтения выбирает <strong>планировщик по стоимости</strong>, а не «наличие индекса».
+        <code>Seq Scan</code> — это не всегда «нет индекса»: при большой доле строк это правильный выбор.
+        <code>Index Scan</code> выгоден на малой доле, <code>Index Only Scan</code> — когда всё нужное в
+        индексе, <code>Bitmap</code> — в середине. Влиять можно индексами, статистикой и
+        <code>random_page_cost</code>, но «приказать» — нельзя.</p>
     </div>
 
     <div class="pager">
