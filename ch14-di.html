@@ -22,19 +22,41 @@
     <p class="sublead">Как собирать приложение из слабосвязанных частей и не сломать его жизненными
       циклами объектов.</p>
 
-    <h2>Как это выглядит в коде</h2>
-    <p>Идею (из главы 13) контейнер реализует так: вы <strong>регистрируете</strong> сервисы, а он
-      <strong>сам собирает</strong> их и передаёт в конструкторы.</p>
+    <h2>DI-контейнер: как это выглядит в коде</h2>
+    <p>Идею из главы 13 реализует <strong>DI-контейнер</strong> — часть Generic Host (глава 15). Работает он
+      в два шага: вы <strong>регистрируете</strong> сервисы, а контейнер <strong>сам собирает</strong> объекты
+      и передаёт зависимости в конструкторы.</p>
+
     <div class="codewrap">
-      <pre><code class="language-csharp">// регистрация
+      <p class="cap">Program.cs — регистрация. Делается ОДИН раз при старте приложения</p>
+      <pre><code class="language-csharp">var builder = WebApplication.CreateBuilder(args);
+
 builder.Services.AddScoped&lt;IOrderRepository, OrderRepository&gt;();
 builder.Services.AddScoped&lt;OrderService&gt;();
 
-// класс просто просит то, что ему нужно
-public class OrderService(IOrderRepository repo)
+var app = builder.Build();
+app.Run();</code></pre>
+    </div>
+
+    <div class="codewrap">
+      <p class="cap">Services/OrderService.cs — сам класс живёт в своём файле</p>
+      <pre><code class="language-csharp">public class OrderService(IOrderRepository repo)  // контейнер передаст сюда репозиторий
 {
     public Task&lt;Order&gt; GetAsync(int id) =&gt; repo.GetAsync(id);
 }</code></pre>
+    </div>
+
+    <div class="box note">
+      <span class="t">Где что находится (частая путаница)</span>
+      <p>Это не «одно действие в разных местах», а <strong>два разных шага</strong>:</p>
+      <ul>
+        <li><strong>Регистрация</strong> — в точке входа <code>Program.cs</code>, до
+          <code>builder.Build()</code> (глава 15). Выполняется <strong>один раз при запуске</strong>.</li>
+        <li><strong>Сами классы</strong> — в обычных файлах проекта. Они ничего не знают о контейнере: просто
+          просят зависимости в конструкторе.</li>
+      </ul>
+      <p>Дальше в примерах этой главы строки <code>builder.Services…</code> — это <code>Program.cs</code>,
+        а объявления классов — отдельные файлы.</p>
     </div>
     <p>Если зависимость не зарегистрирована — приложение падает <strong>на старте</strong>, а не «где-то
       потом». Это заставляет держать граф зависимостей в порядке.</p>
@@ -53,7 +75,8 @@ public class OrderService(IOrderRepository repo)
 builder.Services.AddScoped&lt;IOrderRepository, OrderRepository&gt;();
 builder.Services.AddSingleton&lt;IClock, SystemClock&gt;();
 
-// DbContext по умолчанию — Scoped
+// AddDbContext по умолчанию регистрирует контекст как Scoped.
+// То есть это значение по умолчанию — отдельно указывать его не нужно.
 builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));</code></pre>
     </div>
 
@@ -69,7 +92,7 @@ builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));</cod
     <div class="codewrap">
       <p class="cap">Опасный пример</p>
       <pre><code class="language-csharp">builder.Services.AddSingleton&lt;ReportService&gt;();                  // живёт всё приложение
-builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs)); // Scoped!
+builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs)); // по умолчанию Scoped
 
 public sealed class ReportService(AppDbContext db) // Scoped попал в Singleton → captive
 {
@@ -138,8 +161,8 @@ public sealed class ReportService(AppDbContext db) // Scoped попал в Singl
     </div>
 
     <div class="pager">
-      <a href="ch13-loose-coupling.html">← <span class="sp">Слабая связанность</span></a>
-      <a href="ch15-hosting.html"><span class="sp">Точка входа и хостинг</span> →</a>
+      <a href="ch13-loose-coupling.html">← <span class="sp">Глава 13. Слабая связанность</span></a>
+      <a href="ch15-hosting.html"><span class="sp">Глава 15. Точка входа и хостинг</span> →</a>
     </div>
   </div>
 </div>

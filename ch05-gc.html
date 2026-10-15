@@ -40,11 +40,35 @@
       </tbody>
     </table>
 
+    <div class="box tip">
+      <span class="t">Что за «DTO» и что за «строки на запрос»</span>
+      <p><strong>DTO</strong> (Data Transfer Object) — простой объект «для передачи данных», без логики:
+        например, то, что вы отдаёте клиенту в ответе API.</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public sealed class UserDto      // ← это и есть DTO
+{
+    public int    Id   { get; init; }
+    public string Name { get; init; } = "";
+}</code></pre>
+      </div>
+      <p><strong>«Строки на запрос»</strong> — это строки, которые создаются при обработке <em>каждого</em>
+        запроса и тут же становятся ненужными: собрать JSON-ответ, склеить сообщение для лога, сформировать
+        ключ кэша, отформатировать дату.</p>
+      <p>Их особенность: их <strong>много</strong> и они <strong>живут очень коротко</strong> — то есть как
+        раз Gen0-объекты: создались и сразу умерли.</p>
+    </div>
+
     <div class="box note">
-      <span class="t">Главная мысль</span>
-      <p>Gen0-сборка дешёвая, потому что почти все молодые объекты мертвы. Но <strong>каждый запрос создаёт
-        мусор</strong>. Чем больше мусора в секунду — тем чаще сборки — тем больше CPU уходит на GC, а не на
-        полезную работу.</p>
+      <span class="t">Как читать таблицу поколений (пример)</span>
+      <p>При обработке одного запроса к API обычно получается примерно такая картина:</p>
+      <ul>
+        <li><strong>Gen0:</strong> <code>UserDto</code>, строки для JSON и лога, список результатов —
+          создались на время запроса и умерли.</li>
+        <li><strong>Gen2:</strong> <code>DbContext</code>-синглтоны, кэш справочника, настройки — созданы
+          один раз при старте.</li>
+        <li><strong>LOH:</strong> большой массив на 1 МБ (например, буфер выгрузки) — попадает сюда, потому
+          что больше 85 КБ (глава 6).</li>
+      </ul>
     </div>
 
     <h2>Server GC vs Workstation GC</h2>
@@ -80,8 +104,8 @@
     </div>
 
     <div class="pager">
-      <a href="ch04-stack-heap-types.html">← <span class="sp">Стек, куча и типы</span></a>
-      <a href="ch06-allocations.html"><span class="sp">Аллокации на практике</span> →</a>
+      <a href="ch04-stack-heap-types.html">← <span class="sp">Глава 4. Стек, куча и типы</span></a>
+      <a href="ch06-allocations.html"><span class="sp">Глава 6. Аллокации на практике</span> →</a>
     </div>
   </div>
 </div>

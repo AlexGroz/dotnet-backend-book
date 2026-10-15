@@ -59,25 +59,55 @@ string result = sb.ToString();</code></pre>
       <li>Не создавайте копии без нужды: лишний <code>ToList()</code> — это новый список.</li>
     </ul>
 
-    <h2>Пули (pools): переиспользование вместо создания</h2>
-    <p>Крупные буферы (от ~85 КБ) попадают в LOH и дороги. Их лучше брать из пула и возвращать обратно.</p>
-    <div class="codewrap">
-      <span class="cap">ArrayPool для буферов</span>
-      <pre><code class="language-csharp">var pool = ArrayPool&lt;byte&gt;.Shared;
+    <h2>Пулы (pools): переиспользование вместо создания</h2>
+    <p><strong>Пул</strong> — это «склад заранее созданных объектов». Вместо того чтобы каждый раз создавать
+      новый объект (и потом выбрасывать его), объект берут из пула, используют и <strong>возвращают
+      обратно</strong>. Так аллокаций становится сильно меньше.</p>
+    <p>Особенно это важно для <strong>крупных буферов</strong>: массивы от ~85 КБ попадают в LOH и дороги
+      для GC (глава 5).</p>
 
-byte[] buffer = pool.Rent(4096); // может вернуть массив и больше запрошенного
+    <div class="codewrap">
+      <p class="cap">ArrayPool: переиспользование буферов-массивов</p>
+      <pre><code class="language-csharp">// Shared — встроенный ОБЩИЙ пул .NET (им пользуется всё приложение).
+// Свой создавать не нужно — достаточно взять этот.
+var pool = ArrayPool&lt;byte&gt;.Shared;
+
+// Rent = «арендовать» массив у пула (минимум 4096 байт).
+byte[] buffer = pool.Rent(4096);
+
 try
 {
+    // Работаем не со всем массивом, а с его частью (0..4096)
     int read = await stream.ReadAsync(buffer.AsMemory(0, 4096), ct);
     Process(buffer.AsSpan(0, read));
 }
 finally
 {
-    pool.Return(buffer); // обязательно вернуть в пул
+    pool.Return(buffer);   // вернуть массив в пул — обязательно
 }</code></pre>
     </div>
-    <p>Для «дорогих в создании» объектов (например, <code>StringBuilder</code>) есть <code>ObjectPool</code>
-      из <code>Microsoft.Extensions.ObjectPool</code>.</p>
+
+    <div class="box note">
+      <span class="t">Разбор незнакомых мест</span>
+      <ul>
+        <li><strong><code>ArrayPool&lt;byte&gt;.Shared</code></strong> — «<em>общий</em>» пул, встроенный в
+          .NET. Готовый и потокобезопасный, разделяемый всем приложением: не нужно создавать свой.</li>
+        <li><strong><code>Rent(4096)</code></strong> — «арендовать» буфер размером <em>минимум</em> 4096 байт.
+          Пул хранит память «корзинами» (8192, 16384, …), поэтому реально массив может оказаться
+          <strong>больше запрошенного</strong>. Именно поэтому дальше мы работаем не со всем массивом, а с его
+          частью — <code>AsMemory(0, 4096)</code>.</li>
+        <li><strong><code>Return(buffer)</code></strong> — вернуть массив в пул. Если не вернуть, пул начнёт
+          создавать новые массивы, и весь смысл потеряется. Поэтому <code>Return</code> — в
+          <code>finally</code>.</li>
+        <li><strong><code>ct</code></strong> — это <strong>CancellationToken</strong>, «токен отмены». Его
+          передают в асинхронные методы, чтобы операцию можно было прервать (например, клиент отключился).
+          Подробнее — в главе 11.</li>
+      </ul>
+    </div>
+
+    <p>Для дорогих в создании объектов (например, <code>StringBuilder</code>) есть
+      <code>ObjectPool&lt;T&gt;</code> из пакета <code>Microsoft.Extensions.ObjectPool</code> — принцип тот же:
+      взять, использовать, вернуть.</p>
 
     <h2>Span&lt;T&gt;: работать с памятью без аллокаций</h2>
     <p><code>Span&lt;T&gt;</code> — это «окно» в уже существующую память. Взятие части (слайсинг) не создаёт
@@ -91,8 +121,36 @@ foreach (char c in line)
     </div>
 
     <h2>Исключения — не для управления потоком</h2>
-    <p>Бросок исключения дорог (создаётся объект, строится трассировка). Для ожидаемых ситуаций используйте
-      методы-проверки: <code>int.TryParse</code> вместо <code>catch (FormatException)</code>.</p>
+    <p>Бросок исключения — <strong>дорогая</strong> операция: создаётся объект исключения (аллокация!) и
+      собирается трассировка стека. Если этим обрабатывать <em>обычные</em> ситуации, платим и временем, и
+      мусором.</p>
+    <div class="codewrap">
+      <p class="cap">Плохо и хорошо — на конкретном примере</p>
+      <pre><code class="language-csharp">// ✘ исключение как «нормальный» ход событий
+int ParseBad(string s)
+{
+    try
+    {
+        return int.Parse(s);      // на каждой неверной строке бросается FormatException
+    }
+    catch (FormatException)
+    {
+        return 0;                 // а это: аллокация объекта + сборка трассировки
+    }
+}
+
+// ✔ метод-проверка: без исключений и без мусора
+int ParseGood(string s)
+{
+    return int.TryParse(s, out var value) ? value : 0;
+}</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Правило</span>
+      <p>Исключения — для <strong>исключительных</strong> случаев (то, чего «не должно быть»: нет соединения,
+        нарушен инвариант). Для <em>ожидаемых</em> исходов используйте методы-проверки
+        (<code>TryParse</code>, <code>TryGetValue</code>) или обычные условия.</p>
+    </div>
 
     <div class="box warn">
       <span class="t">Правило хорошего тона</span>
@@ -109,8 +167,8 @@ foreach (char c in line)
     </div>
 
     <div class="pager">
-      <a href="ch05-gc.html">← <span class="sp">Сборка мусора и цена аллокаций</span></a>
-      <a href="ch07-threads.html"><span class="sp">Потоки, ядра и планировщик</span> →</a>
+      <a href="ch05-gc.html">← <span class="sp">Глава 5. Сборка мусора и цена аллокаций</span></a>
+      <a href="ch07-threads.html"><span class="sp">Глава 7. Потоки, ядра и планировщик</span> →</a>
     </div>
   </div>
 </div>

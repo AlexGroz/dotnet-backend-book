@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Приложение A · ref, out и in: передача по ссылке</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="net.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="net.html">Разделы →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Приложения</div>
+    <h1>Приложение A. ref, out и in: передача по ссылке</h1>
+    <p class="sublead">Справочное приложение для тех мест, где в основном тексте встречаются <code>ref</code>,
+      <code>out</code> и <code>in</code> — например, <code>Interlocked.Increment(ref counter)</code> в главе 9.</p>
+
+    <h2>По умолчанию — «по значению»</h2>
+    <p>В C# аргументы метода передаются <strong>по значению</strong>: метод получает <em>копию</em>. Значит,
+      изменить оригинал он не может.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">void PlusOne(int x) { x = x + 1; }   // меняется только копия
+
+int a = 5;
+PlusOne(a);
+Console.WriteLine(a);   // 5 — оригинал не изменился</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Тонкость для ссылочных типов</span>
+      <p>У ссылочного типа «по значению» передаётся <strong>копия ссылки</strong>. Значит, поля объекта
+        <em>изменить можно</em> (объект-то тот же), а вот заменить сам объект — нет:</p>
+      <pre><code class="language-csharp">void Rename(User u) { u.Name = "Новое"; }   // изменит объект — ссылка та же
+void Replace(User u) { u = new User(); }    // НЕ изменит: заменилась только копия ссылки</code></pre>
+    </div>
+
+    <h2>ref — передать саму переменную</h2>
+    <p><code>ref</code> означает «передать по ссылке»: метод получает не копию, а <strong>ту же самую
+      переменную</strong> и может её изменить.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">void PlusOneRef(ref int x) { x = x + 1; }   // меняем оригинал
+
+int b = 5;
+PlusOneRef(ref b);
+Console.WriteLine(b);   // 6</code></pre>
+    </div>
+    <p>Именно поэтому сигнатуры выглядят так:
+      <code>Interlocked.Increment(ref int location)</code> — методу нужно изменить <strong>исходное
+      значение</strong>.</p>
+
+    <h2>out — вернуть значение наружу</h2>
+    <p><code>out</code> — тоже «по ссылке», но назначение другое: <strong>отдать результат</strong> из метода.
+      Внутри метода параметр <em>обязан</em> быть присвоен.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// вернуть и результат, и значение одним вызовом
+bool ok = int.TryParse("42", out int value);
+
+if (ok)
+{
+    Console.WriteLine(value);   // 42
+}
+
+// «получить значение из словаря» — тоже через out
+if (_cache.TryGetValue(id, out var user))
+{
+    Use(user);
+}</code></pre>
+    </div>
+
+    <h2>in — по ссылке, но только для чтения</h2>
+    <p><code>in</code> передаёт по ссылке <strong>без права изменения</strong>. Смысл — не менять оригинал, а
+      <em>не копировать</em> большие <code>struct</code>. Для маленьких типов (<code>int</code>) смысла нет.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">struct BigStruct { public long A, B, C, D, E, F; }
+
+void Read(in BigStruct s)   // копирования нет, изменить нельзя
+{
+    // s.A = 1;   // ошибка компиляции — только чтение
+    Console.WriteLine(s.A);
+}</code></pre>
+    </div>
+
+    <h2>Сравнение</h2>
+    <table>
+      <thead><tr><th>Способ</th><th>Что передаётся</th><th>Можно менять оригинал?</th><th>Типичное применение</th></tr></thead>
+      <tbody>
+        <tr><td>обычно</td><td>Копия значения</td><td>Нет</td><td>99% кода</td></tr>
+        <tr><td><code>ref</code></td><td>Сама переменная</td><td>Да</td><td><code>Interlocked</code>, свои методы</td></tr>
+        <tr><td><code>out</code></td><td>Сама переменная</td><td>Да (обязан присвоить)</td><td><code>TryParse</code>, <code>TryGetValue</code></td></tr>
+        <tr><td><code>in</code></td><td>Сама переменная (только чтение)</td><td>Нет</td><td>Большие <code>struct</code>, чтобы не копировать</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Ещё две формы, которые встретятся</span>
+      <ul>
+        <li><code>ref readonly</code> — вернуть ссылку на данные, но без права записи;</li>
+        <li><code>ref</code>-возврат из метода (<code>ref int Get(...)</code>) — продвинутая техника для
+          горячих путей (<code>CollectionsMarshal</code>, глава про аллокации).</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Обычно — <strong>копия</strong>. <code>ref</code> — «та же переменная, можно менять».
+        <code>out</code> — «та же переменная, чтобы вернуть результат наружу». <code>in</code> — «та же
+        переменная, но только для чтения» (экономия копирования).</p>
+    </div>
+
+    <div class="pager">
+      <a href="net.html">← <span class="sp">Оглавление раздела</span></a>
+      <a href="index.html"><span class="sp">Все разделы</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

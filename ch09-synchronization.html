@@ -45,18 +45,87 @@ public void Increment() => _counter++; // один поток может «за�
     </table>
 
     <div class="codewrap">
-      <pre><code class="language-csharp">// ✔ защита участка блокировкой
+      <p class="cap">Две альтернативы для одной задачи: безопасно увеличить счётчик</p>
+      <pre><code class="language-csharp">// Вариант 1. Блокировка: в участок входит только один поток
 private readonly object _gate = new();
 private int _counter;
 
-public void Increment()
+public void IncrementWithLock()
 {
     lock (_gate) { _counter++; }
 }
 
-// ✔ или атомарная операция — дешевле блокировки
+// Вариант 2. Атомарная операция: без блокировки и быстрее
 private int _counter2;
-public void Increment2() => Interlocked.Increment(ref _counter2);</code></pre>
+
+public void IncrementAtomic()
+{
+    Interlocked.Increment(ref _counter2);
+}</code></pre>
+    </div>
+
+    <div class="box note">
+      <span class="t">Это альтернативы, а не «делать и то, и другое»</span>
+      <p>Оба варианта решают <strong>одну задачу</strong> — защищают <code>_counter++</code> от гонки. Разница
+        только в способе:</p>
+      <ul>
+        <li><code>lock</code> — <strong>универсальный</strong>: внутрь блока можно положить любой код
+          (несколько строк, несколько переменных).</li>
+        <li><code>Interlocked</code> — только для <strong>одной простой операции</strong> над значением
+          (увеличить, заменить, сравнить и заменить). Зато без блокировки и без ожидания — поэтому быстрее.</li>
+      </ul>
+      <p>В реальном коде берут <strong>что-то одно</strong>, по ситуации. Оба примера показаны рядом только
+        чтобы было видно: это два решения одной проблемы.</p>
+    </div>
+
+    <div class="box tip">
+      <span class="t">Что такое <code>ref</code></span>
+      <p>Обычно аргументы передаются <strong>по значению</strong>: метод получает <em>копию</em> числа, и
+        оригинал изменить не может.</p>
+      <pre><code class="language-csharp">void PlusOne(int x) { x = x + 1; }   // изменится только копия
+
+int a = 5;
+PlusOne(a);
+Console.WriteLine(a);   // 5 — оригинал не изменился</code></pre>
+      <p><code>ref</code> передаёт <strong>саму переменную</strong> (по ссылке), а не копию:</p>
+      <pre><code class="language-csharp">void PlusOneRef(ref int x) { x = x + 1; }  // меняем оригинал
+
+int b = 5;
+PlusOneRef(ref b);
+Console.WriteLine(b);   // 6 — оригинал изменился</code></pre>
+      <p>Поэтому <code>Interlocked.Increment</code> и требует <code>ref</code>: ему нужно изменить
+        <strong>исходную переменную</strong>, а не её копию.</p>
+      <p>Родственные ключевые слова: <code>out</code> — «вернуть» значение наружу
+        (<code>int.TryParse(s, out var v)</code>); <code>in</code> — передать по ссылке только для чтения
+        (экономит копирование больших <code>struct</code>). Подробнее — в
+        <a href="apx-a-ref.html">Приложении A</a>.</p>
+    </div>
+
+    <div class="codewrap">
+      <p class="cap">Потокобезопасные коллекции — на примере ConcurrentDictionary</p>
+      <pre><code class="language-csharp">private static readonly ConcurrentDictionary&lt;int, User&gt; _cache = new();
+
+// атомарно «получить или добавить» — гонки не будет
+var user = _cache.GetOrAdd(id, key =&gt; LoadUser(key));
+
+// атомарно увеличить значение по ключу
+_cache.AddOrUpdate(hits, 1, (key, old) =&gt; old + 1);
+
+// безопасно «прочитать и убрать»
+if (_cache.TryRemove(id, out var removed))
+{
+    Log(removed);
+}</code></pre>
+    </div>
+    <p>Другие примеры таких коллекций: <code>ConcurrentQueue&lt;T&gt;</code>,
+      <code>ConcurrentBag&lt;T&gt;</code>, <code>ConcurrentStack&lt;T&gt;</code>. Они безопасны для нескольких
+      потоков «из коробки» — в отличие от обычных <code>Dictionary</code> и <code>List</code>, которые при
+      одновременной записи могут «побиться».</p>
+    <div class="box warn">
+      <span class="t">Важная оговорка</span>
+      <p>Потокобезопасна <strong>одна операция</strong> (<code>GetOrAdd</code>, <code>AddOrUpdate</code>).
+        А вот <em>последовательность</em> из нескольких операций может перемешаться — для неё нужна
+        блокировка.</p>
     </div>
 
     <h2>Правила работы с блокировками</h2>
@@ -89,8 +158,8 @@ public void Increment2() => Interlocked.Increment(ref _counter2);</code></pre>
     </div>
 
     <div class="pager">
-      <a href="ch08-thread-pool.html">← <span class="sp">Пул потоков</span></a>
-      <a href="ch10-io.html"><span class="sp">Ввод-вывод: блокирующее и неблокирующее ожидание</span> →</a>
+      <a href="ch08-thread-pool.html">← <span class="sp">Глава 8. Пул потоков</span></a>
+      <a href="ch10-io.html"><span class="sp">Глава 10. Ввод-вывод: блокирующее и неблокирующее ожидание</span> →</a>
     </div>
   </div>
 </div>
