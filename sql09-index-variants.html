@@ -57,6 +57,30 @@ WHERE status = 'NEW';</code></pre>
 -- запросу нужны только status, created_at, total — таблица не читается:
 SELECT created_at, total FROM orders WHERE status = 'NEW';</code></pre>
     </div>
+
+    <div class="box note">
+      <span class="t">Почему <code>status</code> в скобках, а <code>created_at</code> — через <code>INCLUDE</code>?</span>
+      <p>Потому что у колонок <strong>разная роль</strong> в индексе:</p>
+      <ul>
+        <li>колонки <strong>в скобках</strong> — это <strong>ключи</strong>: именно по ним индекс упорядочен, и
+          по ним можно <strong>искать и сортировать</strong>;</li>
+        <li>колонки в <strong><code>INCLUDE</code></strong> — это «полезная нагрузка»: они просто
+          <strong>хранятся</strong> в индексе (чтобы не ходить в таблицу), но <strong>искать по ним нельзя</strong>
+          и на порядок индекса они не влияют.</li>
+      </ul>
+      <p>Можно было написать и «через запятую»: <code>(status, created_at)</code> — индекс тоже был бы рабочим.
+        Но тогда <code>created_at</code> стал бы <strong>ключом</strong>: попал бы в сортировку индекса,
+        увеличил его и добавил правил, которых нам не нужно.</p>
+      <table>
+        <thead><tr><th>Как написать</th><th>Роль <code>created_at</code></th><th>Когда так писать</th></tr></thead>
+        <tbody>
+          <tr><td><code>(status, created_at)</code></td><td><strong>Ключ</strong>: можно искать и сортировать</td><td>Когда по <code>created_at</code> тоже ищут или сортируют</td></tr>
+          <tr><td><code>(status) INCLUDE (created_at)</code></td><td><strong>Нагрузка</strong>: только хранится</td><td>Когда <code>created_at</code> нужен <em>только в ответе</em></td></tr>
+        </tbody>
+      </table>
+      <p>Правило: <strong>по чему ищем — в скобки; что просто возвращаем — в <code>INCLUDE</code></strong>.</p>
+    </div>
+
     <p><strong>Когда применять:</strong> частый запрос возвращает 1–3 колонки, и вы хотите убрать «прыжки»
       в таблицу.</p>
 

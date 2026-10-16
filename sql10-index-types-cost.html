@@ -35,12 +35,41 @@
     </table>
 
     <h3>GIN — когда значение «составное»</h3>
+    <p><strong>«Составное» значение</strong> — это когда <em>внутри одного значения лежит много элементов</em>,
+      и мы ищем не «равно целиком», а «<strong>содержит</strong> такой-то элемент». B-tree так не умеет: он
+      сравнивает значение как единое целое (глава 8).</p>
+    <p>Примеры «составных» значений и что значит «содержит»:</p>
+    <ul>
+      <li><strong>массив</strong> <code>{'новый','срочный'}</code> → «есть ли элемент <code>'срочный'</code>»;</li>
+      <li><strong>jsonb</strong> <code>{"city":"Сургут","tags":[…]}</code> → «есть ли ключ <code>city</code>
+        со значением «Сургут»»;</li>
+      <li><strong>текст, разобранный на слова</strong> (тип <code>tsvector</code>) → «встречается ли слово
+        <em>заказ</em>».</li>
+    </ul>
     <div class="codewrap">
-      <pre><code class="language-sql">-- поиск внутри jsonb
+      <p class="cap">Два примера</p>
+      <pre><code class="language-sql">-- 1) поиск внутри jsonb: «есть ли такое ключ/значение»
 CREATE INDEX ON events USING gin (payload);
 
--- полнотекстовый поиск
+-- 2) полнотекстовый поиск: «есть ли слово в тексте»
 CREATE INDEX ON articles USING gin (to_tsvector('russian', body));</code></pre>
+    </div>
+
+    <div class="box note">
+      <span class="t">Что такое <code>to_tsvector('russian', body)</code></span>
+      <ul>
+        <li><code>body</code> — <strong>колонка с текстом</strong> (например, тело статьи).</li>
+        <li><code>to_tsvector(...)</code> — функция, которая <strong>разбирает текст на слова</strong> и
+          собирает из них специальную «карту» (<code>tsvector</code>) — так текст «видит» полнотекстовый
+          поиск.</li>
+        <li><code>'russian'</code> — <strong>какой словарь использовать</strong>: правила разбиения на слова и
+          приведения их к основе. Для русского — <code>'russian'</code>, для английского —
+          <code>'english'</code>.</li>
+      </ul>
+      <p>Проще говоря, это «подготовка текста к поиску по словам». Что получается — можно посмотреть так:</p>
+      <pre><code class="language-sql">SELECT to_tsvector('russian', 'Быстрая доставка заказов');
+-- 'быстр':2 'доставк':1 'заказ':3   ← слова приведены к основе, с позициями</code></pre>
+      <p>Именно по такой «карте» GIN-индекс и умеет быстро отвечать на вопрос «встречается ли слово».</p>
     </div>
     <p>Ещё GIN (через расширение <code>pg_trgm</code>) — единственный способ ускорить
       <code>LIKE '%фрагмент%'</code>, который B-tree не тянет (глава 8).</p>

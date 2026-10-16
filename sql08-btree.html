@@ -27,8 +27,28 @@
       а поиск идёт «спуском» сверху вниз (примерно <code>log N</code> шагов вместо просмотра всего). Это тот
       самый «алфавитный указатель» из главы 7, только организованный деревом.</p>
     <div class="codewrap">
+      <p class="cap">Как читать команду создания индекса</p>
       <pre><code class="language-sql">CREATE INDEX ON orders (created_at);
--- по умолчанию создаётся именно B-tree</code></pre>
+--     ▲        ▲      ▲
+--     │        │      └── по КАКОЙ КОЛОНКЕ строим индекс
+--     │        └───────── по КАКОЙ ТАБЛИЦЕ (имя таблицы)
+--     └────────────────── команда «создать индекс»
+
+-- имя индекса можно задать самому (тогда оно стоит вторым словом):
+CREATE INDEX idx_orders_created_at ON orders (created_at);</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Что здесь что</span>
+      <ul>
+        <li><strong><code>CREATE INDEX</code></strong> — команда «создать индекс».</li>
+        <li><strong><code>orders</code></strong> — <strong>имя таблицы</strong>, по которой строится индекс.</li>
+        <li><strong><code>created_at</code></strong> — <strong>имя колонки</strong> этой таблицы (в примере —
+          дата/время создания заказа). Именно по ней и будут искать.</li>
+        <li><strong>Имя индекса</strong> не указано — PostgreSQL придумает его сам
+          (что-то вроде <code>orders_created_at_idx</code>). Если хотите своё — поставьте его вторым словом:
+          <code>CREATE INDEX моё_имя ON orders (created_at);</code></li>
+      </ul>
+      <p>По умолчанию (когда нет слова <code>USING</code>) создаётся именно <strong>B-tree</strong>.</p>
     </div>
 
     <h2>Что умеет B-tree</h2>
@@ -44,6 +64,23 @@
         <tr><td>Поиск по середине строки</td><td><strong>Нет</strong></td><td><code>LIKE '%Иван%'</code> не ускорит (нужен pg_trgm/GIN, глава 10)</td></tr>
       </tbody>
     </table>
+
+    <div class="box tip">
+      <span class="t">Что значит «Да (только слева)» — на примерах</span>
+      <p>Индекс отсортирован по тексту <strong>с начала строки</strong>. Поэтому он быстро находит значения,
+        которые <em>начинаются</em> с заданного куска, и не может — те, где кусок спрятан в середине.</p>
+      <table>
+        <thead><tr><th>Запрос</th><th>Использует индекс?</th><th>Почему</th></tr></thead>
+        <tbody>
+          <tr><td><code>WHERE name = 'Иван'</code></td><td><strong>Да</strong></td><td>Точное значение — оно есть в индексе</td></tr>
+          <tr><td><code>WHERE name LIKE 'Иван%'</code></td><td><strong>Да</strong></td><td>«Начинается с «Иван»» — это как раз про порядок в индексе</td></tr>
+          <tr><td><code>WHERE name LIKE '%Иван'</code></td><td>Нет</td><td>«Заканчивается на «Иван»» — такого порядка в индексе нет</td></tr>
+          <tr><td><code>WHERE name LIKE '%Иван%'</code></td><td>Нет</td><td>«Содержит «Иван»» — где именно, неизвестно</td></tr>
+        </tbody>
+      </table>
+      <p>Слово «слева» — потому что в записи <code>LIKE 'Иван%'</code> значимая часть стоит <strong>слева</strong>,
+        а «звёздочка» — справа. Как только <code>%</code> появляется слева, индекс перестаёт помогать.</p>
+    </div>
 
     <h2>Главное: порядок колонок в составном индексе</h2>
     <p>Индекс можно построить по нескольким колонкам — и <strong>порядок в них важен</strong>. Работает

@@ -78,12 +78,35 @@
       в индексе:</p>
     <ul>
       <li>условие <strong>совпадает</strong> с проиндексированной колонкой (или её началом);</li>
-      <li><strong>нет функции/приведения</strong> над колонкой: <code>WHERE lower(email) = …</code> по индексу
-        на <code>email</code> не пойдёт;</li>
+      <li><strong>нет «вычислений» над колонкой</strong> в условии (см. врезку ниже);</li>
       <li>выбирается <strong>небольшая доля</strong> строк. Если подходит почти вся таблица, читать её подряд
         дешевле, и планировщик выберет <code>Seq Scan</code> — <strong>даже когда индекс есть</strong>
-        (это и есть ответ на частый вопрос; подробно в главе 14).</li>
+        (подробно в главе 14).</li>
     </ul>
+
+    <div class="box warn">
+      <span class="t">Что значит «вычисления над колонкой»</span>
+      <p>Это когда в условии <code>WHERE</code> над колонкой делается <strong>что-то дополнительное</strong> —
+        вызывается функция, приведение типа или арифметика. Индекс хранит <em>исходные значения</em> колонки, а
+        не результаты вычислений, поэтому «по вычисленному» он искать не может.</p>
+      <table>
+        <thead><tr><th>Есть вычисление (индекс не поможет)</th><th>Без вычисления (индекс работает)</th></tr></thead>
+        <tbody>
+          <tr><td><code>WHERE lower(email) = 'a@b.ru'</code><br><small>функция <code>lower()</code> над колонкой</small></td><td><code>WHERE email = 'a@b.ru'</code></td></tr>
+          <tr><td><code>WHERE created_at::date = '2026-01-01'</code><br><small>приведение типа</small></td><td><code>WHERE created_at &gt;= '2026-01-01' AND created_at &lt; '2026-01-02'</code></td></tr>
+          <tr><td><code>WHERE to_char(created_at,'YYYY') = '2026'</code><br><small>функция</small></td><td><code>WHERE created_at &gt;= '2026-01-01'</code></td></tr>
+          <tr><td><code>WHERE price * 1.2 &gt; 1000</code><br><small>арифметика над колонкой</small></td><td><code>WHERE price &gt; 1000 / 1.2</code></td></tr>
+        </tbody>
+      </table>
+      <p><strong>Что делать</strong> (два пути):</p>
+      <ul>
+        <li><strong>Переписать условие</strong> так, чтобы колонка стояла «чистой» — как в правой колонке
+          таблицы. Чаще всего это возможно и лучше всего.</li>
+        <li>Либо сделать <strong>функциональный индекс</strong> — по выражению
+          (<code>CREATE INDEX ON users (lower(email));</code>, глава 9).</li>
+      </ul>
+      <p>Подробнее о починке — глава 18.</p>
+    </div>
 
     <div class="box gold">
       <span class="t">★ Что запомнить</span>

@@ -53,7 +53,8 @@
       <pre><code class="language-text">-&gt;  Seq Scan on orders o  (cost=0.00..8000.00 rows=5000 width=24)
                           (actual time=0.02..380.90 rows=480000 loops=1)
       Filter: (status = 'NEW'::text)
-      Rows Removed by Filter: 4520000        ← прочитали, но выбросили</code></pre>
+      Rows Removed by Filter: 4520000        ← прочитали, но выбросили
+      Buffers: shared hit=1800 read=45000    ← 45 000 страниц прочитано с ДИСКА</code></pre>
     </div>
     <ul>
       <li><strong>Хорош, когда:</strong> таблица небольшая, <em>или</em> нужна большая доля её строк —
@@ -68,18 +69,43 @@
     <p>Сначала ищет нужные строки <strong>в индексе</strong> (глава 7), получает их адреса (<code>ctid</code>),
       а затем идёт в таблицу за остальными колонками.</p>
     <div class="codewrap">
+      <p class="cap">Хороший случай: нужна одна строка</p>
       <pre><code class="language-text">-&gt;  Index Scan using orders_pkey on orders  (cost=0.42..8.44 rows=1 width=24)
                                             (actual time=0.02..0.03 rows=1 loops=1)
-      Index Cond: (id = 12345)</code></pre>
+      Index Cond: (id = 12345)
+      Buffers: shared hit=4            ← всего 4 страницы, и все из кэша</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Плохой случай: «прыжков» слишком много</p>
+      <pre><code class="language-text">-&gt;  Index Scan using orders_status_idx on orders
+      (cost=0.42..18400.00 rows=480000 width=24)
+      (actual time=0.03..310.50 rows=480000 loops=1)
+      Index Cond: (status = 'NEW'::text)
+      Buffers: shared hit=1200 read=15800
+                    ▲           ▲
+                    │           └─ read: читали с ДИСКА (дорого)
+                    └─ hit: взяли из кэша (дёшево)</code></pre>
     </div>
     <ul>
-      <li><strong>Хорош, когда:</strong> нужна <strong>малая часть</strong> строк — читаем точечно.</li>
+      <li><strong>Хорош, когда:</strong> нужна <strong>малая часть</strong> строк — читаем точечно
+        (первый пример: 4 страницы).</li>
       <li><strong>Плох, когда:</strong> строк по индексу набирается много — каждое обращение к таблице это
-        «случайное» чтение отдельной страницы, а их тысячи. Тогда <code>Seq Scan</code> может оказаться
-        дешевле — поэтому планировщик его и выбирает.</li>
+        «случайное» чтение отдельной страницы, а их тысячи (второй пример: <strong>15 800</strong> страниц с
+        диска). Тогда <code>Seq Scan</code> может оказаться дешевле — поэтому планировщик его и выбирает.</li>
       <li><strong>Признак в плане:</strong> узел <code>Index Scan</code> с большим <code>actual rows</code> и
-        большим <code>Buffers: read</code> (много чтений с диска).</li>
+        большим <code>Buffers: read</code>.</li>
     </ul>
+    <div class="box note">
+      <span class="t">Откуда в плане строка <code>Buffers:</code></span>
+      <p>Она появляется <strong>только если снимать план с опцией <code>BUFFERS</code></strong>:
+        <code>EXPLAIN (ANALYZE, BUFFERS) …</code> (глава 13). Без неё этой строки в выводе не будет — поэтому
+        в примерах её иногда не видно.</p>
+      <ul>
+        <li><strong><code>hit</code></strong> — страница уже была в памяти (быстро);</li>
+        <li><strong><code>read</code></strong> — страницу читали с диска (медленно).</li>
+      </ul>
+      <p>Много <code>read</code> = чтения «прыгают» по диску. Это и есть цена плохого <code>Index Scan</code>.</p>
+    </div>
     <div class="box tip">
       <span class="t">Почему «случайные» чтения дороже</span>
       <p>Читать страницы <strong>подряд</strong> диск умеет быстро (последовательный доступ). А прыгать
@@ -100,7 +126,8 @@
         (её обновляет <code>VACUUM</code>). Если нет — в плане появится <code>Heap Fetches</code>, то есть
         СУБД всё равно пойдёт в таблицу.</li>
       <li><strong>Как получить:</strong> добавить нужные колонки в индекс
-        (<code>CREATE INDEX ON orders (status) INCLUDE (created_at);</code>).</li>
+        (<code>CREATE INDEX ON orders (status) INCLUDE (created_at);</code>). Почему именно через
+        <code>INCLUDE</code>, а не «через запятую» — объяснено в главе 9.</li>
     </ul>
 
     <h2>Bitmap — «двухшаговое» чтение</h2>
