@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 32 · REST, gRPC и брокеры сообщений</title>
+<title>Глава 29 · REST, gRPC и брокеры сообщений</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -14,12 +14,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch33-validation.html">Далее →</a>
+  <a href="ch30-validation.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
-    <div class="part">.NET · Часть IX · Интеграция и API</div>
-    <h1>Глава 32. REST, gRPC и брокеры сообщений: что когда выбирать</h1>
+    <div class="part">.NET · Часть VIII · Интеграция и API</div>
+    <h1>Глава 29. REST, gRPC и брокеры сообщений: что когда выбирать</h1>
     <p class="sublead">REST с JSON удобен, но не всегда оптимален: текст и сериализация стоят ресурсов.
       Разберём, когда остаться на REST, а когда перейти на gRPC или брокер сообщений.</p>
 
@@ -56,6 +56,23 @@
     <h2>gRPC: когда он выигрывает</h2>
     <p><strong>Что это:</strong> HTTP/2 + <strong>Protobuf</strong> (бинарный формат), контракт описывается в
       <code>.proto</code>-файле, клиенты и серверы <strong>генерируются</strong> из него.</p>
+
+    <div class="box note">
+      <span class="t">Что такое HTTP/2</span>
+      <p><strong>HTTP</strong> — протокол, по которому клиент и сервер обмениваются запросами и ответами.
+        Версия <strong>HTTP/1.1</strong> передаёт по одному соединению <em>по одному</em> запросу за раз:
+        чтобы получить десять файлов, браузер открывал около шести соединений параллельно. <strong>HTTP/2</strong>
+        (его используют современные сайты и gRPC) устроен иначе:</p>
+      <ul>
+        <li><strong>мультиплексирование</strong> — много запросов идут одновременно по <em>одному</em>
+          соединению и не блокируют друг друга;</li>
+        <li><strong>сжатие заголовков</strong> — служебные поля передаются компактно;</li>
+        <li><strong>бинарные кадры</strong> вместо текстовых строк — компактнее и быстрее разбирать;</li>
+        <li><strong>server push</strong> (сервер сам присылает нужное) — на практике почти не используется.</li>
+      </ul>
+      <p>Для gRPC это принципиально: мультиплексирование делает дешёвыми частые вызовы, а бинарные кадры дают
+        основу для <em>стриминга</em> — ответа потоком (см. ниже).</p>
+    </div>
     <div class="codewrap">
       <p class="cap">Контракт в .proto — из него создаются и сервер, и клиент</p>
       <pre><code class="language-protobuf">service Orders {
@@ -80,6 +97,24 @@ message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
       <li>хуже дружит с прокси, кэшированием и просто «поглазеть» в логе;</li>
       <li>контракт строгий: изменения требуют аккуратности.</li>
     </ul>
+
+    <div class="box note">
+      <span class="t"><code>curl</code> и <code>grpcurl</code> — в чём разница</span>
+      <p><strong><code>curl</code></strong> — консольная утилита, которой отправляют <em>HTTP-запросы</em> прямо
+        из терминала: ей проверяют, что вернёт эндпоинт. Обычный REST-ответ — текст (JSON), поэтому его удобно
+        читать глазами:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">curl https://api.example.com/orders/42</code></pre>
+      </div>
+      <p><strong><code>grpcurl</code></strong> — отдельная утилита того же назначения, но для <em>gRPC</em>.
+        Она знает <code>.proto</code>-контракт и собирает из него бинарное сообщение. <code>curl</code> здесь не
+        поможет: тело gRPC-запроса — не текст, а бинарные кадры HTTP/2.</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">grpcurl -d '{"id": 42}' localhost:5001 orders.Orders/GetOrder</code></pre>
+      </div>
+      <p>Итог: REST удобно «пощупать» обычным <code>curl</code>, gRPC — только <code>grpcurl</code> или
+        специальным клиентом (Postman, Insomnia, <code>grpcui</code>).</p>
+    </div>
     <p><strong>Выбираем gRPC</strong>, когда:</p>
     <ul>
       <li>это <strong>обмен между своими сервисами</strong>, а не с внешним миром;</li>
@@ -87,9 +122,23 @@ message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
       <li>нужен <strong>стриминг</strong> (логи, телеметрия, большие выборки потоком).</li>
     </ul>
     <h2>Брокеры сообщений: когда нужна асинхронность</h2>
-    <p><strong>Что это:</strong> отдельная система-«почтальон» (RabbitMQ, Kafka и др.), куда один сервис
+    <p><strong>Что это:</strong> отдельная система-«почтальон», куда один сервис
       <strong>кладёт сообщение</strong>, а другой <strong>забирает и обрабатывает</strong> — не одновременно и
-      не дожидаясь друг друга.</p>
+      не дожидаясь друг друга. Таких систем много, вот самые известные:</p>
+    <table>
+      <thead><tr><th>Брокер</th><th>Чем известен</th></tr></thead>
+      <tbody>
+        <tr><td><strong>RabbitMQ</strong></td><td>Классические очереди: сообщение достаётся одному потребителю; гибкая маршрутизация</td></tr>
+        <tr><td><strong>Kafka</strong></td><td>Журнал событий: читать можно многократно и несколькими группами; для потоков данных</td></tr>
+        <tr><td><strong>NATS</strong></td><td>Очень лёгкий и быстрый; JetStream добавляет надёжную доставку</td></tr>
+        <tr><td><strong>ActiveMQ / Artemis</strong></td><td>Проверенный брокер родом из мира Java, поддерживает JMS и AMQP</td></tr>
+        <tr><td><strong>Azure Service Bus, Amazon SQS + SNS</strong></td><td>Облачные очереди «как сервис»: администрировать не нужно</td></tr>
+        <tr><td><strong>Google Pub/Sub</strong></td><td>Облачные подписки на события</td></tr>
+        <tr><td><strong>Redis (Pub/Sub, Streams)</strong></td><td>Годится для простой передачи, если Redis уже есть в проекте</td></tr>
+      </tbody>
+    </table>
+    <p>Различаются они деталями (порядок сообщений, повторное чтение, гарантии доставки), но идея одна: сервисы
+      общаются не напрямую, а через посредника.</p>
     <p><strong>Плюсы:</strong></p>
     <ul>
       <li><strong>развязка по времени:</strong> отправитель не ждёт, пока получатель закончит;</li>
@@ -168,8 +217,8 @@ message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
     </div>
 
     <div class="pager">
-      <a href="ch31-interview.html">← <span class="sp">Глава 31. Как отвечать на интервью</span></a>
-      <a href="ch33-validation.html"><span class="sp">Глава 33. Валидация входных данных</span> →</a>
+      <a href="ch28-scaling.html">← <span class="sp">Глава 28. Масштабирование и отказоустойчивость</span></a>
+      <a href="ch30-validation.html"><span class="sp">Глава 30. Валидация входных данных в ASP.NET Core</span> →</a>
     </div>
   </div>
 </div>

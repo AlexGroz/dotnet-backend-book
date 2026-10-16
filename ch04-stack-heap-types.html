@@ -13,7 +13,7 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch06-gc.html">Далее →</a>
+  <a href="ch05-ref.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
@@ -51,17 +51,44 @@ var list = new List&lt;int&gt;();  // и здесь</code></pre>
 
     <h2>Ссылочные и значимые типы</h2>
     <div class="box tip">
-      <span class="t">Сразу разберём частый вопрос: при чём тут <code>int</code>?</span>
-      <p><code>int</code>, <code>double</code>, <code>bool</code>, <code>DateTime</code> — это
-        <strong>значимые типы</strong>. Просто они <em>встроены</em> в язык. А <code>struct</code> — это
-        способ объявить <strong>свой собственный</strong> значимый тип. То есть:</p>
-      <ul>
-        <li><code>int</code> — это, по сути, встроенный <code>struct</code>;</li>
-        <li><code>class</code> — <em>ссылочный</em> тип, который вы объявляете сами;</li>
-        <li><code>struct</code> — <em>значимый</em> тип, который вы объявляете сами.</li>
-      </ul>
-      <p>Если вы «никогда не использовали <code>struct</code>» — вы всё равно постоянно пользовались
-        значимыми типами: каждое <code>int x = 5;</code> — это значение, а не указатель на объект в куче.</p>
+      <span class="t">Частый вопрос: при чём тут <code>int</code> и зачем вообще <code>struct</code>?</span>
+      <p><strong>Прямой ответ.</strong> В строке <code>int j = 25;</code> тип <code>int</code> — это
+        <strong>уже значимый тип</strong> (по сути, «встроенный struct»). Объявлять ничего не нужно: он готов
+        из коробки.</p>
+      <p><code>struct</code> — это <em>не альтернатива</em> <code>int</code>, а <strong>способ создать
+        свой</strong> тип-значение. Поэтому вопрос «когда struct, а когда просто int» правильнее поставить
+        так:</p>
+      <table>
+        <thead><tr><th>Что нужно</th><th>Что брать</th></tr></thead>
+        <tbody>
+          <tr><td>Просто число, символ или дата</td><td><code>int</code>, <code>double</code>, <code>bool</code>, <code>DateTime</code> — они уже значимые</td></tr>
+          <tr><td>Своё маленькое «значение» из 2–4 полей (точка, диапазон, сумма)</td><td>свой <code>struct</code></td></tr>
+          <tr><td>Сущность с поведением (пользователь, заказ, сервис)</td><td><code>class</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="codewrap">
+      <p class="cap">Пример: свой значимый тип — точка</p>
+      <pre><code class="language-csharp">public readonly struct Point          // свой значимый тип
+{
+    public int X { get; }
+    public int Y { get; }
+
+    public Point(int x, int y) { X = x; Y = y; }
+}
+
+// Пользуемся так же обыкновенно, как int: это значение, а не объект в куче
+var p = new Point(3, 5);
+var q = p;                 // копия значения: q.X = 3, q.Y = 5
+Console.WriteLine(p.X);    // 3</code></pre>
+    </div>
+
+    <div class="box warn">
+      <span class="t">«new» у <code>struct</code> не создаёт объект в куче</span>
+      <p>Запись <code>new Point(3, 5)</code> выглядит как создание объекта, но для <code>struct</code>
+        <strong>аллокации в куче нет</strong>: создаётся <em>значение</em>. В этом и выгода — маленькие
+        типы-значения дёшевы, их можно создавать часто и не нагружать сборщик мусора.</p>
     </div>
     <table>
       <thead><tr><th></th><th>Ссылочный тип (class)</th><th>Значимый тип (struct)</th></tr></thead>
@@ -118,7 +145,7 @@ d.X = 99;         // c.X останется 1</code></pre>
 object boxed = n;       // упаковка
 int back = (int)boxed;  // распаковка</code></pre>
     </div>
-    <p>Твоя догадка верна: значение «уезжает» в кучу и возвращается оттуда. Пошагово это выглядит так:</p>
+    <p>Значение при упаковке «уезжает» в кучу и возвращается оттуда. Пошагово это выглядит так:</p>
     <table>
       <thead><tr><th>Строка кода</th><th>Что при этом со стеком и кучей</th></tr></thead>
       <tbody>
@@ -170,7 +197,7 @@ int back = (int)boxed;  // распаковка</code></pre>
 
     <div class="pager">
       <a href="ch03-dotnet-runtime.html">← <span class="sp">Глава 3. Как .NET исполняет код</span></a>
-      <a href="ch06-gc.html"><span class="sp">Глава 6. Сборка мусора и цена аллокаций</span> →</a>
+      <a href="ch05-ref.html"><span class="sp">Глава 5. ref, out и in: передача по ссылке</span> →</a>
     </div>
   </div>
 </div>

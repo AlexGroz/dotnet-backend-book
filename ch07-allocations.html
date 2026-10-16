@@ -88,7 +88,7 @@ finally
     </div>
 
     <div class="box note">
-      <span class="t">Разбор незнакомых мест</span>
+      <span class="t">Пояснения к примеру</span>
       <ul>
         <li><strong><code>ArrayPool&lt;byte&gt;.Shared</code></strong> — «<em>общий</em>» пул, встроенный в
           .NET. Готовый и потокобезопасный, разделяемый всем приложением: не нужно создавать свой.</li>
@@ -99,9 +99,26 @@ finally
         <li><strong><code>Return(buffer)</code></strong> — вернуть массив в пул. Если не вернуть, пул начнёт
           создавать новые массивы, и весь смысл потеряется. Поэтому <code>Return</code> — в
           <code>finally</code>.</li>
-        <li><strong><code>ct</code></strong> — это <strong>CancellationToken</strong>, «токен отмены». Его
-          передают в асинхронные методы, чтобы операцию можно было прервать (например, клиент отключился).
-          Подробнее — в главе 12.</li>
+        <li><strong><code>ct</code></strong> — это <strong>CancellationToken</strong>, «токен отмены».
+          Важно: <code>ct</code> — <em>просто имя параметра</em>, так принято сокращать; это не ключевое слово и
+          не «магическая» переменная. Токен приходит в метод <strong>параметром</strong> — его создаёт и
+          передаёт вызывающий код (в ASP.NET Core это делает фреймворк на каждый запрос), а имя может быть
+          любым:
+          <div class="codewrap">
+            <pre><code class="language-csharp">// токен объявлен в параметрах метода — сюда его передаёт вызывающий
+public async Task ProcessAsync(int id, CancellationToken ct)
+{
+    int read = await stream.ReadAsync(buffer.AsMemory(0, 4096), ct);
+}
+
+// если переименовать параметр, работать будет точно так же
+public async Task ProcessAsync(int id, CancellationToken token)
+{
+    int read = await stream.ReadAsync(buffer.AsMemory(0, 4096), token);
+}</code></pre>
+          </div>
+          Зачем он нужен: если клиент отключился или истёк таймаут, операция прервётся и не будет зря занимать
+          ресурсы. Подробнее — в главе 12.</li>
       </ul>
     </div>
 
@@ -110,14 +127,57 @@ finally
       взять, использовать, вернуть.</p>
 
     <h2>Span&lt;T&gt;: работать с памятью без аллокаций</h2>
-    <p><code>Span&lt;T&gt;</code> — это «окно» в уже существующую память. Взятие части (слайсинг) не создаёт
-      новых объектов. Особенно полезно при разборе строк и протоколов.</p>
+
+    <h3>Проблема, которую он решает</h3>
+    <p>Обычные операции со строками и массивами <strong>создают новые объекты</strong>. Разрезали строку —
+      получили массив новых строк; взяли её часть — получили ещё одну новую строку. На горячем пути это мусор
+      для сборщика (глава 6).</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// string.Split создаёт массив строк; проход по Span — нет
-ReadOnlySpan&lt;char&gt; line = input.AsSpan();
+      <pre><code class="language-csharp">string line = "10,20,30";
+
+string[] parts = line.Split(',');     // аллокация массива + три новые строки
+string sub = line.Substring(0, 2);    // ещё одна новая строка («10»)</code></pre>
+    </div>
+
+    <h3>Идея Span</h3>
+    <p><code>Span&lt;T&gt;</code> — это <strong>«окно» в уже существующую память</strong>: он не копирует данные,
+      а только <em>указывает</em> на их часть. Взяли подстроку через <code>Span</code> — новой строки
+      <strong>не появилось</strong>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string line = "10,20,30";
+
+ReadOnlySpan&lt;char&gt; span  = line.AsSpan();      // окно на всю строку — без копии
+ReadOnlySpan&lt;char&gt; first = span.Slice(0, 2);   // окно на «10» — тоже без копии
+
+// пройти по данным и посчитать запятые: ни одной аллокации
 int commas = 0;
-foreach (char c in line)
+foreach (char c in span)
     if (c == ',') commas++;</code></pre>
+    </div>
+
+    <h3>Почему это дешевле</h3>
+    <table>
+      <thead><tr><th></th><th>Обычный подход</th><th>Через <code>Span</code></th></tr></thead>
+      <tbody>
+        <tr><td>Взятие части</td><td>Новый объект (строка или массив) — <strong>аллокация</strong></td><td>«Окно» — <strong>без аллокации</strong></td></tr>
+        <tr><td>Что уходит в GC</td><td>Мусор на каждое обращение</td><td>Ничего</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Правила и границы</h3>
+    <ul>
+      <li><code>Span&lt;T&gt;</code> — это <code>ref struct</code>: он живёт <strong>только на стеке</strong>.
+        Его нельзя положить в поле класса, в <code>List&lt;&gt;</code> или «пережить» им <code>await</code>.</li>
+      <li>Точка входа обычно — <code>AsSpan()</code> у строки или массива.</li>
+      <li><code>ReadOnlySpan&lt;char&gt;</code> — когда данные только читаем (строка всегда даёт такой).</li>
+      <li>Для своей памяти на стеке есть <code>stackalloc</code> (см. эту же главу выше).</li>
+    </ul>
+
+    <div class="box warn">
+      <span class="t">Когда это не нужно</span>
+      <p><code>Span</code> усложняет код. Держите его для <strong>горячих путей</strong> — парсинг, обработка
+        протоколов, большие массивы, — и только если профилировщик показал там аллокации (глава 21). В обычном
+        коде <code>string</code> и <code>List&lt;T&gt;</code> понятнее и достаточны.</p>
     </div>
 
     <h2>Исключения — не для управления потоком</h2>

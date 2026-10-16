@@ -57,9 +57,9 @@ Console.WriteLine(b);   // 6</code></pre>
 
     <h2>out — вернуть значение наружу</h2>
     <p><code>out</code> — тоже «по ссылке», но назначение другое: <strong>отдать результат</strong> из метода.
-      Внутри метода параметр <em>обязан</em> быть присвоен.</p>
+      Внутри метода такой параметр <em>обязан</em> получить значение — иначе код не скомпилируется.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// вернуть и результат, и значение одним вызовом
+      <pre><code class="language-csharp">// вернуть и «получилось ли», и само значение — одним вызовом
 bool ok = int.TryParse("42", out int value);
 
 if (ok)
@@ -67,16 +67,33 @@ if (ok)
     Console.WriteLine(value);   // 42
 }
 
-// «получить значение из словаря» — тоже через out
+// «достать значение из словаря» — тоже через out
 if (_cache.TryGetValue(id, out var user))
 {
     Use(user);
 }</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">Что делают <code>TryParse</code> и <code>TryGetValue</code></span>
+      <p>Оба построены на приёме «<em>Try-метод</em>»: он не бросает исключение, а возвращает
+        <strong>логическое</strong> «получилось / не получилось», а само значение отдаёт через
+        <code>out</code>.</p>
+      <ul>
+        <li><strong><code>int.TryParse("42", out int value)</code></strong> — «попробуй превратить строку в
+          число». Если строка не число, вернёт <code>false</code> и ничего не сломает. Сравните с
+          <code>int.Parse("abc")</code> — он <em>бросит исключение</em>, а это дорого (глава 7).</li>
+        <li><strong><code>dict.TryGetValue(id, out var user)</code></strong> — «есть ли в словаре такой ключ?».
+          Если есть — <code>true</code> и значение в <code>user</code>; если нет — <code>false</code>.
+          Без исключений и без двух обращений к словарю.</li>
+      </ul>
+      <p>Одна строка вместо «поиск + проверка» — отсюда и популярность <code>out</code> в реальном коде.</p>
+    </div>
 
     <h2>in — по ссылке, но только для чтения</h2>
-    <p><code>in</code> передаёт по ссылке <strong>без права изменения</strong>. Смысл — не менять оригинал, а
-      <em>не копировать</em> большие <code>struct</code>. Для маленьких типов (<code>int</code>) смысла нет.</p>
+    <p><code>in</code> передаёт по ссылке <strong>без права изменения</strong>. Смысл этого ключевого слова —
+      <em>избежать копирования</em> большого <code>struct</code>: метод получает ссылку на оригинал, но
+      изменить его не может. Для маленьких типов (например, <code>int</code>) выгоды нет: копия стоит столько
+      же, сколько ссылка.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">struct BigStruct { public long A, B, C, D, E, F; }
 

@@ -36,9 +36,21 @@
         <tr><td><strong>Gen0</strong></td><td>Молодые объекты (DTO, строки на запрос)</td><td>Часто и дёшево</td></tr>
         <tr><td><strong>Gen1</strong></td><td>Пережившие одну сборку (буфер)</td><td>Дёшево</td></tr>
         <tr><td><strong>Gen2</strong></td><td>Долгоживущие (кэши, синглтоны)</td><td>Редко и дороже; может давать паузы</td></tr>
-        <tr><td><strong>LOH</strong></td><td>Крупные объекты (массивы от ~85 КБ)</td><td>Собирается вместе с Gen2</td></tr>
+        <tr><td><strong>LOH</strong><br><small>Large Object Heap — «куча больших объектов»</small></td><td>Крупные объекты (массивы от ~85 КБ)</td><td>Собирается вместе с Gen2</td></tr>
       </tbody>
     </table>
+
+    <div class="box note">
+      <span class="t">Расшифровка сокращений</span>
+      <ul>
+        <li><strong>GC</strong> — <em>Garbage Collector</em>, «сборщик мусора».</li>
+        <li><strong>Gen0 / Gen1 / Gen2</strong> — <em>Generation</em>, «поколение» (нулевое, первое, второе).</li>
+        <li><strong>LOH</strong> — <em>Large Object Heap</em>, «куча больших объектов» — отдельная область для
+          крупных объектов.</li>
+      </ul>
+      <p>Эти сокращения не переводят, а поясняют один раз: так их пишут и в документации .NET, и в русскоязычных
+        книгах.</p>
+    </div>
 
     <div class="box tip">
       <span class="t">Что за «DTO» и что за «строки на запрос»</span>
@@ -64,6 +76,9 @@
       <ul>
         <li><strong>Gen0:</strong> <code>UserDto</code>, строки для JSON и лога, список результатов —
           создались на время запроса и умерли.</li>
+        <li><strong>Gen1:</strong> в этом примере его нет — и это нормально. Gen1 это «промежуточная ступень»
+          для объектов, которые пережили первую сборку, но ещё не «заслужили» Gen2. Туда попадают
+          <em>по возрасту</em>, а не по решению программиста; многие объекты проскакивают её или не доживают.</li>
         <li><strong>Gen2:</strong> <code>DbContext</code>-синглтоны, кэш справочника, настройки — созданы
           один раз при старте.</li>
         <li><strong>LOH:</strong> большой массив на 1 МБ (например, буфер выгрузки) — попадает сюда, потому
@@ -104,7 +119,7 @@
     </div>
 
     <div class="pager">
-      <a href="ch04-stack-heap-types.html">← <span class="sp">Глава 4. Стек, куча и типы</span></a>
+      <a href="ch05-ref.html">← <span class="sp">Глава 5. ref, out и in: передача по ссылке</span></a>
       <a href="ch07-allocations.html"><span class="sp">Глава 7. Аллокации на практике</span> →</a>
     </div>
   </div>
