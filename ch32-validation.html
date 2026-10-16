@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 32 · Валидация входных данных в ASP.NET Core</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="net.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="net.html">Оглавление →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">.NET · Часть IX · Интеграция и API</div>
+    <h1>Глава 32. Валидация входных данных в ASP.NET Core</h1>
+    <p class="sublead">Правило номер один: <strong>клиенту доверять нельзя</strong>. Разберём, где и как
+      проверять входящие данные и что возвращать при ошибке.</p>
+
+    <h2>Зачем это вообще нужно</h2>
+    <p>Любой ввод извне — потенциальный источник проблем: мусор в базе, падения, уязвимости (например,
+      «перезапись» лишних полей). Валидация — это <strong>граница системы</strong>: всё, что прошло через неё,
+      считается корректным, и по этой же границе мы <em>ограничиваем</em> нагрузку.</p>
+    <div class="box note">
+      <span class="t">Валидация на клиенте — не считается</span>
+      <p>Проверки в браузере (или в мобильном приложении) нужны только ради удобства пользователя: показать
+        ошибку сразу. Злоумышленник обойдёт их за секунду — поэтому <strong>сервер проверяет всё сам</strong>.</p>
+    </div>
+
+    <h2>Уровни защиты (идут друг за другом)</h2>
+    <ol>
+      <li><strong>Ранние лимиты инфраструктуры:</strong> ограничение размера тела запроса, rate limiting
+        (глава 27), таймауты. Это «отсечь совсем наглое» ещё до логики.</li>
+      <li><strong>Формат и модель:</strong> правильные типы и обязательные поля (валидация модели).</li>
+      <li><strong>Бизнес-правила:</strong> «дата окончания позже даты начала», «сумма больше нуля», «такого
+        статуса не бывает».</li>
+      <li><strong>Гарантия в базе данных:</strong> <code>NOT NULL</code>, <code>UNIQUE</code>,
+        <code>CHECK</code>, внешние ключи — последняя линия обороны (глава 21 SQL).</li>
+    </ol>
+    <p>Хорошая система использует <strong>все четыре</strong>: первые три дают понятные ошибки пользователю,
+      четвёртый не даёт испортить данные, даже если в коде где-то промахнулись.</p>
+
+    <h2>Уровень 1–2: валидация модели (DataAnnotations)</h2>
+    <p>В ASP.NET Core можно описать правила <strong>прямо на модели</strong> атрибутами, а контроллер с
+      <code>[ApiController]</code> сам вернёт <code>400</code>, если правила нарушены.</p>
+    <div class="codewrap">
+      <p class="cap">Модель запроса с правилами (файл Contracts/CreateOrderRequest.cs)</p>
+      <pre><code class="language-csharp">public sealed class CreateOrderRequest
+{
+    [Required]                                  // поле обязательно
+    [Range(1, int.MaxValue)]                    // должно быть больше нуля
+    public int CustomerId { get; init; }
+
+    [Required]
+    [StringLength(200, MinimumLength = 3)]      // длина строки
+    public string Title { get; init; } = "";
+
+    [EmailAddress]                              // формат e-mail
+    public string? ContactEmail { get; init; }
+
+    [Range(0.01, 1_000_000)]                    // цена в разумных пределах
+    public decimal Total { get; init; }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Контроллер: модель проверится сама</p>
+      <pre><code class="language-csharp">[ApiController]                                // ← без этого атрибута авто-проверки не будет
+[Route("api/orders")]
+public class OrdersController : ControllerBase
+{
+    [HttpPost]
+    public IActionResult Create(CreateOrderRequest request)
+    {
+        // сюда управление дойдёт только если модель валидна,
+        // иначе ASP.NET Core вернёт 400 с описанием ошибок
+        return Ok(_service.Create(request));
+    }
+}</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Почему <code>CreateOrderRequest</code>, а не сущность БД</span>
+      <p>Так вы защищаетесь от «перезаписи лишних полей» (<em>over-posting</em>): клиент не сможет прислать
+        <code>Id</code>, <code>Status</code> или <code>CreatedAt</code> и «назначить» их сам. В модель запроса
+        попадает только то, что клиенту действительно разрешено задавать.</p>
+    </div>
+    <h2>Minimal API: валидация вручную или через фильтр</h2>
+    <p>В <strong>Minimal API</strong> нет автоматической проверки модели — её делают сами:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.MapPost("/orders", (CreateOrderRequest request) =&gt;
+{
+    // 1) проверяем формат/обязательные поля
+    var errors = new List&lt;string&gt;();
+    if (request.CustomerId &lt;= 0)           errors.Add("CustomerId должен быть больше нуля");
+    if (string.IsNullOrWhiteSpace(request.Title)) errors.Add("Title обязателен");
+
+    if (errors.Count &gt; 0)
+        return Results.ValidationProblem(new Dictionary&lt;string, string[]&gt;
+        {
+            ["request"] = errors.ToArray()
+        });   // = 400 с описанием проблем
+
+    return Results.Ok(_service.Create(request));
+});</code></pre>
+    </div>
+    <p>Чтобы не повторять это в каждом обработчике, проверку выносят в <strong>endpoint filter</strong> —
+      он выполняется до обработчика и может «отсечь» запрос. Для сложных правил на Minimal API удобно
+      подключить <strong>FluentValidation</strong> (см. ниже).</p>
+
+    <h2>Уровень 3: бизнес-правила (FluentValidation)</h2>
+    <p>Атрибуты неудобны, когда правил много или они зависят друг от друга. Тогда используют отдельный
+      класс-валидатор:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class CreateOrderValidator : AbstractValidator&lt;CreateOrderRequest&gt;
+{
+    public CreateOrderValidator()
+    {
+        RuleFor(x =&gt; x.CustomerId).GreaterThan(0);
+        RuleFor(x =&gt; x.Title).NotEmpty().MaximumLength(200);
+
+        // правило, связывающее два поля
+        RuleFor(x =&gt; x.Total).GreaterThan(0)
+            .WithMessage("Сумма должна быть больше нуля");
+    }
+}</code></pre>
+    </div>
+
+    <h2>Что возвращать при ошибке</h2>
+    <table>
+      <thead><tr><th>Ситуация</th><th>Код</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>Неверный формат, обязательное поле пустое, кривой JSON</td><td><strong>400 Bad Request</strong></td><td>Клиент прислал «не то» — ему надо исправить запрос</td></tr>
+        <tr><td>Формат ок, но нарушено бизнес-правило (например, нельзя отменить оплаченный заказ)</td><td><strong>422</strong> (или 409)</td><td>Запрос понятен, но правило не позволяет его выполнить</td></tr>
+        <tr><td>Нет прав</td><td>403</td><td>Это уже не про валидацию ввода, а про доступ</td></tr>
+        <tr><td>Ошибка на нашей стороне</td><td><strong>500</strong></td><td>Никогда не отдаём 500 на плохой ввод: это путает клиента и мониторинг</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Частая ошибка</span>
+      <p>Возвращать <code>500</code> (или падать) на некорректный ввод. Плохой ввод — <strong>ожидаемая</strong>
+        ситуация, а не авария: это <code>400</code>/<code>422</code> с понятным описанием. Иначе и клиент не
+        поймёт, что делать, и дежурный будет искать «поломку сервера», которой нет.</p>
+    </div>
+
+    <h2>Практики, которые стоит назвать</h2>
+    <ul>
+      <li><strong>Не доверять вводу</strong> — проверять всё на сервере, даже если клиент «уже проверил».</li>
+      <li><strong>DTO вместо сущностей БД</strong> — защита от over-posting (см. выше).</li>
+      <li><strong>Ограничить размер тела запроса</strong> — иначе можно «залить» сервис мегабайтами:
+        <code>MaxRequestBodySize</code> (Kestrel, глава 17) и лимиты на уровне прокси.</li>
+      <li><strong>Rate limiting</strong> — защита от перебора и флуда (глава 27).</li>
+      <li><strong>Не логировать чувствительное</strong> — пароли, номера карт; в логи попадёт то, что вернули
+        в ошибке (глава 19).</li>
+      <li><strong>Дублировать правила в БД</strong> — <code>NOT NULL</code>, <code>UNIQUE</code>,
+        <code>CHECK</code>: последний рубеж.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что сказать на интервью</span>
+      <p>«Валидация у меня на нескольких уровнях. Сначала инфраструктурные лимиты: размер тела, rate limiting,
+        таймауты. Затем формат и модель — в ASP.NET Core это атрибуты на DTO плюс <code>[ApiController]</code>
+        (или endpoint-фильтр в Minimal API), для сложных правил — FluentValidation. Бизнес-правила проверяются
+        в сервисном слое, а гарантию дают ограничения в базе: <code>NOT NULL</code>, <code>UNIQUE</code>,
+        <code>CHECK</code>. Плохой ввод возвращаю как <code>400</code>/<code>422</code> с описанием, никогда не
+        <code>500</code>. И обязательно модели запроса (DTO), а не сущности БД, — чтобы клиент не мог
+        перезаписать лишние поля».</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch31-grpc-rest-brokers.html">← <span class="sp">Глава 31. REST, gRPC и брокеры сообщений</span></a>
+      <a href="net.html"><span class="sp">Оглавление раздела</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

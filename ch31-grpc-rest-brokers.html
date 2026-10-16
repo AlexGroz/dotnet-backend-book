@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 31 · REST, gRPC и брокеры сообщений</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/protobuf.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="net.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch32-validation.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">.NET · Часть IX · Интеграция и API</div>
+    <h1>Глава 31. REST, gRPC и брокеры сообщений: что когда выбирать</h1>
+    <p class="sublead">REST с JSON удобен, но не всегда оптимален: текст и сериализация стоят ресурсов.
+      Разберём, когда остаться на REST, а когда перейти на gRPC или брокер сообщений.</p>
+
+    <h2>В чём суть вопроса</h2>
+    <p>REST поверх HTTP передаёт данные в <strong>текстовом</strong> виде (JSON). Это удобно для человека, но
+      каждый вызов стоит: сериализация в JSON и обратно, больше байт по сети, больше парсинга на обеих
+      сторонах. На единичном запросе это незаметно, но между сервисами внутри системы вызовов могут быть
+      миллионы.</p>
+    <p>Поэтому вариантов три, и это <strong>не «лучше/хуже»</strong>, а «для чего»:</p>
+    <ul>
+      <li><strong>REST</strong> — публичный, человекочитаемый API;</li>
+      <li><strong>gRPC</strong> — быстрые и строгие вызовы между сервисами;</li>
+      <li><strong>брокер сообщений</strong> — асинхронная передача, когда ответ не нужен «сейчас».</li>
+    </ul>
+
+    <h2>REST: когда он остаётся правильным выбором</h2>
+    <p><strong>Что это:</strong> HTTP + JSON (или XML), ресурсы и методы (<code>GET</code>, <code>POST</code>…),
+      «свободный» контракт.</p>
+    <p><strong>Плюсы:</strong></p>
+    <ul>
+      <li>читается человеком и <strong>легко отлаживается</strong> (<code>curl</code>, браузер, Postman);</li>
+      <li>работает <strong>везде</strong>: браузеры, мобильные приложения, любые языки;</li>
+      <li>штатное <strong>кэширование по HTTP</strong> (заголовки, CDN, прокси);</li>
+      <li>не требует кодогенерации — контракт можно менять эволюционно.</li>
+    </ul>
+    <p><strong>Выбираем REST</strong>, когда:</p>
+    <ul>
+      <li>API <strong>публичный</strong> или интеграция с внешними системами (там ждут HTTP+JSON);</li>
+      <li>клиенты — браузер или мобильное приложение;</li>
+      <li>важны простота, совместимость и скорость разработки, а не экономия байтов;</li>
+      <li>вызовы нечастые (в сравнении с внутренним обменом).</li>
+    </ul>
+
+    <h2>gRPC: когда он выигрывает</h2>
+    <p><strong>Что это:</strong> HTTP/2 + <strong>Protobuf</strong> (бинарный формат), контракт описывается в
+      <code>.proto</code>-файле, клиенты и серверы <strong>генерируются</strong> из него.</p>
+    <div class="codewrap">
+      <p class="cap">Контракт в .proto — из него создаются и сервер, и клиент</p>
+      <pre><code class="language-protobuf">service Orders {
+  rpc GetOrder (GetOrderRequest) returns (OrderReply);
+}
+
+message GetOrderRequest { int32 id = 1; }
+message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
+    </div>
+    <p><strong>Плюсы:</strong></p>
+    <ul>
+      <li><strong>компактнее и быстрее</strong>: бинарный формат + сериализация без лишних строк;</li>
+      <li><strong>HTTP/2</strong>: мультиплексирование (много вызовов в одном соединении) и
+        <strong>стриминг</strong> (поток данных в одну или обе стороны);</li>
+      <li><strong>строгий контракт</strong>: если что-то не совпало — видно на этапе сборки, а не в рантайме;</li>
+      <li>кодогенерация для многих языков — удобно в «разноязычной» системе.</li>
+    </ul>
+    <p><strong>Ограничения</strong> (о них надо честно сказать):</p>
+    <ul>
+      <li>нечитаемо «вручную» — нет простого <code>curl</code> (нужен <code>grpcurl</code>);</li>
+      <li>браузеры требуют прослойку (<em>gRPC-Web</em>), то есть «для сайта» это редко первый выбор;</li>
+      <li>хуже дружит с прокси, кэшированием и просто «поглазеть» в логе;</li>
+      <li>контракт строгий: изменения требуют аккуратности.</li>
+    </ul>
+    <p><strong>Выбираем gRPC</strong>, когда:</p>
+    <ul>
+      <li>это <strong>обмен между своими сервисами</strong>, а не с внешним миром;</li>
+      <li>вызовов <strong>много и часто</strong>, важны задержка и трафик;</li>
+      <li>нужен <strong>стриминг</strong> (логи, телеметрия, большие выборки потоком).</li>
+    </ul>
+    <h2>Брокеры сообщений: когда нужна асинхронность</h2>
+    <p><strong>Что это:</strong> отдельная система-«почтальон» (RabbitMQ, Kafka и др.), куда один сервис
+      <strong>кладёт сообщение</strong>, а другой <strong>забирает и обрабатывает</strong> — не одновременно и
+      не дожидаясь друг друга.</p>
+    <p><strong>Плюсы:</strong></p>
+    <ul>
+      <li><strong>развязка по времени:</strong> отправитель не ждёт, пока получатель закончит;</li>
+      <li><strong>сглаживание пиков:</strong> очередь копит сообщения, а обработчик разбирает их в своём темпе
+        (это и есть backpressure из главы 25);</li>
+      <li><strong>надёжность:</strong> сообщение не потеряется, если получатель был недоступен;</li>
+      <li><strong>масштабирование:</strong> обработчиков можно добавить — они разберут очередь быстрее.</li>
+    </ul>
+    <p><strong>Что нужно понимать</strong> (минусы и особенности):</p>
+    <ul>
+      <li>ответ приходит <strong>не сразу</strong> — данные станут согласованными «потом» (eventual consistency);</li>
+      <li>доставка обычно <strong>«хотя бы один раз»</strong> (at-least-once) → возможны <strong>дубликаты</strong>,
+        поэтому обработчик должен быть <strong>идемпотентным</strong> (повторная обработка не должна ломать данные);</li>
+      <li>появляется инфраструктура, которую надо ставить, мониторить и чинить (в отличие от простого
+        HTTP-вызова);</li>
+      <li>порядок сообщений гарантируется не везде и не всегда.</li>
+    </ul>
+    <p><strong>Выбираем брокер</strong>, когда:</p>
+    <ul>
+      <li>работа <strong>долгая</strong> и ответ не нужен прямо сейчас (лучше сразу вернуть
+        <code>202 Accepted</code> — ср. глава 25);</li>
+      <li>нужно <strong>сгладить пики</strong> нагрузки;</li>
+      <li>это <strong>события</strong> для других систем («заказ оформлен» → уведомления, отчётность, склад);</li>
+      <li>важна надёжность: «сделать обязательно, даже если сервис падал».</li>
+    </ul>
+
+    <h2>Сравнение</h2>
+    <table>
+      <thead><tr><th></th><th>REST</th><th>gRPC</th><th>Брокер сообщений</th></tr></thead>
+      <tbody>
+        <tr><td>Формат</td><td>текст (JSON)</td><td>бинарный (Protobuf)</td><td>любой (тело сообщения)</td></tr>
+        <tr><td>Стиль</td><td>запрос → ответ</td><td>запрос → ответ (+ стриминг)</td><td>отправил и забыл</td></tr>
+        <tr><td>Кто клиент</td><td>браузер, внешние системы</td><td>свои сервисы</td><td>свои сервисы, фоновые задачи</td></tr>
+        <tr><td>Читаемость вручную</td><td>высокая</td><td>низкая</td><td>зависит</td></tr>
+        <tr><td>Задержка/трафик</td><td>выше</td><td><strong>ниже</strong></td><td>не про задержку, а про развязку</td></tr>
+        <tr><td>Ответ «сейчас»</td><td>да</td><td>да</td><td><strong>нет</strong></td></tr>
+        <tr><td>Сложность ввода</td><td>низкая</td><td>средняя</td><td>высокая</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Как выбирать — по вопросам</h2>
+    <ol>
+      <li><strong>Кто клиент?</strong> Браузер или внешняя система → <strong>REST</strong>. Свой сервис →
+        можно <strong>gRPC</strong>.</li>
+      <li><strong>Ответ нужен прямо сейчас?</strong> Да → REST или gRPC. Нет (или «потом») →
+        <strong>брокер</strong>.</li>
+      <li><strong>Как много и часто?</strong> Внутренний обмен с миллионами вызовов → <strong>gRPC</strong>.</li>
+      <li><strong>Нужен стриминг?</strong> → <strong>gRPC</strong>.</li>
+      <li><strong>Нужно пережить пики и не потерять работу?</strong> → <strong>брокер</strong>.</li>
+    </ol>
+
+    <div class="box gold">
+      <span class="t">★ На практике это не «или», а комбинация</span>
+      <p>В реальной системе почти всегда используют все три:</p>
+      <div class="codewrap">
+        <pre><code class="language-text">Клиент (браузер)
+     │  REST + JSON
+     ▼
+Публичный сервис A ──gRPC──► Внутренний сервис B ──gRPC──► Сервис C
+     │
+     └──сообщение в брокер──► Фоновый воркер (тяжёлая обработка)
+                              клиенту сразу ответили 202 Accepted</code></pre>
+      </div>
+      <p>То есть: <strong>REST — на границе с внешним миром</strong>, <strong>gRPC — внутри</strong>,
+        <strong>брокер — для того, что можно сделать позже</strong>.</p>
+    </div>
+
+    <div class="box note">
+      <span class="t">Что сказать на интервью</span>
+      <p>«Я выбираю по трём вопросам: кто клиент, нужен ли ответ сейчас и какова интенсивность обмена.
+        Публичный API — REST: понятно, кэшируется, работает везде. Внутренние вызовы — gRPC: бинарный
+        Protobuf и HTTP/2 дают меньше трафика и задержку, плюс стриминг. Долгие и «пиковые» операции —
+        брокер: клиенту отвечаем <code>202</code>, а работу делает воркер; там же нужна идемпотентность,
+        потому что доставка «хотя бы один раз». На практике всё три вместе: REST снаружи, gRPC внутри,
+        брокер для событий».</p>
+    </div>
+
+    <div class="pager">
+      <a href="ch30-interview.html">← <span class="sp">Глава 30. Как отвечать на интервью</span></a>
+      <a href="ch32-validation.html"><span class="sp">Глава 32. Валидация входных данных</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
