@@ -3,26 +3,26 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 7 · Потоки, ядра и планировщик: почему поток дорогой</title>
+<title>Глава 8 · Потоки, ядра и планировщик: почему поток дорогой</title>
 <link rel="stylesheet" href="book.css">
 </head>
 <body>
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch08-thread-pool.html">Далее →</a>
+  <a href="ch09-thread-pool.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть III · Конкурентность</div>
-    <h1>Глава 7. Потоки, ядра и планировщик: почему поток дорогой</h1>
+    <h1>Глава 8. Потоки, ядра и планировщик: почему поток дорогой</h1>
     <p class="sublead">Начинаем часть про конкурентность. Сначала — почему нельзя просто «создать побольше
       потоков».</p>
 
     <h2>Поток — это единица исполнения</h2>
     <p>Работу внутри процесса выполняют потоки. Главное, что нужно помнить: потоки одного процесса
       <strong>делят общую память</strong>. Это одновременно и удобно (можно передавать данные), и опасно
-      (нужна синхронизация — глава 9).</p>
+      (нужна синхронизация — глава 10).</p>
 
     <h2>Из чего складывается «дороговизна» потока</h2>
     <ul>
@@ -60,9 +60,9 @@
 
     <h2>Вывод, который ведёт дальше</h2>
     <ul>
-      <li>Потоки надо <strong>переиспользовать</strong>, а не создавать под каждую задачу → глава 8 (пул потоков).</li>
-      <li>Так как потоки делят память, нужна <strong>синхронизация</strong> → глава 9.</li>
-      <li>А ещё часть времени уходит на <strong>ожидание ввода-вывода</strong> (глава 10) — и это самая
+      <li>Потоки надо <strong>переиспользовать</strong>, а не создавать под каждую задачу → глава 9 (пул потоков).</li>
+      <li>Так как потоки делят память, нужна <strong>синхронизация</strong> → глава 10.</li>
+      <li>А ещё часть времени уходит на <strong>ожидание ввода-вывода</strong> (глава 11) — и это самая
         выгодная точка оптимизации.</li>
     </ul>
 
@@ -74,8 +74,8 @@
     </div>
 
     <div class="pager">
-      <a href="ch06-allocations.html">← <span class="sp">Глава 6. Аллокации на практике</span></a>
-      <a href="ch08-thread-pool.html"><span class="sp">Глава 8. Пул потоков и thread pool starvation</span> →</a>
+      <a href="ch07-allocations.html">← <span class="sp">Глава 7. Аллокации на практике</span></a>
+      <a href="ch09-thread-pool.html"><span class="sp">Глава 9. Пул потоков и thread pool starvation</span> →</a>
     </div>
   </div>
 </div>

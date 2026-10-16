@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 14 · Внедрение зависимостей и жизненные циклы</title>
+<title>Глава 15 · Внедрение зависимостей и жизненные циклы</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,17 +13,17 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch15-hosting.html">Далее →</a>
+  <a href="ch16-hosting.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть IV · Сборка приложения</div>
-    <h1>Глава 14. Внедрение зависимостей и жизненные циклы</h1>
+    <h1>Глава 15. Внедрение зависимостей и жизненные циклы</h1>
     <p class="sublead">Как собирать приложение из слабосвязанных частей и не сломать его жизненными
       циклами объектов.</p>
 
     <h2>DI-контейнер: как это выглядит в коде</h2>
-    <p>Идею из главы 13 реализует <strong>DI-контейнер</strong> — часть Generic Host (глава 15). Работает он
+    <p>Идею из главы 14 реализует <strong>DI-контейнер</strong> — часть Generic Host (глава 16). Работает он
       в два шага: вы <strong>регистрируете</strong> сервисы, а контейнер <strong>сам собирает</strong> объекты
       и передаёт зависимости в конструкторы.</p>
 
@@ -51,7 +51,7 @@ app.Run();</code></pre>
       <p>Это не «одно действие в разных местах», а <strong>два разных шага</strong>:</p>
       <ul>
         <li><strong>Регистрация</strong> — в точке входа <code>Program.cs</code>, до
-          <code>builder.Build()</code> (глава 15). Выполняется <strong>один раз при запуске</strong>.</li>
+          <code>builder.Build()</code> (глава 16). Выполняется <strong>один раз при запуске</strong>.</li>
         <li><strong>Сами классы</strong> — в обычных файлах проекта. Они ничего не знают о контейнере: просто
           просят зависимости в конструкторе.</li>
       </ul>
@@ -148,9 +148,9 @@ public sealed class ReportService(AppDbContext db) // Scoped попал в Singl
 
     <div class="box note">
       <span class="t">Связь с другими главами</span>
-      <p>Всё это «включается» в конкретном месте приложения — в точке входа и хостинге (глава 15).
-        Lifetimes у конфигурации и опций — в главе 16. История миграции, где DI болит сильнее всего, —
-        в главе 29.</p>
+      <p>Всё это «включается» в конкретном месте приложения — в точке входа и хостинге (глава 16).
+        Lifetimes у конфигурации и опций — в главе 17. История миграции, где DI болит сильнее всего, —
+        в главе 30.</p>
     </div>
 
     <div class="box gold">
@@ -161,8 +161,8 @@ public sealed class ReportService(AppDbContext db) // Scoped попал в Singl
     </div>
 
     <div class="pager">
-      <a href="ch13-loose-coupling.html">← <span class="sp">Глава 13. Слабая связанность</span></a>
-      <a href="ch15-hosting.html"><span class="sp">Глава 15. Точка входа и хостинг</span> →</a>
+      <a href="ch14-loose-coupling.html">← <span class="sp">Глава 14. Слабая связанность</span></a>
+      <a href="ch16-hosting.html"><span class="sp">Глава 16. Точка входа и хостинг</span> →</a>
     </div>
   </div>
 </div>

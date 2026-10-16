@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 5 · Сборка мусора и цена аллокаций</title>
+<title>Глава 6 · Сборка мусора и цена аллокаций</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch06-allocations.html">Далее →</a>
+  <a href="ch07-allocations.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть II · Память</div>
-    <h1>Глава 5. Сборка мусора и цена аллокаций</h1>
+    <h1>Глава 6. Сборка мусора и цена аллокаций</h1>
     <p class="sublead">Теперь, когда мы знаем, где живут объекты, разберём, как их убирает GC и почему под
       нагрузкой важна не «память вообще», а скорость создания объектов.</p>
 
@@ -67,7 +67,7 @@
         <li><strong>Gen2:</strong> <code>DbContext</code>-синглтоны, кэш справочника, настройки — созданы
           один раз при старте.</li>
         <li><strong>LOH:</strong> большой массив на 1 МБ (например, буфер выгрузки) — попадает сюда, потому
-          что больше 85 КБ (глава 6).</li>
+          что больше 85 КБ (глава 7).</li>
       </ul>
     </div>
 
@@ -83,7 +83,7 @@
     <h2>Крупные объекты (LOH)</h2>
     <p>Массивы и буферы от ~85 КБ попадают в <strong>Large Object Heap</strong> и собираются только вместе
       с Gen2. Поэтому большие временные буферы дороги: их лучше не создавать заново, а переиспользовать
-      (об этом — глава 6).</p>
+      (об этом — глава 7).</p>
 
     <h2>Что создаёт «лишний» мусор</h2>
     <table>
@@ -99,13 +99,13 @@
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
       <p>Под нагрузкой важна <strong>скорость аллокаций</strong>, а не объём памяти. Gen0 дёшев, Gen2 и LOH
-        дороже. Практический вывод: не создавать лишний мусор на горячем пути. Как именно — в главе 6;
-        измерять — в главе 20.</p>
+        дороже. Практический вывод: не создавать лишний мусор на горячем пути. Как именно — в главе 7;
+        измерять — в главе 21.</p>
     </div>
 
     <div class="pager">
       <a href="ch04-stack-heap-types.html">← <span class="sp">Глава 4. Стек, куча и типы</span></a>
-      <a href="ch06-allocations.html"><span class="sp">Глава 6. Аллокации на практике</span> →</a>
+      <a href="ch07-allocations.html"><span class="sp">Глава 7. Аллокации на практике</span> →</a>
     </div>
   </div>
 </div>

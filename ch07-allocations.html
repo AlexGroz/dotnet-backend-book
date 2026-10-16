@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 6 · Аллокации на практике: строки, коллекции, пули</title>
+<title>Глава 7 · Аллокации на практике: строки, коллекции, пули</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch07-threads.html">Далее →</a>
+  <a href="ch08-threads.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть II · Память</div>
-    <h1>Глава 6. Аллокации на практике: строки, коллекции, пули</h1>
+    <h1>Глава 7. Аллокации на практике: строки, коллекции, пули</h1>
     <p class="sublead">Зная, что под нагрузкой дорог не объём памяти, а скорость создания объектов, посмотрим,
       как сократить мусор конкретными приёмами.</p>
 
@@ -64,7 +64,7 @@ string result = sb.ToString();</code></pre>
       новый объект (и потом выбрасывать его), объект берут из пула, используют и <strong>возвращают
       обратно</strong>. Так аллокаций становится сильно меньше.</p>
     <p>Особенно это важно для <strong>крупных буферов</strong>: массивы от ~85 КБ попадают в LOH и дороги
-      для GC (глава 5).</p>
+      для GC (глава 6).</p>
 
     <div class="codewrap">
       <p class="cap">ArrayPool: переиспользование буферов-массивов</p>
@@ -101,7 +101,7 @@ finally
           <code>finally</code>.</li>
         <li><strong><code>ct</code></strong> — это <strong>CancellationToken</strong>, «токен отмены». Его
           передают в асинхронные методы, чтобы операцию можно было прервать (например, клиент отключился).
-          Подробнее — в главе 11.</li>
+          Подробнее — в главе 12.</li>
       </ul>
     </div>
 
@@ -154,7 +154,7 @@ int ParseGood(string s)
 
     <div class="box warn">
       <span class="t">Правило хорошего тона</span>
-      <p>Всё это — только для <strong>горячих путей</strong>, и только по результатам измерений (глава 20).
+      <p>Всё это — только для <strong>горячих путей</strong>, и только по результатам измерений (глава 21).
         Преждевременно усложнять обычный код <code>Span</code> и пулами — вредно: теряется читаемость без
         заметной выгоды.</p>
     </div>
@@ -167,8 +167,8 @@ int ParseGood(string s)
     </div>
 
     <div class="pager">
-      <a href="ch05-gc.html">← <span class="sp">Глава 5. Сборка мусора и цена аллокаций</span></a>
-      <a href="ch07-threads.html"><span class="sp">Глава 7. Потоки, ядра и планировщик</span> →</a>
+      <a href="ch06-gc.html">← <span class="sp">Глава 6. Сборка мусора и цена аллокаций</span></a>
+      <a href="ch08-threads.html"><span class="sp">Глава 8. Потоки, ядра и планировщик</span> →</a>
     </div>
   </div>
 </div>

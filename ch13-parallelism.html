@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 12 · Параллелизм с ограничениями</title>
+<title>Глава 13 · Параллелизм с ограничениями</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,13 +13,13 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch13-loose-coupling.html">Далее →</a>
+  <a href="ch14-loose-coupling.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть III · Конкурентность</div>
-    <h1>Глава 12. Параллелизм с ограничениями и потоковая обработка</h1>
-    <p class="sublead">Мы умеем не блокировать поток (глава 11). Теперь — как запускать несколько операций
+    <h1>Глава 13. Параллелизм с ограничениями и потоковая обработка</h1>
+    <p class="sublead">Мы умеем не блокировать поток (глава 12). Теперь — как запускать несколько операций
       сразу и почему это обязательно ограничивать.</p>
 
     <h2>Независимые операции — параллельно</h2>
@@ -41,7 +41,7 @@ await Task.WhenAll(ta, tb);</code></pre>
     <p>Соблазнительно написать «запустить всё сразу» на тысячу элементов. Но ресурсы конечны:</p>
     <ul>
       <li><strong>пул соединений к БД</strong> — их десятки, а не тысячи (глава 22 книги SQL);</li>
-      <li><strong>потоки пула</strong> — их нельзя плодить бесконечно (глава 8);</li>
+      <li><strong>потоки пула</strong> — их нельзя плодить бесконечно (глава 9);</li>
       <li><strong>сеть и внешние сервисы</strong> — у них свои лимиты.</li>
     </ul>
     <p>Если запросов больше, чем «мест», остальные встают в очередь, задержка растёт, а дальше начинаются
@@ -86,7 +86,7 @@ finally { Gate.Release(); }</code></pre>
         <tr><td>Пара независимых вызовов</td><td><code>Task.WhenAll</code></td></tr>
         <tr><td>Ограничить веер операций</td><td><code>SemaphoreSlim</code> / <code>Parallel.ForEachAsync</code></td></tr>
         <tr><td>Большой результат / поток данных</td><td><code>IAsyncEnumerable</code></td></tr>
-        <tr><td>Развязка «принять» и «обработать»</td><td><code>Channel&lt;T&gt;</code> (глава 25)</td></tr>
+        <tr><td>Развязка «принять» и «обработать»</td><td><code>Channel&lt;T&gt;</code> (глава 26)</td></tr>
       </tbody>
     </table>
 
@@ -98,8 +98,8 @@ finally { Gate.Release(); }</code></pre>
     </div>
 
     <div class="pager">
-      <a href="ch11-async.html">← <span class="sp">Глава 11. Асинхронность: async/await</span></a>
-      <a href="ch13-loose-coupling.html"><span class="sp">Глава 13. Слабая связанность</span> →</a>
+      <a href="ch12-async.html">← <span class="sp">Глава 12. Асинхронность: async/await</span></a>
+      <a href="ch14-loose-coupling.html"><span class="sp">Глава 14. Слабая связанность</span> →</a>
     </div>
   </div>
 </div>

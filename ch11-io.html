@@ -3,19 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 10 · Ввод-вывод: блокирующее и неблокирующее ожидание</title>
+<title>Глава 11 · Ввод-вывод: блокирующее и неблокирующее ожидание</title>
 <link rel="stylesheet" href="book.css">
 </head>
 <body>
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch11-async.html">Далее →</a>
+  <a href="ch12-async.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть III · Конкурентность</div>
-    <h1>Глава 10. Ввод-вывод: блокирующее и неблокирующее ожидание</h1>
+    <h1>Глава 11. Ввод-вывод: блокирующее и неблокирующее ожидание</h1>
     <p class="sublead">Самая выгодная точка оптимизации сервиса. Понимание этой главы — ключ к асинхронности,
       которую разберём дальше.</p>
 
@@ -39,7 +39,7 @@
       <span class="t">Почему это плохо под нагрузкой</span>
       <p>Если каждый запрос держит поток, пока ждёт базу, то число одновременных запросов ограничено числом
         потоков. Пришли запросы сверх этого — они встают в очередь. Именно так рождается «голодание» пула
-        из главы 8.</p>
+        из главы 9.</p>
     </div>
 
     <h2>Неблокирующее ожидание: поток свободен</h2>
@@ -89,8 +89,8 @@
     </div>
 
     <div class="pager">
-      <a href="ch09-synchronization.html">← <span class="sp">Глава 9. Общие данные и синхронизация</span></a>
-      <a href="ch11-async.html"><span class="sp">Глава 11. Асинхронность: async/await</span> →</a>
+      <a href="ch10-synchronization.html">← <span class="sp">Глава 10. Общие данные и синхронизация</span></a>
+      <a href="ch12-async.html"><span class="sp">Глава 12. Асинхронность: async/await</span> →</a>
     </div>
   </div>
 </div>

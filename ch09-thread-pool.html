@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 8 · Пул потоков и thread pool starvation</title>
+<title>Глава 9 · Пул потоков и thread pool starvation</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch09-synchronization.html">Далее →</a>
+  <a href="ch10-synchronization.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть III · Конкурентность</div>
-    <h1>Глава 8. Пул потоков и thread pool starvation</h1>
+    <h1>Глава 9. Пул потоков и thread pool starvation</h1>
     <p class="sublead">Потоки создавать дорого, поэтому .NET их переиспользует. Разберём, как устроен пул
       и что такое «голодание», которое убивает задержки.</p>
 
@@ -105,12 +105,12 @@ await:     [отправил запрос] → поток свободен: [о�
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
       <p>Потоки берутся из пула и их нельзя занимать бесполезным ожиданием. Именно поэтому дальше мы
-        перейдём к синхронизации (глава 9), природе ввода-вывода (глава 10) и асинхронности (глава 11).</p>
+        перейдём к синхронизации (глава 10), природе ввода-вывода (глава 11) и асинхронности (глава 12).</p>
     </div>
 
     <div class="pager">
-      <a href="ch07-threads.html">← <span class="sp">Глава 7. Потоки, ядра и планировщик</span></a>
-      <a href="ch09-synchronization.html"><span class="sp">Глава 9. Общие данные и синхронизация</span> →</a>
+      <a href="ch08-threads.html">← <span class="sp">Глава 8. Потоки, ядра и планировщик</span></a>
+      <a href="ch10-synchronization.html"><span class="sp">Глава 10. Общие данные и синхронизация</span> →</a>
     </div>
   </div>
 </div>

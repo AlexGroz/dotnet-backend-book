@@ -36,66 +36,62 @@
   <div class="toc-part">.NET · Часть II. Память</div>
   <div class="toc">
     <a href="ch04-stack-heap-types.html"><span class="n">Глава 4</span><span class="t">Стек, куча и типы: где живут данные</span><span class="d"><span class="tag lead">подводящая</span>Значимые и ссылочные типы, ссылки, первое знакомство с упаковкой</span></a>
-    <a href="ch05-gc.html"><span class="n">Глава 5</span><span class="t">Сборка мусора и цена аллокаций</span><span class="d"><span class="tag core">основная</span>Поколения, LOH, Server GC и почему важна скорость создания объектов</span></a>
-    <a href="ch06-allocations.html"><span class="n">Глава 6</span><span class="t">Аллокации на практике: строки, коллекции, пули</span><span class="d"><span class="tag core">основная</span>Как сократить мусор: boxing, StringBuilder, ArrayPool</span></a>
+    <a href="ch05-ref.html"><span class="n">Глава 5</span><span class="t">ref, out и in: передача по ссылке</span><span class="d"><span class="tag lead">подводящая</span>Как аргументы попадают в метод: по значению или по ссылке</span></a>
+    <a href="ch06-gc.html"><span class="n">Глава 6</span><span class="t">Сборка мусора и цена аллокаций</span><span class="d"><span class="tag core">основная</span>Поколения, LOH, Server GC и почему важна скорость создания объектов</span></a>
+    <a href="ch07-allocations.html"><span class="n">Глава 7</span><span class="t">Аллокации на практике: строки, коллекции, пулы</span><span class="d"><span class="tag core">основная</span>Как сократить мусор: boxing, StringBuilder, ArrayPool</span></a>
   </div>
 
   <div class="toc-part">.NET · Часть III. Конкурентность</div>
   <div class="toc">
-    <a href="ch07-threads.html"><span class="n">Глава 7</span><span class="t">Потоки, ядра и планировщик: почему поток дорогой</span><span class="d"><span class="tag lead">подводящая</span>Стек потока, переключение контекста, как ОС распределяет время</span></a>
-    <a href="ch08-thread-pool.html"><span class="n">Глава 8</span><span class="t">Пул потоков и thread pool starvation</span><span class="d"><span class="tag core">основная</span>Зачем пул, что такое «голодание» и как его не словить</span></a>
-    <a href="ch09-synchronization.html"><span class="n">Глава 9</span><span class="t">Общие данные и синхронизация</span><span class="d"><span class="tag lead">подводящая</span>Гонки, lock, SemaphoreSlim, Interlocked — база перед асинхронностью</span></a>
-    <a href="ch10-io.html"><span class="n">Глава 10</span><span class="t">Ввод-вывод: блокирующее и неблокирующее ожидание</span><span class="d"><span class="tag lead">подводящая</span>Почему ожидание сети и диска особенное — прямое введение к async</span></a>
-    <a href="ch11-async.html"><span class="n">Глава 11</span><span class="t">Асинхронность: async/await и Task</span><span class="d"><span class="tag core">основная</span>Машина состояний, Task и ValueTask, правило «async до конца»</span></a>
-    <a href="ch12-parallelism.html"><span class="n">Глава 12</span><span class="t">Параллелизм с ограничениями и потоковая обработка</span><span class="d"><span class="tag core">основная</span>WhenAll, SemaphoreSlim, IAsyncEnumerable, backpressure</span></a>
+    <a href="ch08-threads.html"><span class="n">Глава 8</span><span class="t">Потоки, ядра и планировщик: почему поток дорогой</span><span class="d"><span class="tag lead">подводящая</span>Стек потока, переключение контекста, как ОС распределяет время</span></a>
+    <a href="ch09-thread-pool.html"><span class="n">Глава 9</span><span class="t">Пул потоков и thread pool starvation</span><span class="d"><span class="tag core">основная</span>Зачем пул, что такое «голодание» и как его не словить</span></a>
+    <a href="ch10-synchronization.html"><span class="n">Глава 10</span><span class="t">Общие данные и синхронизация</span><span class="d"><span class="tag lead">подводящая</span>Гонки, lock, SemaphoreSlim, Interlocked — база перед асинхронностью</span></a>
+    <a href="ch11-io.html"><span class="n">Глава 11</span><span class="t">Ввод-вывод: блокирующее и неблокирующее ожидание</span><span class="d"><span class="tag lead">подводящая</span>Почему ожидание сети и диска особенное — прямое введение к async</span></a>
+    <a href="ch12-async.html"><span class="n">Глава 12</span><span class="t">Асинхронность: async/await и Task</span><span class="d"><span class="tag core">основная</span>Машина состояний, Task и ValueTask, правило «async до конца»</span></a>
+    <a href="ch13-parallelism.html"><span class="n">Глава 13</span><span class="t">Параллелизм с ограничениями и потоковая обработка</span><span class="d"><span class="tag core">основная</span>WhenAll, SemaphoreSlim, IAsyncEnumerable, backpressure</span></a>
   </div>
   <div class="toc-part">.NET · Часть IV. Сборка приложения</div>
   <div class="toc">
-    <a href="ch13-loose-coupling.html"><span class="n">Глава 13</span><span class="t">Слабая связанность: зачем внедрять зависимости</span><span class="d"><span class="tag lead">подводящая</span>Интерфейсы, тестируемость и цена жёстких связей</span></a>
-    <a href="ch14-di.html"><span class="n">Глава 14</span><span class="t">Внедрение зависимостей и жизненные циклы</span><span class="d"><span class="tag core">основная</span>Transient / Scoped / Singleton и Captive Dependency</span></a>
-    <a href="ch15-hosting.html"><span class="n">Глава 15</span><span class="t">Точка входа и хостинг приложения</span><span class="d"><span class="tag lead">подводящая</span>Program, Generic Host, окружения — каркас, в который всё встраивается</span></a>
-    <a href="ch16-config.html"><span class="n">Глава 16</span><span class="t">Конфигурация и опции</span><span class="d"><span class="tag core">основная</span>IConfiguration, IOptions* и их lifetimes</span></a>
+    <a href="ch14-loose-coupling.html"><span class="n">Глава 14</span><span class="t">Слабая связанность: зачем внедрять зависимости</span><span class="d"><span class="tag lead">подводящая</span>Интерфейсы, тестируемость и цена жёстких связей</span></a>
+    <a href="ch15-di.html"><span class="n">Глава 15</span><span class="t">Внедрение зависимостей и жизненные циклы</span><span class="d"><span class="tag core">основная</span>Transient / Scoped / Singleton и Captive Dependency</span></a>
+    <a href="ch16-hosting.html"><span class="n">Глава 16</span><span class="t">Точка входа и хостинг приложения</span><span class="d"><span class="tag lead">подводящая</span>Program, Generic Host, окружения — каркас, в который всё встраивается</span></a>
+    <a href="ch17-config.html"><span class="n">Глава 17</span><span class="t">Конфигурация и опции</span><span class="d"><span class="tag core">основная</span>IConfiguration, IOptions* и их lifetimes</span></a>
   </div>
 
   <div class="toc-part">.NET · Часть V. Путь запроса</div>
   <div class="toc">
-    <a href="ch17-http-kestrel.html"><span class="n">Глава 17</span><span class="t">HTTP и веб-сервер: сокеты и Kestrel</span><span class="d"><span class="tag lead">подводящая</span>Как запрос попадает в приложение и что делает веб-сервер</span></a>
-    <a href="ch18-middleware.html"><span class="n">Глава 18</span><span class="t">Конвейер: middleware и маршрутизация</span><span class="d"><span class="tag core">основная</span>Путь запроса через приложение, Minimal API vs MVC</span></a>
-    <a href="ch19-logging.html"><span class="n">Глава 19</span><span class="t">Логирование и наблюдаемость</span><span class="d"><span class="tag core">основная</span>Структурные логи, метрики, трейсы, OpenTelemetry</span></a>
-    <a href="ch20-measurements.html"><span class="n">Глава 20</span><span class="t">Измерения и профилирование</span><span class="d"><span class="tag core">основная</span>p95/p99, dotnet-counters, BenchmarkDotNet, нагрузочные тесты</span></a>
+    <a href="ch18-http-kestrel.html"><span class="n">Глава 18</span><span class="t">HTTP и веб-сервер: сокеты и Kestrel</span><span class="d"><span class="tag lead">подводящая</span>Как запрос попадает в приложение и что делает веб-сервер</span></a>
+    <a href="ch19-middleware.html"><span class="n">Глава 19</span><span class="t">Конвейер: middleware и маршрутизация</span><span class="d"><span class="tag core">основная</span>Путь запроса через приложение, Minimal API vs MVC</span></a>
+    <a href="ch20-logging.html"><span class="n">Глава 20</span><span class="t">Логирование и наблюдаемость</span><span class="d"><span class="tag core">основная</span>Структурные логи, метрики, трейсы, OpenTelemetry</span></a>
+    <a href="ch21-measurements.html"><span class="n">Глава 21</span><span class="t">Измерения и профилирование</span><span class="d"><span class="tag core">основная</span>p95/p99, dotnet-counters, BenchmarkDotNet, нагрузочные тесты</span></a>
   </div>
 
   <div class="toc-part">.NET · Часть VI. Данные и интеграции</div>
   <div class="toc">
-    <a href="ch21-sql.html"><span class="n">Глава 21</span><span class="t">Реляционные БД и SQL: индексы и план запроса</span><span class="d"><span class="tag lead">подводящая</span>Что происходит в базе, прежде чем говорить про EF Core</span></a>
-    <a href="ch22-db-connection.html"><span class="n">Глава 22</span><span class="t">Подключение к БД из .NET: ADO.NET и пул соединений</span><span class="d"><span class="tag lead">подводящая</span>Соединение как ресурс, пул соединений, почему это про нагрузку</span></a>
-    <a href="ch23-ef-core.html"><span class="n">Глава 23</span><span class="t">ORM и EF Core эффективно</span><span class="d"><span class="tag core">основная</span>Tracking, проекции, N+1, массовые операции</span></a>
-    <a href="ch24-cache.html"><span class="n">Глава 24</span><span class="t">Кэширование</span><span class="d"><span class="tag core">основная</span>L1/L2, инвалидация, cache stampede</span></a>
-    <a href="ch25-channels.html"><span class="n">Глава 25</span><span class="t">Очереди и фоновая обработка</span><span class="d"><span class="tag core">основная</span>Channels, батчинг, BackgroundService</span></a>
+    <a href="ch22-sql.html"><span class="n">Глава 22</span><span class="t">Реляционные БД и SQL: индексы и план запроса</span><span class="d"><span class="tag lead">подводящая</span>Что происходит в базе, прежде чем говорить про EF Core</span></a>
+    <a href="ch23-db-connection.html"><span class="n">Глава 23</span><span class="t">Подключение к БД из .NET: ADO.NET и пул соединений</span><span class="d"><span class="tag lead">подводящая</span>Соединение как ресурс, пул соединений, почему это про нагрузку</span></a>
+    <a href="ch24-ef-core.html"><span class="n">Глава 24</span><span class="t">ORM и EF Core эффективно</span><span class="d"><span class="tag core">основная</span>Tracking, проекции, N+1, массовые операции</span></a>
+    <a href="ch25-cache.html"><span class="n">Глава 25</span><span class="t">Кэширование</span><span class="d"><span class="tag core">основная</span>L1/L2, инвалидация, cache stampede</span></a>
+    <a href="ch26-channels.html"><span class="n">Глава 26</span><span class="t">Очереди и фоновая обработка</span><span class="d"><span class="tag core">основная</span>Channels, батчинг, BackgroundService</span></a>
   </div>
 
   <div class="toc-part">.NET · Часть VII. Эксплуатация</div>
   <div class="toc">
-    <a href="ch26-resilience.html"><span class="n">Глава 26</span><span class="t">Устойчивость внешних вызовов</span><span class="d"><span class="tag core">основная</span>Таймауты, retry, circuit breaker, IHttpClientFactory</span></a>
-    <a href="ch27-scaling.html"><span class="n">Глава 27</span><span class="t">Масштабирование и отказоустойчивость</span><span class="d"><span class="tag core">основная</span>Rate limiting, health checks, горизонтальное масштабирование</span></a>
+    <a href="ch27-resilience.html"><span class="n">Глава 27</span><span class="t">Устойчивость внешних вызовов</span><span class="d"><span class="tag core">основная</span>Таймауты, retry, circuit breaker, IHttpClientFactory</span></a>
+    <a href="ch28-scaling.html"><span class="n">Глава 28</span><span class="t">Масштабирование и отказоустойчивость</span><span class="d"><span class="tag core">основная</span>Rate limiting, health checks, горизонтальное масштабирование</span></a>
   </div>
 
   <div class="toc-part">.NET · Часть VIII. Практика</div>
   <div class="toc">
-    <a href="ch28-case.html"><span class="n">Глава 28</span><span class="t">Сквозной разбор: высоконагруженный эндпоинт</span><span class="d"><span class="tag core">основная</span>Собираем всё вместе на одном примере</span></a>
-    <a href="ch29-migration.html"><span class="n">Глава 29</span><span class="t">Миграция legacy: .NET Framework → .NET Core</span><span class="d"><span class="tag core">основная</span>Боли перехода на практике</span></a>
-    <a href="ch30-interview.html"><span class="n">Глава 30</span><span class="t">Как отвечать на интервью</span><span class="d"><span class="tag core">основная</span>Структура ответа и шпаргалки по всем темам</span></a>
+    <a href="ch29-case.html"><span class="n">Глава 29</span><span class="t">Сквозной разбор: высоконагруженный эндпоинт</span><span class="d"><span class="tag core">основная</span>Собираем всё вместе на одном примере</span></a>
+    <a href="ch30-migration.html"><span class="n">Глава 30</span><span class="t">Миграция legacy: .NET Framework → .NET Core</span><span class="d"><span class="tag core">основная</span>Боли перехода на практике</span></a>
+    <a href="ch31-interview.html"><span class="n">Глава 31</span><span class="t">Как отвечать на интервью</span><span class="d"><span class="tag core">основная</span>Структура ответа и шпаргалки по всем темам</span></a>
   </div>
 
   <div class="toc-part">.NET · Часть IX. Интеграция и API</div>
   <div class="toc">
-    <a href="ch31-grpc-rest-brokers.html"><span class="n">Глава 31</span><span class="t">REST, gRPC и брокеры сообщений</span><span class="d"><span class="tag core">основная</span>Что когда выбирать и почему на практике используют всё три</span></a>
-    <a href="ch32-validation.html"><span class="n">Глава 32</span><span class="t">Валидация входных данных в ASP.NET Core</span><span class="d"><span class="tag core">основная</span>Уровни проверки, DTO, коды ответов и типичные ошибки</span></a>
-  </div>
-
-  <div class="toc-part">Приложения</div>
-  <div class="toc">
-    <a href="apx-a-ref.html"><span class="n">Приложение A</span><span class="t">ref, out и in: передача по ссылке</span><span class="d">Справочник по ключевым словам передачи аргументов (к главам 4, 6, 9)</span></a>
+    <a href="ch32-grpc-rest-brokers.html"><span class="n">Глава 32</span><span class="t">REST, gRPC и брокеры сообщений</span><span class="d"><span class="tag core">основная</span>Что когда выбирать и почему на практике используют всё три</span></a>
+    <a href="ch33-validation.html"><span class="n">Глава 33</span><span class="t">Валидация входных данных в ASP.NET Core</span><span class="d"><span class="tag core">основная</span>Уровни проверки, DTO, коды ответов и типичные ошибки</span></a>
   </div>
 
   <p style="color:var(--muted);font-size:14px;margin-top:34px">

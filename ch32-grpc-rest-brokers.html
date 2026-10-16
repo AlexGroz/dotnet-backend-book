@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 31 · REST, gRPC и брокеры сообщений</title>
+<title>Глава 32 · REST, gRPC и брокеры сообщений</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -14,12 +14,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch32-validation.html">Далее →</a>
+  <a href="ch33-validation.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть IX · Интеграция и API</div>
-    <h1>Глава 31. REST, gRPC и брокеры сообщений: что когда выбирать</h1>
+    <h1>Глава 32. REST, gRPC и брокеры сообщений: что когда выбирать</h1>
     <p class="sublead">REST с JSON удобен, но не всегда оптимален: текст и сериализация стоят ресурсов.
       Разберём, когда остаться на REST, а когда перейти на gRPC или брокер сообщений.</p>
 
@@ -94,7 +94,7 @@ message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
     <ul>
       <li><strong>развязка по времени:</strong> отправитель не ждёт, пока получатель закончит;</li>
       <li><strong>сглаживание пиков:</strong> очередь копит сообщения, а обработчик разбирает их в своём темпе
-        (это и есть backpressure из главы 25);</li>
+        (это и есть backpressure из главы 26);</li>
       <li><strong>надёжность:</strong> сообщение не потеряется, если получатель был недоступен;</li>
       <li><strong>масштабирование:</strong> обработчиков можно добавить — они разберут очередь быстрее.</li>
     </ul>
@@ -110,7 +110,7 @@ message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
     <p><strong>Выбираем брокер</strong>, когда:</p>
     <ul>
       <li>работа <strong>долгая</strong> и ответ не нужен прямо сейчас (лучше сразу вернуть
-        <code>202 Accepted</code> — ср. глава 25);</li>
+        <code>202 Accepted</code> — ср. глава 26);</li>
       <li>нужно <strong>сгладить пики</strong> нагрузки;</li>
       <li>это <strong>события</strong> для других систем («заказ оформлен» → уведомления, отчётность, склад);</li>
       <li>важна надёжность: «сделать обязательно, даже если сервис падал».</li>
@@ -168,8 +168,8 @@ message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
     </div>
 
     <div class="pager">
-      <a href="ch30-interview.html">← <span class="sp">Глава 30. Как отвечать на интервью</span></a>
-      <a href="ch32-validation.html"><span class="sp">Глава 32. Валидация входных данных</span> →</a>
+      <a href="ch31-interview.html">← <span class="sp">Глава 31. Как отвечать на интервью</span></a>
+      <a href="ch33-validation.html"><span class="sp">Глава 33. Валидация входных данных</span> →</a>
     </div>
   </div>
 </div>

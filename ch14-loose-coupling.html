@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 13 · Слабая связанность: зачем внедрять зависимости</title>
+<title>Глава 14 · Слабая связанность: зачем внедрять зависимости</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,14 +13,14 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch14-di.html">Далее →</a>
+  <a href="ch15-di.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть IV · Сборка приложения</div>
-    <h1>Глава 13. Слабая связанность: зачем внедрять зависимости</h1>
+    <h1>Глава 14. Слабая связанность: зачем внедрять зависимости</h1>
     <p class="sublead">Начинаем часть про сборку приложения. Прежде чем говорить о контейнере зависимостей
-      (глава 14), ответим на вопрос «зачем вообще всё это нужно».</p>
+      (глава 15), ответим на вопрос «зачем вообще всё это нужно».</p>
 
     <h2>Жёсткая связь — это проблема</h2>
     <p>Класс, который сам создаёт свои зависимости, «прибит» к конкретным реализациям:</p>
@@ -73,7 +73,7 @@ public class OrderService(IOrderRepository repo)
       <span class="t">Теперь зависимости нужно «собирать»</span>
       <p>Как только класс перестал создавать зависимости сам, кто-то должен их ему <strong>передать</strong>.
         Раньше это делали вручную или через статику — и это превращалось в кашу. Поэтому нужен
-        <strong>контейнер</strong>, который сам собирает объекты и раздаёт зависимости. О нём — глава 14.</p>
+        <strong>контейнер</strong>, который сам собирает объекты и раздаёт зависимости. О нём — глава 15.</p>
     </div>
 
     <div class="box gold">
@@ -84,8 +84,8 @@ public class OrderService(IOrderRepository repo)
     </div>
 
     <div class="pager">
-      <a href="ch12-parallelism.html">← <span class="sp">Глава 12. Параллелизм с ограничениями</span></a>
-      <a href="ch14-di.html"><span class="sp">Глава 14. Внедрение зависимостей и жизненные циклы</span> →</a>
+      <a href="ch13-parallelism.html">← <span class="sp">Глава 13. Параллелизм с ограничениями</span></a>
+      <a href="ch15-di.html"><span class="sp">Глава 15. Внедрение зависимостей и жизненные циклы</span> →</a>
     </div>
   </div>
 </div>

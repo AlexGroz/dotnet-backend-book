@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 11 · Асинхронность: async/await и Task</title>
+<title>Глава 12 · Асинхронность: async/await и Task</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch12-parallelism.html">Далее →</a>
+  <a href="ch13-parallelism.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть III · Конкурентность</div>
-    <h1>Глава 11. Асинхронность: async/await и Task</h1>
+    <h1>Глава 12. Асинхронность: async/await и Task</h1>
     <p class="sublead">Главный инструмент серверной разработки на .NET: как обслуживать много запросов малым
       числом потоков и не превратить это в «стоп-кран».</p>
 
@@ -38,7 +38,7 @@
 
     <h2>Правило №1: async до конца</h2>
     <p>Если метод асинхронный — он должен быть таким на всём пути, от эндпоинта до последнего слоя.
-      Смешивание async и синхронного ожидания — причина «голодания» пула из главы 8.</p>
+      Смешивание async и синхронного ожидания — причина «голодания» пула из главы 9.</p>
 
     <h2>Что полезно знать</h2>
     <table>
@@ -68,12 +68,12 @@
       <span class="t">★ Что запомнить из главы</span>
       <p>async/await позволяет не занимать поток во время ввода-вывода — это основа высокой пропускной
         способности. Держите путь асинхронным от начала до конца и пробрасывайте отмену. Как запускать
-        несколько операций сразу и как это ограничивать — в главе 12.</p>
+        несколько операций сразу и как это ограничивать — в главе 13.</p>
     </div>
 
     <div class="pager">
-      <a href="ch10-io.html">← <span class="sp">Глава 10. Ввод-вывод: блокирующее и неблокирующее ожидание</span></a>
-      <a href="ch12-parallelism.html"><span class="sp">Глава 12. Параллелизм с ограничениями</span> →</a>
+      <a href="ch11-io.html">← <span class="sp">Глава 11. Ввод-вывод: блокирующее и неблокирующее ожидание</span></a>
+      <a href="ch13-parallelism.html"><span class="sp">Глава 13. Параллелизм с ограничениями</span> →</a>
     </div>
   </div>
 </div>

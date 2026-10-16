@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 9 · Общие данные и синхронизация</title>
+<title>Глава 10 · Общие данные и синхронизация</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch10-io.html">Далее →</a>
+  <a href="ch11-io.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть III · Конкурентность</div>
-    <h1>Глава 9. Общие данные и синхронизация</h1>
+    <h1>Глава 10. Общие данные и синхронизация</h1>
     <p class="sublead">Потоки делят память. Это значит, что два потока могут менять одни и те же данные —
       и получать непредсказуемый результат. Разберёмся, как с этим быть.</p>
 
@@ -98,7 +98,7 @@ Console.WriteLine(b);   // 6 — оригинал изменился</code></pre
       <p>Родственные ключевые слова: <code>out</code> — «вернуть» значение наружу
         (<code>int.TryParse(s, out var v)</code>); <code>in</code> — передать по ссылке только для чтения
         (экономит копирование больших <code>struct</code>). Подробнее — в
-        <a href="apx-a-ref.html">Приложении A</a>.</p>
+        <a href="ch05-ref.html">главе 5</a>.</p>
     </div>
 
     <div class="codewrap">
@@ -141,7 +141,7 @@ if (_cache.TryRemove(id, out var removed))
       <span class="t">Если нужно «ждать» внутри защиты</span>
       <p>Для асинхронных сценариев используют <code>SemaphoreSlim</code> с <code>WaitAsync</code> — он умеет
         освобождать поток на время ожидания. Это тот же <code>SemaphoreSlim</code>, которым мы будем
-        ограничивать параллелизм в главе 12.</p>
+        ограничивать параллелизм в главе 13.</p>
     </div>
 
     <h2>Лучшая синхронизация — её отсутствие</h2>
@@ -158,8 +158,8 @@ if (_cache.TryRemove(id, out var removed))
     </div>
 
     <div class="pager">
-      <a href="ch08-thread-pool.html">← <span class="sp">Глава 8. Пул потоков</span></a>
-      <a href="ch10-io.html"><span class="sp">Глава 10. Ввод-вывод: блокирующее и неблокирующее ожидание</span> →</a>
+      <a href="ch09-thread-pool.html">← <span class="sp">Глава 9. Пул потоков</span></a>
+      <a href="ch11-io.html"><span class="sp">Глава 11. Ввод-вывод: блокирующее и неблокирующее ожидание</span> →</a>
     </div>
   </div>
 </div>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 15 · Точка входа и хостинг приложения</title>
+<title>Глава 16 · Точка входа и хостинг приложения</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch16-config.html">Далее →</a>
+  <a href="ch17-config.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть IV · Сборка приложения</div>
-    <h1>Глава 15. Точка входа и хостинг приложения</h1>
+    <h1>Глава 16. Точка входа и хостинг приложения</h1>
     <p class="sublead">Каркас, который связывает всё вместе: где регистрируются сервисы, где берётся
       конфигурация и в каком порядке приложение запускается.</p>
 
@@ -26,13 +26,13 @@
     <div class="codewrap">
       <pre><code class="language-csharp">var builder = WebApplication.CreateBuilder(args);
 
-// 1) регистрация сервисов в контейнере (глава 14)
+// 1) регистрация сервисов в контейнере (глава 15)
 builder.Services.AddScoped&lt;IOrderRepository, OrderRepository&gt;();
 builder.Services.AddControllers();
 
 var app = builder.Build();               // 2) собрать приложение
 
-// 3) настроить конвейер обработки запроса (глава 18)
+// 3) настроить конвейер обработки запроса (глава 19)
 app.UseHttpsRedirection();
 app.MapControllers();
 
@@ -42,11 +42,11 @@ app.Run();                               // 4) запустить и слуша�
     <h2>Что такое Generic Host</h2>
     <p>За этим «билдером» стоит <strong>Generic Host</strong> — общий каркас приложения, который сразу даёт:</p>
     <ul>
-      <li><strong>DI-контейнер</strong> (глава 14);</li>
-      <li><strong>конфигурацию</strong> (глава 16);</li>
+      <li><strong>DI-контейнер</strong> (глава 15);</li>
+      <li><strong>конфигурацию</strong> (глава 17);</li>
       <li><strong>логирование</strong>;</li>
       <li><strong>управление жизненным циклом</strong> (запуск, остановка, gracefull shutdown);</li>
-      <li><strong>hosted services</strong> — фоновые задачи (<code>BackgroundService</code>, глава SQL 25 / .NET 25).</li>
+      <li><strong>hosted services</strong> — фоновые задачи (<code>BackgroundService</code>, глава SQL 25 / .NET 26).</li>
     </ul>
     <p>Важно: это не только веб. Консольное приложение, воркер и даже WPF поднимают тот же
       <code>Host</code> — поэтому DI и конфигурация работают одинаково везде.</p>
@@ -62,8 +62,8 @@ app.Run();                               // 4) запустить и слуша�
     <p>Хост знает текущее окружение (<code>Development</code>, <code>Staging</code>, <code>Production</code>) —
       переменной <code>ASPNETCORE_ENVIRONMENT</code> / <code>DOTNET_ENVIRONMENT</code>. От него зависит:</p>
     <ul>
-      <li>какой файл настроек подхватится (<code>appsettings.Development.json</code>) — глава 16;</li>
-      <li>включать ли подробные страницы ошибок и валидацию сервисов (глава 14).</li>
+      <li>какой файл настроек подхватится (<code>appsettings.Development.json</code>) — глава 17;</li>
+      <li>включать ли подробные страницы ошибок и валидацию сервисов (глава 15).</li>
     </ul>
 
     <div class="codewrap">
@@ -85,8 +85,8 @@ app.Run();                               // 4) запустить и слуша�
     </div>
 
     <div class="pager">
-      <a href="ch14-di.html">← <span class="sp">Глава 14. Внедрение зависимостей и жизненные циклы</span></a>
-      <a href="ch16-config.html"><span class="sp">Глава 16. Конфигурация и опции</span> →</a>
+      <a href="ch15-di.html">← <span class="sp">Глава 15. Внедрение зависимостей и жизненные циклы</span></a>
+      <a href="ch17-config.html"><span class="sp">Глава 17. Конфигурация и опции</span> →</a>
     </div>
   </div>
 </div>

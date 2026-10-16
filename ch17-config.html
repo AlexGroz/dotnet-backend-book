@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 16 · Конфигурация и опции</title>
+<title>Глава 17 · Конфигурация и опции</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="net.html">← Оглавление</a>
   <span class="booktitle">Backend на .NET</span>
-  <a href="ch17-http-kestrel.html">Далее →</a>
+  <a href="ch18-http-kestrel.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть IV · Сборка приложения</div>
-    <h1>Глава 16. Конфигурация и опции</h1>
+    <h1>Глава 17. Конфигурация и опции</h1>
     <p class="sublead">Настройки приложения: откуда они берутся, как их читать и почему у «опций» тоже есть
       жизненные циклы.</p>
 
@@ -27,7 +27,7 @@
       применяются по порядку, и <strong>последний перекрывает предыдущие</strong>:</p>
     <ol>
       <li><code>appsettings.json</code> — базовые значения;</li>
-      <li><code>appsettings.{Environment}.json</code> — переопределения для окружения (глава 15);</li>
+      <li><code>appsettings.{Environment}.json</code> — переопределения для окружения (глава 16);</li>
       <li><strong>переменные окружения</strong> — то, что задаётся в контейнере/на сервере;</li>
       <li><strong>аргументы командной строки</strong>;</li>
       <li>секреты разработчика (локально) — <code>dotnet user-secrets</code>.</li>
@@ -57,7 +57,7 @@ builder.Services
     </div>
 
     <h2>Три варианта чтения опций (и их lifetimes!)</h2>
-    <p>Здесь мы возвращаемся к жизненным циклам из главы 14 — у опций они тоже есть:</p>
+    <p>Здесь мы возвращаемся к жизненным циклам из главы 15 — у опций они тоже есть:</p>
     <table>
       <thead><tr><th>Тип</th><th>Lifetime</th><th>Когда брать</th></tr></thead>
       <tbody>
@@ -91,8 +91,8 @@ builder.Services
     </div>
 
     <div class="pager">
-      <a href="ch15-hosting.html">← <span class="sp">Глава 15. Точка входа и хостинг</span></a>
-      <a href="ch17-http-kestrel.html"><span class="sp">Глава 17. HTTP и веб-сервер: сокеты и Kestrel</span> →</a>
+      <a href="ch16-hosting.html">← <span class="sp">Глава 16. Точка входа и хостинг</span></a>
+      <a href="ch18-http-kestrel.html"><span class="sp">Глава 18. HTTP и веб-сервер: сокеты и Kestrel</span> →</a>
     </div>
   </div>
 </div>
