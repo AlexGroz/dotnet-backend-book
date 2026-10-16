@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 24 · ORM и EF Core эффективно</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -18,10 +21,143 @@
     <h1>Глава 24. ORM и EF Core эффективно</h1>
     <p class="sublead">Tracking, проекции, N+1, массовые операции</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <h2>Что делает EF Core (и за что вы платите)</h2>
+    <p>EF Core — это посредник между объектами C# и таблицами: он строит SQL из LINQ, отслеживает изменения
+      (change tracker) и умеет применять миграции схемы. Плата — <strong>непрозрачность</strong>: не посмотрев
+      на сгенерированный SQL, легко получить лишние запросы и лишний I/O.</p>
+    <p>Хорошая новость: у EF Core есть ровно один «фонарик», который всё показывает:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var query = db.Orders.Where(o =&gt; o.UserId == userId).OrderByDescending(o =&gt; o.CreatedAt).Take(20);
+
+Console.WriteLine(query.ToQueryString());     // SQL, который уйдёт в базу — ДО выполнения
+await query.ToListAsync(ct);</code></pre>
     </div>
+
+    <h2>Четыре приёма, которые дают 90 % эффекта</h2>
+    <ol>
+      <li><strong><code>AsNoTracking()</code> для чтения.</strong> Change tracker не нужен, если данные не будут
+        меняться: меньше памяти и меньше работы на каждый объект.</li>
+      <li><strong>Проекции вместо сущностей.</strong> Выбирайте только нужные поля — это меньше данных и часто
+        позволяет базе использовать покрывающий индекс (SQL-раздел о индексах).</li>
+      <li><strong>Никаких «N+1».</strong> Один запрос на список + по запросу на элемент — классика медленного
+        API. Лечится <code>Include</code>, проекцией или отдельным запросом по списку ключей.</li>
+      <li><strong>Пагинация по ключу.</strong> <code>Skip/Take</code> с глубоким <code>OFFSET</code> тормозит;
+        keyset-пагинация (`where created_at &lt; :last`) работает по индексу независимо от глубины.</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ N+1: один запрос за заказами + по запросу за клиентом каждого заказа
+var orders = await db.Orders.Take(100).ToListAsync(ct);
+foreach (var o in orders) Console.WriteLine(o.Customer.Name);
+
+// ✔ один запрос с проекцией (и без лишних полей)
+var rows = await db.Orders
+    .AsNoTracking()
+    .OrderByDescending(o =&gt; o.CreatedAt)
+    .Take(100)
+    .Select(o =&gt; new OrderRow(o.Id, o.Total, o.Customer.Name))
+    .ToListAsync(ct);</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Include: осторожно с «декартовым взрывом»</span>
+      <p>Несколько <code>Include</code> подряд (две коллекции в одной сущности) дают один запрос с большим
+        соединением и дублирующимися строками. Тогда используют <code>AsSplitQuery()</code> — несколько запросов
+        вместо одного. Выбирать нужно <em>по измерениям</em>, а не по привычке.</p>
+    </div>
+
+    <h2>Смена провайдера: Oracle → PostgreSQL</h2>
+    <p>SQL пишет <strong>провайдер</strong> (<code>Oracle.EntityFrameworkCore</code> →
+      <code>Npgsql.EntityFrameworkCore.PostgreSQL</code>). Поэтому при переезде меняется диалект, а «тот же LINQ»
+      может дать другой — или неожиданно плохой — запрос.</p>
+    <table>
+      <thead><tr><th>Область</th><th>Oracle</th><th>PostgreSQL</th></tr></thead>
+      <tbody>
+        <tr><td>Пагинация</td><td><code>ROW_NUMBER</code> / <code>OFFSET … FETCH</code></td><td><code>LIMIT … OFFSET</code></td></tr>
+        <tr><td>Логический тип</td><td><code>NUMBER(1)</code></td><td><code>boolean</code></td></tr>
+        <tr><td>GUID</td><td><code>RAW(16)</code></td><td><code>uuid</code></td></tr>
+        <tr><td>Пустая строка</td><td><code>''</code> = <code>NULL</code></td><td><code>''</code> ≠ <code>NULL</code></td></tr>
+        <tr><td>Дата-время</td><td><code>DATE</code> содержит время</td><td><code>timestamp</code> ≠ <code>timestamptz</code></td></tr>
+      </tbody>
+    </table>
+    <ul>
+      <li><strong>Проверяйте SQL, а не догадывайтесь:</strong> <code>ToQueryString()</code> и логирование EF
+        показывают, что реально уходит в базу. Если выражение не перевелось — оно выполнится на клиенте (медленно
+        и незаметно).</li>
+      <li><strong>Типы задавайте явно:</strong> <code>HasColumnType("uuid" | "timestamptz")</code>,
+        <code>HasPrecision(18, 2)</code>, <code>HasConversion&lt;string&gt;()</code> — иначе провайдер выберет сам,
+        и это может не совпасть с существующей схемой.</li>
+      <li><strong>Приведения ломают индексы:</strong> если колонка <code>uuid</code>, а параметр приходит как
+        <code>text</code>, в плане появляется <code>Seq Scan</code>. Передавайте <code>Guid</code>/<code>DateTime</code>,
+        а не строки.</li>
+      <li><strong>Время храните в UTC</strong> (<code>DateTime.UtcNow</code>) — иначе <code>timestamptz</code>
+        «поедет» при смене таймзоны сервера.</li>
+      <li><strong>Глубокую пагинацию переведите на keyset</strong> (см. выше) — иначе <code>OFFSET 100000</code>
+        будет читать и выбрасывать сто тысяч строк.</li>
+    </ul>
+
+    <h2>Массовые операции: не тяните данные в память</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✔ один SQL на всю пачку, без загрузки сущностей и change tracker
+await db.Orders
+    .Where(o =&gt; o.Status == OrderStatus.New &amp;&amp; o.CreatedAt &lt; cutoff)
+    .ExecuteUpdateAsync(s =&gt; s.SetProperty(o =&gt; o.Status, OrderStatus.Expired), ct);
+
+await db.Orders.Where(o =&gt; o.CreatedAt &lt; cutoff).ExecuteDeleteAsync(ct);</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>ExecuteUpdate</code>/<code>ExecuteDelete</code></strong> (EF Core 7+) выполняют изменение
+        одной командой. Плюс: они меняют только указанные колонки — это важно для HOT-апдейтов в PostgreSQL
+        (глава 23 SQL-раздела).</li>
+      <li><strong>Массовые вставки:</strong> <code>AddRange</code> с разбивкой на батчи; для миллионов строк —
+        <code>COPY</code> через <code>NpgsqlBinaryImporter</code>, а не по одной сущности.</li>
+      <li><strong>Удаление старых данных</strong> лучше делать секциями (SQL-раздел про секционирование), а не
+        миллионами <code>DELETE</code>, которые создают мёртвые версии.</li>
+    </ul>
+
+    <h2>Когда EF Core не хватает</h2>
+    <ul>
+      <li><strong>Сложная аналитика и оконные функции</strong> — проще написать SQL, чем подбирать LINQ.
+        Для таких мест берут <strong>Dapper</strong> или <code>FromSql</code>.</li>
+      <li><strong>Параметры в raw SQL обязательны:</strong> <code>FromSqlInterpolated</code> (или
+        <code>FromSqlRaw</code> с явными параметрами) — склейка значений строками даёт и проблемы с планом, и
+        риск инъекции.</li>
+      <li><strong>Хитрые bulk-операции</strong> (например, загрузка миллионов строк) — <code>COPY</code>,
+        <code>NpgsqlBinaryImporter</code> или пакетные задания.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✔ параметр типизирован, база снова может использовать индекс
+var last = await db.Orders
+    .FromSqlInterpolated($"SELECT * FROM orders WHERE user_id = {userId} ORDER BY created_at DESC LIMIT 20")
+    .AsNoTracking()
+    .ToListAsync(ct);</code></pre>
+    </div>
+
+    <h2>Как проверять эффективность</h2>
+    <ul>
+      <li><strong>Логирование запросов</strong> в dev: <code>LogTo(Console.WriteLine)</code>, категория
+        <code>Microsoft.EntityFrameworkCore.Database.Command</code>. Видно SQL, параметры и время. В продакшене —
+        включать точечно, <code>EnableSensitiveDataLogging</code> — только в dev (в логах будут значения!).</li>
+      <li><strong>Счётчик запросов на один HTTP-запрос.</strong> Резкий рост — почти всегда «N+1».</li>
+      <li><strong><code>pg_stat_statements</code></strong> (SQL-раздел про мониторинг): топ запросов по суммарному
+        времени — там видно, какой именно LINQ оказался дорогим.</li>
+      <li><strong><code>EXPLAIN (ANALYZE, BUFFERS)</code></strong> для горячих запросов: проверяем, что индексы
+        действительно применяются (глава 21 и SQL-раздел).</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>EF Core удобен, но непрозрачен: <strong>смотрите сгенерированный SQL</strong>
+          (<code>ToQueryString()</code>, логи).</li>
+        <li>Базовый набор: <code>AsNoTracking</code>, проекции, никаких «N+1», пагинация по ключу.</li>
+        <li>SQL пишет <strong>провайдер</strong>: при переезде Oracle → PostgreSQL проверяйте диалект, типы и
+          приведения (они убивают индексы).</li>
+        <li>Массовые изменения — <code>ExecuteUpdate</code>/<code>ExecuteDelete</code> и батчи, а не
+          «загрузить всё в память».</li>
+        <li>Проверять эффективность нужно <em>измерениями</em>: логи, счётчик запросов,
+          <code>pg_stat_statements</code>, <code>EXPLAIN</code>.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="ch23-db-connection.html">← <span class="sp">Глава 23. Подключение к БД из .NET: ADO.NET и пул соединений</span></a>
       <a href="ch25-cache.html"><span class="sp">Глава 25. Кэширование</span> →</a>

@@ -68,23 +68,28 @@
     <a href="sql20-transactions-isolation.html"><span class="n">Глава 20</span><span class="t">Транзакции и уровни изоляции</span><span class="d"><span class="tag lead">подводящая</span>ACID, READ COMMITTED, REPEATABLE READ, SERIALIZABLE</span></a>
     <a href="sql21-mvcc.html"><span class="n">Глава 21</span><span class="t">MVCC в PostgreSQL: версии строк и снимки</span><span class="d"><span class="tag core">основная</span>Как читатели и писатели не мешают друг другу</span></a>
     <a href="sql22-locks.html"><span class="n">Глава 22</span><span class="t">Блокировки, deadlock и retry</span><span class="d"><span class="tag core">основная</span>Строки, таблицы, DDL и почему ошибки надо повторять</span></a>
-    <a href="sql23-vacuum-bloat.html"><span class="n">Глава 23</span><span class="t">VACUUM, autovacuum и bloat</span><span class="d"><span class="tag core">основная</span>Цена MVCC: очистка версий и «раздувание» таблиц</span></a>
+    <a href="sql23-vacuum-bloat.html"><span class="n">Глава 23</span><span class="t">VACUUM, autovacuum, bloat и HOT-апдейты</span><span class="d"><span class="tag core">основная</span>Цена MVCC: очистка версий, «раздувание» и место под новые версии строк</span></a>
   </div>
 
-  <div class="toc-part">SQL · Часть VII. Миграция из Oracle</div>
+  <div class="toc-part">SQL · Часть VII. Большие данные и обслуживание</div>
   <div class="toc">
-    <a href="sql24-oracle-pg-arch.html"><span class="n">Глава 24</span><span class="t">Архитектурные различия Oracle и PostgreSQL</span><span class="d"><span class="tag lead">подводящая</span>Инстанс, память, процессы и как это влияет на поведение</span></a>
-    <a href="sql25-mvcc-oracle-vs-pg.html"><span class="n">Глава 25</span><span class="t">MVCC: Oracle vs PostgreSQL</span><span class="d"><span class="tag core">основная</span>Undo и SCN против версий в страницах и VACUUM</span></a>
-    <a href="sql26-locks-oracle-vs-pg.html"><span class="n">Глава 26</span><span class="t">Блокировки: Oracle vs PostgreSQL</span><span class="d"><span class="tag core">основная</span>Чтение, запись, DDL и транзакционность</span></a>
-    <a href="sql27-convert-plsql.html"><span class="n">Глава 27</span><span class="t">Конвертация PL/SQL: пакеты, автономные транзакции, NULL</span><span class="d"><span class="tag core">основная</span>Где нет прямых аналогов и что делать</span></a>
-    <a href="sql28-convert-types-syntax.html"><span class="n">Глава 28</span><span class="t">Типы, синтаксис и план миграции</span><span class="d"><span class="tag core">основная</span>DATE, NUMBER, ROWNUM, (+) и порядок работ</span></a>
+    <a href="sql24-partitioning.html"><span class="n">Глава 24</span><span class="t">Секционирование таблиц: Range, List, Hash и pruning</span><span class="d"><span class="tag core">основная</span>Как делить большие таблицы и почему запросы читают все секции</span></a>
   </div>
 
-  <div class="toc-part">SQL · Часть VIII. Практика</div>
+  <div class="toc-part">SQL · Часть VIII. Миграция из Oracle</div>
   <div class="toc">
-    <a href="sql29-dotnet-npgsql.html"><span class="n">Глава 29</span><span class="t">Работа с PostgreSQL из .NET</span><span class="d"><span class="tag core">основная</span>Npgsql, пул соединений, prepared statements, EF Core</span></a>
-    <a href="sql30-monitoring.html"><span class="n">Глава 30</span><span class="t">Мониторинг и эксплуатация</span><span class="d"><span class="tag core">основная</span>pg_stat_statements, блокировки, bloat, slow query log</span></a>
-    <a href="sql31-interview.html"><span class="n">Глава 31</span><span class="t">Как отвечать на интервью по SQL</span><span class="d"><span class="tag core">основная</span>Структура ответов по оптимизации и миграции</span></a>
+    <a href="sql25-oracle-pg-arch.html"><span class="n">Глава 25</span><span class="t">Архитектурные различия Oracle и PostgreSQL</span><span class="d"><span class="tag lead">подводящая</span>Инстанс, память, процессы и как это влияет на поведение</span></a>
+    <a href="sql26-mvcc-oracle-vs-pg.html"><span class="n">Глава 26</span><span class="t">MVCC: Oracle vs PostgreSQL</span><span class="d"><span class="tag core">основная</span>Undo и SCN против версий в страницах и VACUUM</span></a>
+    <a href="sql27-locks-oracle-vs-pg.html"><span class="n">Глава 27</span><span class="t">Блокировки: Oracle vs PostgreSQL</span><span class="d"><span class="tag core">основная</span>Чтение, запись, DDL и транзакционность</span></a>
+    <a href="sql28-convert-plsql.html"><span class="n">Глава 28</span><span class="t">Конвертация PL/SQL: пакеты, автономные транзакции, NULL</span><span class="d"><span class="tag core">основная</span>Где нет прямых аналогов и что делать</span></a>
+    <a href="sql29-convert-types-syntax.html"><span class="n">Глава 29</span><span class="t">Типы, синтаксис и план миграции</span><span class="d"><span class="tag core">основная</span>DATE, NUMBER, ROWNUM, (+) и порядок работ</span></a>
+  </div>
+
+  <div class="toc-part">SQL · Часть IX. Практика</div>
+  <div class="toc">
+    <a href="sql30-dotnet-npgsql.html"><span class="n">Глава 30</span><span class="t">Работа с PostgreSQL из .NET</span><span class="d"><span class="tag core">основная</span>Npgsql, пул соединений, prepared statements, EF Core</span></a>
+    <a href="sql31-monitoring.html"><span class="n">Глава 31</span><span class="t">Мониторинг и эксплуатация</span><span class="d"><span class="tag core">основная</span>pg_stat_statements, блокировки, bloat, slow query log</span></a>
+    <a href="sql32-interview.html"><span class="n">Глава 32</span><span class="t">Как отвечать на интервью по SQL</span><span class="d"><span class="tag core">основная</span>Структура ответов по оптимизации и миграции</span></a>
   </div>
 
   <p style="color:var(--muted);font-size:14px;margin-top:34px">

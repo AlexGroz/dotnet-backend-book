@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 23 · Подключение к БД из .NET: ADO.NET и пул соединений</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -18,10 +21,133 @@
     <h1>Глава 23. Подключение к БД из .NET: ADO.NET и пул соединений</h1>
     <p class="sublead">Соединение как ресурс: пул соединений и его связь с нагрузкой</p>
     <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <h2>Кто и как ходит в базу</h2>
+    <p>Снизу вверх: <strong>ADO.NET</strong> — базовый слой .NET для работы с БД (в PostgreSQL это драйвер
+      <code>Npgsql</code>): соединение, команда, чтение результата. Поверх него работают <strong>Dapper</strong>
+      (микро-ORM) и <strong>EF Core</strong> (полноценный ORM, глава 24). Внизу всегда одно и то же — сокет,
+      протокол и <em>соединение</em>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// «Сырой» ADO.NET: минимум слоёв, полный контроль
+await using var conn = new NpgsqlConnection(connectionString);
+await conn.OpenAsync(ct);
+
+await using var cmd = new NpgsqlCommand(
+    "SELECT id, total FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20", conn);
+cmd.Parameters.Add(new NpgsqlParameter { Value = userId, NpgsqlDbType = NpgsqlDbType.Uuid });
+
+await using var reader = await cmd.ExecuteReaderAsync(ct);
+while (await reader.ReadAsync(ct))
+{
+    var id = reader.GetInt64(0);
+    var total = reader.GetDecimal(1);
+}</code></pre>
     </div>
+    <p>Обратите внимание на <code>NpgsqlDbType.Uuid</code>: тип параметра задан явно. Это не педантизм —
+      несовпадение типа параметра с типом колонки мешает базе использовать индекс (глава 22 и SQL-раздел про
+      планы).</p>
+
+    <h2>Соединение — дорогой ресурс, поэтому пул</h2>
+    <p>Установить соединение с БД — это сетевой обмен, аутентификация и создание серверного процесса. Делать это
+      на каждый запрос невозможно, поэтому в .NET соединения <strong>переиспользуются</strong> через пул.</p>
+    <ul>
+      <li>Пул привязан к <strong>строке подключения</strong> (её тексту): разные строки — разные пулы.</li>
+      <li><code>OpenAsync()</code> <em>не создаёт</em> соединение, а <strong>берёт свободное из пула</strong>
+        (или ждёт, если свободных нет).</li>
+      <li><code>Dispose</code>/<code>Close</code> <strong>не закрывают</strong> физическое соединение, а
+        возвращают его в пул.</li>
+      <li>Если соединение не возвращать (не вызвать <code>Dispose</code>), пул исчерпается — и сервис встанет.</li>
+    </ul>
+    <div class="box danger">
+      <span class="t">Главное правило</span>
+      <p>Соединение нужно <strong>возвращать как можно быстрее</strong>. Держать его открытым, пока идут расчёты,
+        HTTP-вызовы или ожидание в очереди, — значит вычитать этот ресурс у всех остальных запросов.</p>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Настройки пула в строке подключения</p>
+      <pre><code class="language-text">Host=db;Database=app;Username=app;Password=***
+Maximum Pool Size=100      -- сколько соединений этот процесс держит одновременно
+Minimum Pool Size=5        -- сколько держать «тёплыми»
+Timeout=15                 -- сколько ждать свободное соединение (секунд)
+Command Timeout=30         -- предел выполнения одной команды
+Multiplexing=true          -- (Npgsql) несколько команд через одно физическое соединение</code></pre>
+    </div>
+
+    <h2>Бюджет соединений: сколько их вообще нужно</h2>
+    <p>У сервера PostgreSQL есть свой предел — <code>max_connections</code>. И соединения нужны не только вашему
+      сервису: администрирование, миграции, репликация, другие приложения. Отсюда простое бюджетное правило:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Maximum Pool Size × число инстансов сервиса  ≤  max_connections − запас
+                                                 (админ, миграции, другие сервисы)</code></pre>
+    </div>
+    <p>Пример: при <code>max_connections = 200</code> и трёх инстансах, каждый с пулом в 100 соединений, мы
+      гарантированно упрёмся в лимит сервера — причём ошибки прилетят <em>не</em> из нашего кода, а от БД.</p>
+    <div class="box note">
+      <span class="t">Большой пул — не всегда хорошо</span>
+      <p>Каждое соединение занимает память сервера и требует переключения контекста. Часто лучше
+        <strong>меньший пул</strong> (например, 20–50): он естественным образом ограничивает параллелизм, запросы
+        встают в очередь, и БД не захлёбывается. <em>Небольшой пул работает как backpressure</em> — защита от
+        перегрузки «изнутри».</p>
+    </div>
+
+    <h2>Симптомы проблемы и где смотреть</h2>
+    <table>
+      <thead><tr><th>Симптом</th><th>Что происходит</th><th>Куда смотреть</th></tr></thead>
+      <tbody>
+        <tr><td><code>Timeout expired … obtaining a connection from the pool</code></td><td>Все соединения заняты, запросы ждут и падают по таймауту</td><td>Метрики пула, длительность запросов, «долгие» транзакции</td></tr>
+        <tr><td>Задержка растёт, а CPU сервиса низкий</td><td>Мы ждём, а не считаем</td><td>Время выполнения SQL, блокировки в БД (глава 21)</td></tr>
+        <tr><td>Соединения в состоянии <code>idle in transaction</code></td><td>Транзакция открыта, но ничего не делает: держит снимок и блокировки</td><td><code>pg_stat_activity</code> (SQL-раздел)</td></tr>
+        <tr><td>PostgreSQL отвечает «слишком много клиентов»</td><td>Сумма пулов всех инстансов больше <code>max_connections</code></td><td>Настройки сервера и бюджет из формулы выше</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Транзакции: сколько держать соединение</h2>
+    <p>Открытая транзакция <strong>удерживает соединение до коммита</strong> (или отката). Отсюда правило:
+      транзакция — только вокруг работы с БД, а подготовка и внешние вызовы — вне её.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ соединение занято всё время транзакции, включая сетевые ожидания
+await using var tx = await db.Database.BeginTransactionAsync(ct);
+db.Orders.Add(order);
+await db.SaveChangesAsync(ct);
+await _payment.ChargeAsync(order.Id, ct);      // 300 мс … 3 с по сети
+await tx.CommitAsync(ct);
+
+// ✔ подготовка — вне транзакции, запись — короткая
+var total = await _pricing.CalculateAsync(order, ct);
+order.Total = total;
+
+await using var tx2 = await db.Database.BeginTransactionAsync(ct);
+db.Orders.Add(order);
+db.Outbox.Add(OutboxMessage.For(order));       // событие для соседей — в той же транзакции (глава 31)
+await db.SaveChangesAsync(ct);
+await tx2.CommitAsync(ct);</code></pre>
+    </div>
+    <p>Чем это заканчивается, если не соблюдать: пул исчерпан (<em>pool timeout</em>), в PostgreSQL висят
+      <code>idle in transaction</code>, autovacuum не может убрать мёртвые версии, блокировки строк держатся до
+      коммита. Подробнее — в SQL-разделе и в главе 31.</p>
+
+    <h2>Подготовленные запросы и типы параметров</h2>
+    <ul>
+      <li><strong>Prepared statements:</strong> сервер разбирает и планирует запрос один раз, затем выполняет по
+        параметрам. В Npgsql это включается автоматически при частом повторе (<em>auto prepare</em>), а сами запросы
+        видны в <code>pg_stat_statements</code> (глава 21).</li>
+      <li><strong>Типы параметров задавайте явно</strong> (<code>NpgsqlDbType</code>) — это и защита от инъекций, и
+        отсутствие неявных приведений, которые мешают использовать индексы.</li>
+      <li><strong>Не собирайте SQL строками</strong> из значений: страдает и план, и безопасность.</li>
+      <li><strong>Не забывайте про <code>CancellationToken</code></strong> во всех вызовах: если клиент отключился,
+        работа должна прекратиться, а соединение — вернуться в пул (глава 12).</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Под всеми ORM лежит ADO.NET и <strong>соединение из пула</strong>.</li>
+        <li>Соединение <strong>берут и быстро возвращают</strong>; долгое удержание останавливает сервис под нагрузкой.</li>
+        <li>Бюджет: <code>Max Pool Size × инстансы ≤ max_connections − запас</code>. Небольшой пул = backpressure.</li>
+        <li>Транзакция держит соединение до коммита, поэтому внешние вызовы — вне неё.</li>
+        <li>Явные типы параметров — и безопасность, и работающие индексы.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="ch22-sql.html">← <span class="sp">Глава 22. Реляционные БД и SQL: индексы и план запроса</span></a>
       <a href="ch24-ef-core.html"><span class="sp">Глава 24. ORM и EF Core эффективно</span> →</a>

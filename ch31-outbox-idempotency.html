@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 31 · Надёжные интеграции: Transactional Outbox, идемпотентность и саги</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="net.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch32-case.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">.NET · Часть VIII · Интеграция и API</div>
+    <h1>Глава 31. Надёжные интеграции: Transactional Outbox, идемпотентность и саги</h1>
+    <p class="sublead">Что делать, когда данные нужно записать в свою базу <em>и</em> передать в чужой сервис —
+      и нельзя ни потерять, ни продублировать.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Проблема: две системы и одна транзакция</h2>
+    <p>Разберём типичный код: сохранить заказ и отправить событие «заказ создан» в брокер (глава 29). Выглядит
+      логично, но между этими действиями нет и не может быть общей транзакции — это <strong>две разные
+      системы</strong>. Такая ситуация называется <em>dual write</em> («двойная запись»).</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ коммит и отправка — не одно действие
+await db.SaveChangesAsync(ct);              // 1) база
+await _bus.PublishAsync(new OrderCreated(id), ct);   // 2) брокер</code></pre>
+    </div>
+    <p>Между шагами 1 и 2 всегда есть окно, и в нём возможны три исхода:</p>
+    <table>
+      <thead><tr><th>Что произошло</th><th>Результат для системы</th></tr></thead>
+      <tbody>
+        <tr><td>База сохранилась, отправка упала (сеть, брокер недоступен)</td><td><strong>Событие потеряно</strong>: заказ есть, а склад и биллинг о нём не знают. Тихая ошибка — никто не узнает</td></tr>
+        <tr><td>Отправка прошла, коммит упал (ошибка БД)</td><td><strong>Событие-фантом</strong>: соседи обрабатывают то, чего в базе нет</td></tr>
+        <tr><td>Отправка «зависла» по таймауту</td><td><strong>Неизвестность</strong>: дошло или нет? Повтор даёт дубликаты, отсутствие повтора — потерю</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Почему не одна общая транзакция на две системы</span>
+      <p>Технически это двухфазный коммит (2PC): координатор, который сначала «подготавливает» всех участников,
+        а потом подтверждает. На практике это <em>не работает</em>: нужна поддержка XA каждой стороной, в
+        контейнерах и облаке координатор (MSDTC) обычно недоступен, а подготовленные транзакции в PostgreSQL
+        мешают очистке (VACUUM) и превращаются в источник инцидентов. Поэтому надёжность строят не на «общей
+        транзакции», а на <strong>гарантиях через базу</strong>.</p>
+    </div>
+    <h2>Transactional Outbox: событие как часть транзакции</h2>
+    <p>Идея проста и надёжна: <strong>сделать намерение отправить событие частью транзакции в базе</strong>. Рядом
+      с бизнес-данными появляется таблица <code>outbox</code>, и сообщение пишется в неё <em>в той же самой
+      транзакции</em>, что и заказ. Отправляет сообщение отдельный воркер — уже после коммита.</p>
+    <div class="codewrap">
+      <p class="cap">Поток целиком</p>
+      <pre><code class="language-text">Запрос клиента
+   │
+   ├─ BEGIN
+   │    INSERT INTO orders  …                                  ← бизнес-данные
+   │    INSERT INTO outbox  (type='order.created', payload=…)  ← намерение отправить
+   ├─ COMMIT                    ← атомарно: либо есть оба, либо ни одного
+   │
+   └─ воркер:  SELECT … FOR UPDATE SKIP LOCKED → publish → UPDATE status='sent'</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- таблица-очередь внутри вашей же базы
+CREATE TABLE outbox (
+    id           bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    occurred_at  timestamptz NOT NULL DEFAULT now(),
+    type         text        NOT NULL,
+    payload      jsonb       NOT NULL,
+    status       text        NOT NULL DEFAULT 'new',      -- new | sent | failed
+    attempts     int         NOT NULL DEFAULT 0,
+    next_attempt timestamptz NOT NULL DEFAULT now(),      -- время следующей попытки
+    sent_at      timestamptz
+);
+
+-- частичный индекс: ищем только «ожидающие» сообщения
+CREATE INDEX outbox_pending_idx ON outbox (next_attempt) WHERE status = 'new';</code></pre>
+    </div>
+    <p>Продюсер (обычный код обработки запроса):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+db.Orders.Add(order);
+db.Outbox.Add(new OutboxMessage
+{
+    Type    = "order.created",
+    Payload = JsonSerializer.SerializeToDocument(new { order.Id, order.Total })
+});
+
+await db.SaveChangesAsync(ct);
+await tx.CommitAsync(ct);      // заказ и событие — одной транзакцией</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Что именно даёт outbox</span>
+      <ul>
+        <li><strong>Атомарность «мои данные + намерение отправить».</strong> Нет заказа — нет события; нет события —
+          нет заказа. Фантомы исчезают.</li>
+        <li><strong>Потерь нет.</strong> Даже если брокер лежит час, сообщения лежат в базе и уедут, когда он
+          вернётся.</li>
+        <li><strong>Можно переиграть.</strong> Сбойный обработчик чинится, а сообщения отправляются заново —
+          без ручных вылазок в прод.</li>
+        <li><strong>Видно состояние.</strong> Количество неотправленных сообщений — это метрика, по которой
+          видно проблему <em>до</em> того, как её заметят данные.</li>
+      </ul>
+    </div>
+
+    <h2>Воркер: как сообщения уезжают</h2>
+    <p>Воркер — обычный <code>BackgroundService</code> (глава 26): забирает пачку сообщений, публикует и помечает.
+      Ключевая деталь — <code>FOR UPDATE SKIP LOCKED</code>: строки блокируются на время обработки, но воркеры
+      <strong>не мешают друг другу</strong> — каждый берёт свою пачку, а не ждёт чужую блокировку.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">protected override async Task ExecuteAsync(CancellationToken ct)
+{
+    while (!ct.IsCancellationRequested)
+    {
+        var batch = await db.Outbox.FromSqlRaw("""
+            SELECT * FROM outbox
+            WHERE status = 'new' AND next_attempt &lt;= now()
+            ORDER BY id
+            LIMIT 100
+            FOR UPDATE SKIP LOCKED          -- берём только «свободные» строки
+            """).ToListAsync(ct);
+
+        foreach (var msg in batch)
+        {
+            try
+            {
+                await _bus.PublishAsync(msg, ct);
+                msg.Status = "sent";
+                msg.SentAt = DateTime.UtcNow;
+            }
+            catch (Exception)
+            {
+                msg.Attempts++;
+                msg.NextAttempt = DateTime.UtcNow.AddSeconds(Math.Pow(2, msg.Attempts)); // 2, 4, 8… с
+                if (msg.Attempts &gt;= 10)
+                    msg.Status = "failed";            // dead-letter + метрика и алерт
+            }
+        }
+        await db.SaveChangesAsync(ct);
+
+        if (batch.Count == 0)
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);   // не «крутить» пустой цикл
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>Пачка, а не всё сразу.</strong> Размер пачки (например, 100) ограничивает и память, и время
+        удержания блокировок.</li>
+      <li><strong>Backoff с потолком.</strong> Растущая пауза не даёт «долбить» упавший брокер, а потолок
+        (например, пять минут) не даёт задержке стать бесконечной.</li>
+      <li><strong>Dead-letter и алерт.</strong> Сообщение, не ушедшее за 10 попыток, — это <em>инцидент</em>,
+        а не «пусть лежит». Его должно быть видно: метрика, алерт, дашборд.</li>
+      <li><strong>Порядок.</strong> Параллельная отправка может переставить сообщения. Если порядок важен, воркер
+        обрабатывает строго по <code>id</code> (одна пачка — один поток) или отправляет события одного ключа в одну
+        партицию брокера.</li>
+      <li><strong>Очистка.</strong> Отправленные сообщения удаляются заданием по расписанию (например, старше
+        суток). Иначе таблица outbox сама станет источником bloat — как любая «горячая» таблица с частыми
+        <code>DELETE</code> (глава 23 SQL-раздела).</li>
+      <li><strong>Короткие транзакции.</strong> Воркер не держит соединение и блокировки, пока «думает»: публикация
+        идёт между <em>короткими</em> обращениями к базе (глава 23).</li>
+    </ul>
+
+    <h2>Идемпотентность: почему доставка «минимум один раз»</h2>
+    <p>Outbox даёт гарантию <strong>at-least-once</strong> — «минимум один раз». Почему не «ровно один»: воркер
+      мог успеть отправить сообщение, но упасть <em>до</em> того, как отметил его отправленным. Тогда после
+      перезапуска он отправит его снова. Это не дефект реализации, а свойство распределённых систем —
+      «exactly-once» доставки «из коробки» не существует.</p>
+    <p>Вывод: <strong>потребитель должен быть идемпотентным</strong> — повторная обработка того же сообщения не
+      должна менять результат.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ повтор = второе списание
+await db.Accounts.Where(a =&gt; a.Id == id).ExecuteUpdateAsync(
+    s =&gt; s.SetProperty(a =&gt; a.Balance, a =&gt; a.Balance - amount), ct);
+
+// ✔ «входящая» таблица + уникальный ключ сообщения: повтор отсекается
+var inserted = await db.Inbox.AnyAsync(x =&gt; x.MessageId == messageId, ct);
+if (inserted) return;                                   // уже обрабатывали — выходим
+
+db.Inbox.Add(new InboxMessage { MessageId = messageId });
+await db.Accounts.Where(a =&gt; a.Id == id).ExecuteUpdateAsync(
+    s =&gt; s.SetProperty(a =&gt; a.Balance, a =&gt; a.Balance - amount), ct);
+await db.SaveChangesAsync(ct);                          // запись в inbox и сам эффект — одной транзакцией</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE TABLE inbox (
+    message_id  uuid PRIMARY KEY,        -- ключ сообщения от продюсера
+    processed_at timestamptz NOT NULL DEFAULT now()
+);</code></pre>
+    </div>
+    <ul>
+      <li><strong>Ключ сообщения генерирует продюсер</strong> (например, <code>Guid</code> или
+        <code>order-id + тип события</code>) и кладёт его в <code>payload</code>. Так повтор «того же» события
+        распознаётся на приёмнике.</li>
+      <li><strong>Альтернативы для простых случаев:</strong> <code>INSERT … ON CONFLICT DO NOTHING</code>,
+        уникальный индекс по бизнес-ключу, «естественная» идемпотентность операции (<code>SET status = 'paid'</code>
+        вместо <code>balance = balance + amount</code>).</li>
+      <li><strong>Идемпотентность нужна и на входе API:</strong> <code>Idempotency-Key</code> в заголовке, ответ
+        сохраняется и повторяется при том же ключе — это спасает от повторных запросов клиента.</li>
+    </ul>
+
+    <h2>Когда процессов несколько: саги и компенсации</h2>
+    <p>Outbox закрывает передачу <em>своего</em> события. Но бизнес-процесс часто длиннее: создать заказ →
+      списать деньги → зарезервировать товар → отгрузить. Это работа <strong>нескольких сервисов</strong>, и одной
+      транзакции на них нет и быть не может.</p>
+    <p>Вместо «всё или ничего» используют <strong>сагу</strong>: последовательность локальных транзакций, у каждой
+      из которых есть <em>компенсация</em> — действие, отменяющее её результат.</p>
+    <table>
+      <thead><tr><th>Шаг саги</th><th>Компенсация при сбое дальше по цепочке</th></tr></thead>
+      <tbody>
+        <tr><td>Заказ создан (статус «новый»)</td><td>Отменить заказ</td></tr>
+        <tr><td>Деньги списаны</td><td>Вернуть деньги</td></tr>
+        <tr><td>Товар зарезервирован</td><td>Снять резерв</td></tr>
+        <tr><td>Отгрузка оформлена</td><td>Отменить отгрузку</td></tr>
+      </tbody>
+    </table>
+    <ul>
+      <li><strong>Оркестрация</strong> — есть координатор (процесс-менеджер), который знает шаги и запускает
+        компенсации. Проще отлаживать.</li>
+      <li><strong>Хореография</strong> — сервисы слушают события друг друга и сами решают, что делать. Меньше
+        связности, но логика процесса «размазана» и её труднее увидеть целиком.</li>
+      <li><strong>Итоговая согласованность</strong> — данные становятся согласованными не «в момент», а через
+        некоторое время. Это осознанный обмен: мы отказываемся от мгновенной строгой согласованности ради
+        доступности и масштабируемости.</li>
+    </ul>
+
+    <h2>Альтернативы и когда outbox не нужен</h2>
+    <table>
+      <thead><tr><th>Подход</th><th>Как работает</th><th>Когда выбирать</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Outbox в своей БД</strong></td><td>Событие пишется в транзакции, воркер публикует</td><td>Данные уже в БД, нужна гарантия «не потеряется». Универсальный выбор</td></tr>
+        <tr><td><strong>CDC</strong> (Debezium, логическая репликация)</td><td>Внешний процесс читает журнал изменений (WAL) и публикует события</td><td>Не хочется писать в outbox из приложения; нужны события по <em>любым</em> изменениям таблицы</td></tr>
+        <tr><td><strong>Периодическая сверка</strong> (reconciliation)</td><td>Задание сравнивает состояние систем и догоняет расхождения</td><td>Как <em>дополнение</em> к любому подходу: страховка от «зависших» событий</td></tr>
+        <tr><td><strong>Отправка после коммита с ретраями</strong></td><td>Просто повторить публикацию при сбое</td><td>Потеря события допустима (аналитика, «мягкие» уведомления) — самое дешёвое решение</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Цена, о которой надо сказать честно</span>
+      <ul>
+        <li><strong>Задержка.</strong> Событие уходит через цикл воркера — десятки-сотни миллисекунд, а не мгновенно.</li>
+        <li><strong>Дополнительная нагрузка на БД.</strong> Вставка в outbox и её последующая очистка — это ещё
+          запись и ещё мёртвые версии (глава 23 SQL-раздела).</li>
+        <li><strong>Сложнее код и код-ревью.</strong> Появляются воркер, повторы, dead-letter, дедупликация.</li>
+      </ul>
+      <p>Поэтому outbox берут там, где потеря события <em>действительно</em> дорога: платежи, заказы, склад,
+        биллинг. Для телеметрии и «мягких» уведомлений достаточно отправки с ретраями.</p>
+    </div>
+
+    <h2>Что смотреть в эксплуатации</h2>
+    <ul>
+      <li><strong>Время до отправки</strong> (lag): сколько живёт самое старое неотправленное сообщение. Рост —
+        первый признак, что воркер не справляется или брокер «тормозит».</li>
+      <li><strong>Количество <code>new</code> и <code>failed</code>.</strong> <code>failed</code> — всегда алерт:
+        кто-то не получил свои данные.</li>
+      <li><strong>Число повторов.</strong> Много повторов = нестабильный брокер или ошибка в отправке.</li>
+      <li><strong>Размер таблицы outbox.</strong> Если очистка не работает, таблица растёт (и это bloat).</li>
+      <li><strong>Дубликаты на приёмнике.</strong> Если их много — повод проверить идемпотентность обработчиков.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Запись в БД и отправка события — <strong>две системы</strong>: без специального приёма возможны и
+          потеря, и фантом.</li>
+        <li><strong>Transactional Outbox</strong>: пишем намерение отправить в ту же транзакцию, что и данные, а
+          публикует отдельный воркер.</li>
+        <li>Доставка получается <strong>at-least-once</strong> → потребитель обязан быть
+          <strong>идемпотентным</strong> (таблица <code>inbox</code>, уникальные ключи,
+          <code>ON CONFLICT</code>).</li>
+        <li>Обязательные детали: <code>FOR UPDATE SKIP LOCKED</code>, backoff, dead-letter с алертом, очистка,
+          метрика «лаг отправки».</li>
+        <li>Процесс из нескольких сервисов закрывается <strong>сагами с компенсациями</strong>, а не попыткой
+          сделать одну распределённую транзакцию.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="ch30-validation.html">← <span class="sp">Глава 30. Валидация входных данных в ASP.NET Core</span></a>
+      <a href="ch32-case.html"><span class="sp">Глава 32. Сквозной разбор: высоконагруженный эндпоинт</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

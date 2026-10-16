@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 26 · Блокировки: Oracle vs PostgreSQL</title>
+<title>Глава 27 · Блокировки: Oracle vs PostgreSQL</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,18 +13,18 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql27-convert-plsql.html">Далее →</a>
+  <a href="sql28-convert-plsql.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
-    <div class="part">SQL · Часть VII · Миграция из Oracle</div>
-    <h1>Глава 26. Блокировки: Oracle vs PostgreSQL</h1>
+    <div class="part">SQL · Часть VIII · Миграция из Oracle</div>
+    <h1>Глава 27. Блокировки: Oracle vs PostgreSQL</h1>
     <p class="sublead">Второй вопрос интервью про различия: как ведут себя блокировки при чтении и записи в
       двух системах.</p>
 
     <h2>Чтение</h2>
     <p>В обеих СУБД обычный <code>SELECT</code> <strong>не блокируется</strong> чужими изменениями — он
-      читает согласованный снимок (глава 25). Но есть нюансы:</p>
+      читает согласованный снимок (глава 26). Но есть нюансы:</p>
     <ul>
       <li>В PostgreSQL <code>SELECT</code> берёт разделяемую блокировку таблицы (<code>ACCESS SHARE</code>),
         которая <strong>конфликтует с DDL</strong>: <code>ALTER TABLE</code>, <code>TRUNCATE</code> берут
@@ -79,8 +79,8 @@
     </div>
 
     <div class="pager">
-      <a href="sql25-mvcc-oracle-vs-pg.html">← <span class="sp">Глава 25. MVCC: Oracle vs PostgreSQL</span></a>
-      <a href="sql27-convert-plsql.html"><span class="sp">Глава 27. Конвертация PL/SQL</span> →</a>
+      <a href="sql26-mvcc-oracle-vs-pg.html">← <span class="sp">Глава 26. MVCC: Oracle vs PostgreSQL</span></a>
+      <a href="sql28-convert-plsql.html"><span class="sp">Глава 28. Конвертация PL/SQL</span> →</a>
     </div>
   </div>
 </div>

@@ -3,28 +3,158 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 23 · VACUUM, autovacuum и bloat</title>
+<title>Глава 23 · VACUUM, autovacuum, bloat и HOT-апдейты</title>
 <link rel="stylesheet" href="book.css">
 </head>
 <body>
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql24-oracle-pg-arch.html">Далее →</a>
+  <a href="sql24-partitioning.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть VI · Транзакции и конкурентность</div>
-    <h1>Глава 23. VACUUM, autovacuum и bloat</h1>
-    <p class="sublead">Цена MVCC: очистка версий и раздувание таблиц</p>
+    <h1>Глава 23. VACUUM, autovacuum, bloat и HOT-апдейты</h1>
+    <p class="sublead">Цена MVCC: очистка версий, раздувание таблиц и <em>место</em> под новые версии строк</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Почему появляется bloat</h2>
+    <p>Мы уже знаем: <code>UPDATE</code> в PostgreSQL не меняет строку на месте, а создаёт <em>новую версию</em>
+      (глава 5). Старая версия становится мёртвой и ждёт, пока её уберёт <code>VACUUM</code>. То же самое
+      с <code>DELETE</code>: строка не исчезает, а помечается мёртвой.</p>
+    <p>Если версии не успевают убираться, файлы таблиц и индексов растут <strong>быстрее самих данных</strong>.
+      Это и есть <strong>bloat</strong> — «раздувание»:</p>
+    <ul>
+      <li>та же выборка требует больше страниц → больше операций чтения;</li>
+      <li>индексы «размягчаются»: больше страниц на тот же набор ключей, хуже работают в кэше;</li>
+      <li><code>VACUUM</code> и <code>ANALYZE</code> работают дольше и чаще, добавляя нагрузку;</li>
+      <li>в запущенных случаях планировщик начинает предпочитать <code>Seq Scan</code> там, где был индекс.</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Формулировка</span>
+      <p>Bloat — это пространство, занятое <strong>мёртвыми версиями строк и «дырками» в страницах</strong>.
+        Данные те же, а страниц больше — поэтому запросы дорожают, а autovacuum не успевает.</p>
     </div>
+
+    <h2>HOT-апдейты: как PostgreSQL экономит индексы</h2>
+    <p><strong>HOT</strong> (<em>Heap-Only Tuples</em>) — механизм, при котором <code>UPDATE</code>
+      <strong>не создаёт записей в индексах</strong>. Новая версия строки просто цепляется к цепочке в той же
+      странице (HOT chain), а индексы продолжают указывать на неё через «корень» цепочки.</p>
+    <p>Чтобы HOT сработал, нужны <strong>оба</strong> условия:</p>
+    <ol>
+      <li><strong>Ни одна из изменяемых колонок не входит ни в один индекс.</strong> Обновили колонку, на которой
+        есть индекс — PostgreSQL обязан обновить индекс, и HOT невозможен.</li>
+      <li><strong>Новая версия помещается в ту же страницу.</strong> Если страница заполнена под завязку, версия
+        уходит в другую страницу — тоже мимо HOT.</li>
+    </ol>
+    <p>Второе условие решает <strong><code>fillfactor</code></strong> — доля заполнения страниц. Для таблиц,
+      которые часто обновляются, ставят 80–90 %: часть страницы заранее оставляют пустой, «под будущие версии».</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">ALTER TABLE orders SET (fillfactor = 85);                 -- место под новые версии строк
+
+CREATE INDEX idx_orders_status ON orders (status)         -- индекс тоже можно «разреждить»
+    WITH (fillfactor = 90);</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Главная ловушка</span>
+      <p>Индекс на часто обновляемой колонке — например, <code>updated_at</code>, который приложение пишет при
+        каждом изменении, — <strong>отключает HOT</strong>. Тогда каждое обновление тянет за собой ещё и запись
+        в индекс: рост индекса, рост bloat, лишний I/O.</p>
+    </div>
+
+    <h2>Диагностика</h2>
+    <p>Начинаем со статистики по таблицам. Ключевая пара чисел: сколько строк обновлено и какая доля из них
+      обновилась через HOT.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT relname,
+       n_live_tup, n_dead_tup,                        -- живые и мёртвые версии
+       n_tup_upd, n_tup_hot_upd, n_tup_del,
+       last_vacuum, last_autovacuum,
+       pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+FROM pg_stat_user_tables
+ORDER BY n_dead_tup DESC
+LIMIT 20;</code></pre>
+    </div>
+    <ul>
+      <li><strong>Доля HOT</strong> = <code>n_tup_hot_upd / n_tup_upd</code>. Если она близка к нулю, а
+        <code>n_tup_upd</code> большой — обновления идут мимо HOT (чаще всего из-за индекса на «живой» колонке).</li>
+      <li><strong><code>n_dead_tup</code></strong> — сколько мёртвых версий ждёт очистки. Растёт и не падает —
+        autovacuum не успевает или ему мешают.</li>
+      <li><strong><code>last_autovacuum</code></strong> — когда таблицу очищали в последний раз. «Никогда» при
+        большом числе изменений — тревожный знак.</li>
+      <li><strong>Точные размеры</strong> даёт расширение <code>pgstattuple</code>:
+        <code>SELECT * FROM pgstattuple('orders');</code> (доля мёртвых кортежей и свободного пространства) и
+        <code>pgstatindex('idx_orders_created_at')</code> — для индексов.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Кто мешает VACUUM</span>
+      <p>Мёртвую версию нельзя удалить, пока её «видит» хоть одна открытая транзакция. Поэтому виновниками часто
+        оказываются <strong>долгие транзакции</strong>, <code>idle in transaction</code> и незакрытые слоты
+        репликации. Чистить базу бессмысленно, пока кто-то держит горизонт.</p>
+    </div>
+
+    <h2>Что делать: чистка и профилактика</h2>
+    <p>Порог autovacuum «20 % строк» для большой таблицы — это очень много, поэтому его задают отдельно:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">ALTER TABLE orders SET (
+    autovacuum_vacuum_scale_factor  = 0.01,     -- чистить при 1% изменённых строк
+    autovacuum_vacuum_threshold     = 1000,
+    autovacuum_vacuum_cost_limit    = 2000,     -- не тормозить очистку «по стоимости»
+    autovacuum_analyze_scale_factor = 0.005
+);</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>fillfactor</code> 80–90 %</strong> для «горячих» таблиц — чтобы HOT было куда положить
+        новую версию.</li>
+      <li><strong>Схема, дружелюбная к HOT:</strong> не индексировать колонки, которые меняются на каждом шаге;
+        убрать лишние индексы; историю изменений выносить в отдельную журнальную таблицу.</li>
+      <li><strong>Удалять данные секциями, а не строками</strong> (глава 24): <code>DETACH</code> и
+        <code>DROP</code> не создают мёртвых версий вообще.</li>
+      <li><strong>Убрать уже существующий bloat:</strong> <code>VACUUM FULL</code> возвращает место ОС, но берёт
+        блокировку <code>ACCESS EXCLUSIVE</code> — только в окно обслуживания; <code>pg_repack</code> делает то же
+        без длительной блокировки; для индексов — <code>REINDEX CONCURRENTLY</code>.</li>
+      <li><strong>Помните:</strong> обычный <code>VACUUM</code> <em>не возвращает</em> место операционной системе —
+        он лишь помечает пространство свободным для повторного использования этой же таблицей.</li>
+    </ul>
+
+    <h2>Что зависит от приложения</h2>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- ✘ миллионы удалений создают миллионы мёртвых версий
+DELETE FROM orders WHERE created_at &lt; now() - interval '1 year';
+
+-- ✔ массовые изменения — одной командой и по указанным колонкам
+UPDATE orders SET status = 'expired' WHERE status = 'new' AND created_at &lt; :cutoff;</code></pre>
+    </div>
+    <ul>
+      <li><strong>Меняйте как можно меньше колонок</strong> за одно обновление: если затронуты только
+        неиндексируемые поля, HOT продолжает работать.</li>
+      <li><strong>Не индексируйте <code>updated_at</code></strong>, если он обновляется постоянно и сам по себе не
+        используется в условиях поиска.</li>
+      <li><strong>Не держите длинных транзакций и «висящих» соединений</strong> (глава 20): они не дают чистить
+        мёртвые версии.</li>
+      <li><strong>Массовые операции — батчами</strong>, чтобы autovacuum успевал между ними.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Bloat</strong> — цена MVCC: мёртвые версии и «дырки» в страницах, из-за которых данных столько
+          же, а страниц больше.</li>
+        <li><strong>HOT</strong> работает при двух условиях: изменяемые колонки не индексированы и новая версия
+          помещается в ту же страницу (второе обеспечивает <code>fillfactor</code>).</li>
+        <li>Диагностика — по <code>pg_stat_user_tables</code> (<code>n_dead_tup</code>, <code>n_tup_upd</code>,
+          <code>n_tup_hot_upd</code>, <code>last_autovacuum</code>) и <code>pgstattuple</code>.</li>
+        <li>Лечение: настройки autovacuum для конкретной таблицы, <code>fillfactor</code>, HOT-дружелюбные индексы,
+          секционирование вместо массовых <code>DELETE</code>, <code>pg_repack</code> вместо
+          <code>VACUUM FULL</code> на живой базе.</li>
+        <li>Чистке мешают долгие транзакции и <code>idle in transaction</code> — сначала убираем их.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="sql22-locks.html">← <span class="sp">Глава 22. Блокировки, deadlock и retry</span></a>
-      <a href="sql24-oracle-pg-arch.html"><span class="sp">Глава 24. Архитектурные различия Oracle и PostgreSQL</span> →</a>
+      <a href="sql24-partitioning.html"><span class="sp">Глава 24. Секционирование таблиц: Range, List, Hash и pruning</span> →</a>
     </div>
   </div>
 </div>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 28 · Типы, синтаксис и план миграции</title>
+<title>Глава 29 · Типы, синтаксис и план миграции</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql29-dotnet-npgsql.html">Далее →</a>
+  <a href="sql30-dotnet-npgsql.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
-    <div class="part">SQL · Часть VII · Миграция из Oracle</div>
-    <h1>Глава 28. Типы, синтаксис и план миграции</h1>
+    <div class="part">SQL · Часть VIII · Миграция из Oracle</div>
+    <h1>Глава 29. Типы, синтаксис и план миграции</h1>
     <p class="sublead">Завершаем часть про миграцию: маппинг типов, замена функций и синтаксиса, а также
       порядок работ — «как это делали по шагам».</p>
 
@@ -72,7 +72,7 @@
         последовательности, триггеры, пакеты/процедуры/функции, задания, внешние связи.</li>
       <li><strong>Маппинг типов и конвертация схемы.</strong> Oracle-типы → PostgreSQL (особенно
         <code>DATE</code> → <code>timestamp</code>, <code>NUMBER</code> → <code>numeric</code>/<code>bigint</code>).</li>
-      <li><strong>Конвертация PL/SQL.</strong> Пакеты → схемы с функциями (глава 27); автономные транзакции →
+      <li><strong>Конвертация PL/SQL.</strong> Пакеты → схемы с функциями (глава 28); автономные транзакции →
         <code>dblink</code> или смена архитектуры; функции/триггеры → PL/pgSQL. Часть — автоматической
         конвертацией, часть — вручную.</li>
       <li><strong>Миграция данных.</strong> Перенос, <code>setval</code> для последовательностей, проверка
@@ -83,7 +83,7 @@
       <li><strong>Сравнение производительности.</strong> Планы и замеры на сопоставимых объёмах данных
         (часть IV–V); подгонка индексов и статистики.</li>
       <li><strong>Настройка PostgreSQL.</strong> <code>autovacuum</code>, <code>work_mem</code>,
-        <code>random_page_cost</code> под SSD, сбор статистики, мониторинг (глава 30).</li>
+        <code>random_page_cost</code> под SSD, сбор статистики, мониторинг (глава 31).</li>
       <li><strong>Поэтапное переключение</strong> с возможностью отката.</li>
     </ol>
 
@@ -109,8 +109,8 @@
     </div>
 
     <div class="pager">
-      <a href="sql27-convert-plsql.html">← <span class="sp">Глава 27. Конвертация PL/SQL</span></a>
-      <a href="sql29-dotnet-npgsql.html"><span class="sp">Глава 29. Работа с PostgreSQL из .NET</span> →</a>
+      <a href="sql28-convert-plsql.html">← <span class="sp">Глава 28. Конвертация PL/SQL</span></a>
+      <a href="sql30-dotnet-npgsql.html"><span class="sp">Глава 30. Работа с PostgreSQL из .NET</span> →</a>
     </div>
   </div>
 </div>

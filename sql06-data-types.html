@@ -61,7 +61,7 @@
       <span class="t">Ловушка из мира Oracle</span>
       <p>В Oracle тип <code>DATE</code> хранит и дату, и <strong>время</strong>. Если при миграции слепо
         сопоставить его с PostgreSQL-<code>date</code>, <strong>время потеряется</strong>. Правильный маппинг —
-        <code>timestamp</code> / <code>timestamptz</code> (глава 28).</p>
+        <code>timestamp</code> / <code>timestamptz</code> (глава 29).</p>
     </div>
     <h2>Логический тип</h2>
     <p><code>boolean</code> — <code>true</code> / <code>false</code> / <code>NULL</code>. Не заменяйте его
@@ -93,7 +93,7 @@ SELECT * FROM orders WHERE comment IS NULL;</code></pre>
     <h3>Пустая строка &ne; NULL</h3>
     <p>В PostgreSQL <code>''</code> — это <strong>обычная пустая строка</strong>, а не <code>NULL</code>
       (в Oracle наоборот). Поэтому ограничение <code>NOT NULL</code> пустую строку <em>пропустит</em>. Это
-      важно при миграции (глава 27).</p>
+      важно при миграции (глава 28).</p>
 
     <h2>Прочие типы (кратко)</h2>
     <ul>

@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 24 · Секционирование таблиц: Range, List, Hash и pruning</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql25-oracle-pg-arch.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть VII · Большие данные и обслуживание</div>
+    <h1>Глава 24. Секционирование таблиц: Range, List, Hash и pruning</h1>
+    <p class="sublead">Что делать, когда таблица стала слишком большой: как разделить её на части так, чтобы
+      запросы читали нужную часть, а старые данные уходили одним движением.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Когда таблица «слишком большая»</h2>
+    <p>Размер сам по себе не проблема — проблема в том, что с ним становится тяжело делать четыре вещи:</p>
+    <ul>
+      <li><strong>читается больше страниц</strong>, чем нужно: индексы глубже, кэш работает хуже;</li>
+      <li><strong>обслуживание</strong> (<code>VACUUM</code>, <code>ANALYZE</code>, <code>REINDEX</code>) занимает
+        часы и добавляет нагрузку;</li>
+      <li><strong>удаление старых данных</strong> превращается в миллионы <code>DELETE</code> и миллионы мёртвых
+        версий (глава 23);</li>
+      <li><strong>архивирование и перенос</strong> части данных требуют полной копии таблицы.</li>
+    </ul>
+    <p>Секционирование решает это, разбивая одну логическую таблицу на много физических — <strong>секций</strong>.
+      Приложение продолжает писать <code>SELECT … FROM orders</code>, а PostgreSQL сам работает с нужной частью.</p>
+
+    <h2>Декларативное секционирование (PostgreSQL 10+)</h2>
+    <p>Есть «родительская» таблица с описанием <strong>ключа секционирования</strong> (по нему и идёт разделение) и
+      список секций, каждая со своим диапазоном/списком значений.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE TABLE orders (
+    id         bigint      NOT NULL,
+    created_at timestamptz NOT NULL,
+    user_id    uuid        NOT NULL,
+    status     text        NOT NULL,
+    total      numeric(18,2) NOT NULL,
+    -- ключ секционирования обязан входить в первичный ключ
+    PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE orders_2026_01 PARTITION OF orders
+    FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
+
+CREATE TABLE orders_2026_02 PARTITION OF orders
+    FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
+
+-- «страховка»: строки, не попавшие ни в одну секцию
+CREATE TABLE orders_default PARTITION OF orders DEFAULT;</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Стратегия</th><th>Чем разделяет</th><th>Когда выбирают</th></tr></thead>
+      <tbody>
+        <tr><td><strong>RANGE</strong></td><td>диапазоны значений</td><td>Данные растут во времени; старые периоды уходят целиком — почти всегда это дата/время</td></tr>
+        <tr><td><strong>LIST</strong></td><td>перечисление значений</td><td>Арендатор, регион, тип документа: значений немного и они известны</td></tr>
+        <tr><td><strong>HASH</strong></td><td>хэш от значения</td><td>Естественной оси нет, а нужно равномерно распределить данные (например по <code>user_id</code>)</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Как выбирать ключ</span>
+      <p>Ключ должен совпадать с тем, <strong>по чему фильтруют почти все запросы</strong>, и с тем, что удобно
+        удалять целиком. Если «разрезать» таблицу не по рабочему фильтру, запросы начнут читать <em>все</em>
+        секции — и станет хуже, чем было.</p>
+    </div>
+    <h2>Что даёт секционирование</h2>
+    <ul>
+      <li><strong>Отсечение секций (partition pruning).</strong> Запрос «за январь» читает одну секцию вместо
+        сотни — меньше страниц, меньше времени.</li>
+      <li><strong>Дешёвое удаление старых данных.</strong> Вместо миллионов <code>DELETE</code> (и миллионов
+        мёртвых версий) — <code>DETACH PARTITION</code> и <code>DROP</code>: миллисекунды и никакого bloat.</li>
+      <li><strong>Обслуживание по частям.</strong> <code>VACUUM</code> и <code>ANALYZE</code> работают с меньшими
+        объектами; статистика по свежим данным точнее, а очистка быстрее.</li>
+      <li><strong>Меньше «одного гигантского» индекса.</strong> У каждой секции свой B-tree — вставки дешевле,
+        перестроить один индекс не страшно.</li>
+      <li><strong>Размещение и хранение.</strong> Холодные секции можно положить на медленные диски или сжать,
+        горячие — на быстрые (tablespace).</li>
+      <li><strong>Параллелизм.</strong> Секции можно сканировать параллельно, а массовые операции ускоряются.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Чего секционирование не делает</span>
+      <p>Оно <strong>не ускоряет запросы, которые не фильтруют по ключу секционирования</strong>. И добавляет
+        свою цену: больше объектов в каталоге, нужно управлять секциями (создавать заранее, обслуживать границы),
+        а уникальные ограничения усложняются.</p>
+    </div>
+
+    <h2>Индексы и ограничения</h2>
+    <ul>
+      <li><strong>Индекс создают на родительской таблице</strong> — PostgreSQL создаёт такие же индексы на всех
+        существующих секциях, а новые секции получают их автоматически:
+        <code>CREATE INDEX ON orders (user_id, created_at DESC);</code></li>
+      <li><strong>Уникальность обязана включать ключ секционирования.</strong> Это прямое следствие того, что
+        уникальность проверяется <em>внутри</em> секции: <code>PRIMARY KEY (id, created_at)</code>, а не просто
+        <code>id</code>.</li>
+      <li><strong>Индексы локальные.</strong> Глобальных индексов, которые «знают» про все секции, в PostgreSQL
+        нет — поэтому поиск <em>не по ключу</em> (например, по <code>user_id</code> при ключе по дате) приводит к
+        чтению всех секций. Если так ищут всегда — ключ выбран неверно.</li>
+      <li><strong>Внешние ключи</strong> могут ссылаться на секционированную таблицу (начиная с PostgreSQL 12) —
+        но и это стоит проверять при проектировании.</li>
+    </ul>
+
+    <h2>Partition pruning: когда работает, а когда нет</h2>
+    <p>Отсечение происходит <strong>на этапе планирования</strong>: планировщик сравнивает условия на
+      колонку-ключ с границами секций и выбрасывает те, куда данные попасть не могут. Чтобы это сработало, условие
+      должно быть <strong>простым сравнением колонки со значением того же типа</strong>.</p>
+    <table>
+      <thead><tr><th>Условие</th><th>Pruning</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td><code>created_at &gt;= :from AND created_at &lt; :to</code></td><td>да</td><td>Сравнение колонки с границами того же типа</td></tr>
+        <tr><td><code>created_at = $1</code> (параметр <code>timestamptz</code>)</td><td>да</td><td>Типы совпадают</td></tr>
+        <tr><td><code>date(created_at) = '2026-01-15'</code></td><td>нет</td><td>Функция <em>по колонке</em> — границы неизвестны</td></tr>
+        <tr><td><code>created_at::text LIKE '2026-01%'</code></td><td>нет</td><td>Приведение колонки к другому типу</td></tr>
+        <tr><td><code>created_at = '2026-01-15'</code> (параметр пришёл как <code>text</code>)</td><td>зависит</td><td>Несовпадение типов мешает сопоставить границы</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-text">-- фильтр «за январь», секционирование по месяцам
+
+✘ без отсечения:
+Append
+  -&gt; Seq Scan on orders_2026_01 …
+  -&gt; Seq Scan on orders_2026_02 …
+  …                                          ← читаем 12 секций
+✔ с отсечением:
+Append
+  Subplans Removed: 11                       ← 11 секций отброшено
+  -&gt; Index Scan using orders_2026_01_created_at_idx on orders_2026_01 …</code></pre>
+    </div>
+    <h2>Обслуживание секций: кто их создаёт и удаляет</h2>
+    <p>Секции — это <strong>регулярная работа</strong>, а не разовое решение. На практике:</p>
+    <ul>
+      <li><strong>Создавать заранее.</strong> Обычно отдельным заданием (например, <code>pg_partman</code>) или
+        cron-скриптом за месяц вперёд. Если секции закончились, строки уйдут в <code>DEFAULT</code> — и запросы
+        начнут читать её целиком.</li>
+      <li><strong>Удалять старые.</strong> <code>DETACH PARTITION CONCURRENTLY</code> (не блокирует работу), затем
+        <code>DROP TABLE</code> уже отсоединённой секции. Это принципиально дешевле массового
+        <code>DELETE</code>.</li>
+      <li><strong>Присоединять при миграции.</strong> Загрузить данные в обычную таблицу-«близнеца» и затем
+        <code>ATTACH PARTITION</code> — быстрее и безопаснее, чем вставлять миллионы строк прямо в
+        секционированную таблицу.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- новая секция на следующий месяц
+CREATE TABLE orders_2026_03 PARTITION OF orders
+    FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
+
+-- удаление старых данных: отсоединили — и сразу удалили
+ALTER TABLE orders DETACH PARTITION orders_2024_01 CONCURRENTLY;
+DROP TABLE orders_2024_01;
+
+-- присоединение таблицы, которую наполнили заранее
+ALTER TABLE orders ATTACH PARTITION orders_2026_02_old
+    FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');</code></pre>
+    </div>
+
+    <h2>Частые ошибки</h2>
+    <ol>
+      <li><strong>Ключ выбран не по рабочим фильтрам.</strong> Тогда отсечения нет, а накладные расходы есть.</li>
+      <li><strong>Тысячи секций.</strong> Планирование запроса и работа с каталогом дорожают; «десятки-сотни» —
+        это нормальный порядок, «десятки тысяч» — уже проблема.</li>
+      <li><strong>Ожидание глобального уникального индекса.</strong> Уникальность проверяется внутри секции,
+        поэтому ключ секционирования обязан входить в состав уникального ключа.</li>
+      <li><strong>Слишком широкая секция.</strong> «Одна секция на год» почти не даёт отсечения: если запросы идут
+        помесячно, гранулярность должна быть месяц.</li>
+      <li><strong>Забытая <code>DEFAULT</code>-секция.</strong> Она накапливает «неправильные» строки, и её
+        читают все запросы — это скрытая деградация.</li>
+      <li><strong>Секционирование «чтобы было».</strong> Для таблицы на миллион строк оно не нужно: сложность
+        вырастет, а выигрыша не будет.</li>
+    </ol>
+
+    <h2>Как проверить, что всё работает</h2>
+    <ul>
+      <li><strong><code>EXPLAIN</code></strong>: в плане виден узел <code>Append</code>, а в нём — сколько секций
+        реально участвует. Строка <code>Subplans Removed</code> показывает, сколько отброшено.</li>
+      <li><strong><code>EXPLAIN (ANALYZE, BUFFERS)</code></strong>: сколько страниц реально прочитано. Если
+        вернулось десять строк, а прочитаны миллионы страниц — отсечения нет (глава 17).</li>
+      <li><strong><code>pg_stat_user_tables</code> по секциям:</strong> если <code>seq_scan</code> растёт у
+        <em>всех</em> секций, запросы ходят по всей таблице.</li>
+      <li><strong>Каталог:</strong> сколько секций и какого они размера —
+        <code>SELECT relname, pg_size_pretty(pg_total_relation_size(oid)) FROM pg_class WHERE relname LIKE 'orders_%';</code></li>
+      <li><strong>Приложение:</strong> проверяйте <em>условия</em>, которые оно присылает: функции по дате и
+        сравнение со строками ломают отсечение (пример — в SQL-разделе про планы и в главе про EF Core).</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Секционирование — про <strong>большие таблицы и обслуживание</strong>: отсечение при чтении плюс
+          мгновенное удаление старых периодов.</li>
+        <li>Стратегии: <strong>RANGE</strong> (даты) — чаще всего, <strong>LIST</strong> (арендатор, регион),
+          <strong>HASH</strong> (равномерно).</li>
+        <li><strong>Ключ</strong> выбирают по рабочим фильтрам; уникальные ключи обязаны его включать; индексы
+          локальные, глобальных нет.</li>
+        <li><strong>Pruning</strong> работает только на «простых» условиях: сравнение колонки со значением того же
+          типа. Функции по колонке и приведения его ломают.</li>
+        <li>Проверка — <code>EXPLAIN</code> (<code>Append</code> и <code>Subplans Removed</code>),
+          <code>BUFFERS</code>, статистика по секциям.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="sql23-vacuum-bloat.html">← <span class="sp">Глава 23. VACUUM, autovacuum, bloat и HOT-апдейты</span></a>
+      <a href="sql25-oracle-pg-arch.html"><span class="sp">Глава 25. Архитектурные различия Oracle и PostgreSQL</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
