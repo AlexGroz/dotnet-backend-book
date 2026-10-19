@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Фабрика: почему new HttpClient() — ловушка</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="patterns.html">← Оглавление</a>
+  <span class="booktitle">Паттерны в .NET</span>
+  <a href="pt04-decorator.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Паттерны · Часть II · Пять паттернов на каждый день</div>
+    <h1>Глава 3. Фабрика: почему <code>new HttpClient()</code> — ловушка</h1>
+    <p class="sublead">Фабрика нужна не для красоты, а чтобы спрятать <em>создание</em> и <em>время жизни</em>
+      объектов. В .NET это видно на двух классических авариях.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Авария №1: HttpClient и исчерпанные сокеты</h2>
+    <p>Выглядит правильно — «создал, использовал, освободил»:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ так делать нельзя
+public async Task&lt;string&gt; GetAsync(string url, CancellationToken ct)
+{
+    using var client = new HttpClient();       // новый сокет на каждый вызов
+    return await client.GetStringAsync(url, ct);
+}</code></pre>
+    </div>
+    <p>Почему это ломается под нагрузкой:</p>
+    <ul>
+      <li><code>HttpClient</code> — это <strong>обёртка над сокетом</strong>; <code>Dispose</code> закрывает
+        соединение.</li>
+      <li>Закрытый TCP-сокет уходит в состояние <code>TIME_WAIT</code> на десятки секунд. При тысяче вызовов в
+        секунду порт-лимит заканчивается — начинаются ошибки вида «не удалось выделить сокет».</li>
+      <li>Один статический <code>HttpClient</code> тоже не универсален: он держит соединения (и DNS), которые
+        могут «протухнуть».</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Фабрика, которая решает всё три проблемы</span>
+      <p><code>IHttpClientFactory</code> пулирует обработчики (<em>handlers</em>): сокеты переиспользуются, но их
+        жизнью управляет платформа, а настройки (базовый адрес, таймауты, ретраи, заголовки) задаются один
+        раз и по имени.</p>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Регистрация: конфигурация и надёжность — в одном месте
+builder.Services.AddHttpClient("payments", c =&gt;
+{
+    c.BaseAddress = new Uri("https://payments.example.com");
+    c.Timeout = TimeSpan.FromSeconds(5);
+})
+.AddStandardResilienceHandler();        // ретраи, circuit breaker, таймаут
+
+// Использование: HttpClient создаём фабрикой, НЕ через new
+public sealed class PaymentClient(IHttpClientFactory factory)
+{
+    public async Task&lt;PaymentStatus&gt; GetAsync(Guid id, CancellationToken ct)
+    {
+        using var client = factory.CreateClient("payments");   // handler из пула
+        var response = await client.GetFromJsonAsync&lt;PaymentStatus&gt;($"/payments/{id}", ct);
+        return response!;
+    }
+}</code></pre>
+    </div>
+
+    <h2>Авария №2: scoped-объект в singleton</h2>
+    <p>Фоновый сервис (<code>IHostedService</code>) живёт всё время процесса. <code>DbContext</code> —
+      <strong>scoped</strong> (живёт в рамках запроса). Если попытаться внедрить одно в другое, приложение
+      упадёт с «Cannot consume scoped service from singleton».</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ так не скомпилируется как задумано: DbContext — scoped, воркер — singleton
+public sealed class OutboxWorker(AppDbContext db) : BackgroundService { … }</code></pre>
+    </div>
+    <p>Правильный ответ — фабрика контекста: она создаёт <strong>новый</strong> контекст на одну операцию и
+      освобождает его после.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddDbContextFactory&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));
+
+public sealed class OutboxWorker(IDbContextFactory&lt;AppDbContext&gt; factory) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await using var db = await factory.CreateDbContextAsync(ct);   // свежий контекст
+            var batch = await db.Outbox.Where(x =&gt; x.Status == "new").Take(100).ToListAsync(ct);
+            …
+            await db.SaveChangesAsync(ct);
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
+        }
+    }
+}</code></pre>
+    </div>
+
+    <h2>Три вида фабрик — и в чём разница</h2>
+    <table>
+      <thead><tr><th>Вид</th><th>Суть</th><th>Пример в .NET</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Простая фабрика</strong></td><td>Один метод/класс решает, какой тип создать</td><td>Ваш <code>NotificationFactory.Create(type)</code></td></tr>
+        <tr><td><strong>Фабричный метод</strong></td><td>Создание вынесено в метод, который наследники могут переопределить</td><td><code>ILoggerFactory.CreateLogger()</code></td></tr>
+        <tr><td><strong>Абстрактная фабрика</strong></td><td>Создаёт <em>семейство</em> согласованных объектов</td><td><code>DbProviderFactory</code> (набор объектов для конкретной СУБД)</td></tr>
+        <tr><td><strong>Фабрика как сервис DI</strong></td><td>Контейнер сам управляет созданием и временем жизни</td><td><code>IServiceProvider</code>, <code>AddHttpClient</code>, <code>AddDbContextFactory</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Важное следствие для .NET</span>
+      <p>В приложении с DI <strong>контейнер уже является фабрикой</strong>. Поэтому «своя» фабрика нужна не
+        для того, чтобы «создавать объекты», а чтобы <strong>управлять тем, что контейнер не умеет</strong>:
+        пулом обработчиков, временем жизни scoped-объектов в фоне, выбором реализации по данным.</p>
+    </div>
+
+    <h2>Ещё одна жизненная задача: выбор реализации по входным данным</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public interface INotificationSender
+{
+    Task SendAsync(string to, string text, CancellationToken ct);
+}
+
+public sealed class NotificationFactory(IEnumerable&lt;INotificationSender&gt; senders)
+{
+    public INotificationSender For(Channel channel) =&gt; channel switch
+    {
+        Channel.Email =&gt; senders.OfType&lt;EmailSender&gt;().Single(),
+        Channel.Sms   =&gt; senders.OfType&lt;SmsSender&gt;().Single(),
+        _             =&gt; throw new ArgumentOutOfRangeException(nameof(channel))
+    };
+}</code></pre>
+    </div>
+    <p>Здесь фабрика — тонкая: она лишь <em>выбирает</em> из уже собранных контейнером реализаций. Логика
+      отправки остаётся в стратегиях (глава 2) — и это нормальное сочетание паттернов.</p>
+
+    <div class="box note">
+      <span class="t">Статистика: насколько часто</span>
+      <p><strong>Оценка:</strong> ~<strong>85 %</strong> проектов и <strong>~25 %</strong> от всех применений
+        паттернов.</p>
+      <ul>
+        <li><strong>Факт:</strong> <code>ILoggerFactory</code> и <code>IHttpClientFactory</code> входят в
+          стандартный набор ASP.NET Core — фабрика используется в любом проекте с логгированием и HTTP-вызовами,
+          то есть почти везде.</li>
+        <li><strong>Почему не 100 %:</strong> часть проектов обходится голым <code>IServiceProvider</code> или
+          вообще без DI (консольные утилиты).</li>
+        <li><strong>Оговорка:</strong> оценка пропорции, а не измерение (глава 1).</li>
+      </ul>
+    </div>
+
+    <h2>Когда фабрика не нужна</h2>
+    <ul>
+      <li><strong>Объект без зависимостей и настройки:</strong> <code>new Point(3, 5)</code> — фабрика только
+        добавит слой.</li>
+      <li><strong>Контейнер уже всё умеет:</strong> если нужен просто <code>IOrderService</code>, его внедряют,
+        а не «достают через фабрику» (иначе получится Service Locator — антипаттерн, глава 6).</li>
+      <li><strong>«Фабрика на будущее»:</strong> если вариант один и не планируется второй, это лишний код.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Фабрика прячет <strong>создание и время жизни</strong> объектов, а не «делает красиво».</li>
+        <li><code>new HttpClient()</code> на каждый вызов → исчерпание сокетов; решение —
+          <code>IHttpClientFactory</code>.</li>
+        <li>Scoped-объект в singleton-сервисе → <code>IDbContextFactory</code>/<code>IServiceScopeFactory</code>.</li>
+        <li>В DI контейнер сам является фабрикой: своя фабрика нужна только там, где контейнер бессилен.</li>
+        <li>Оценка: ~85 % проектов, ~25 % от всех использований паттернов.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="pt02-strategy.html">← <span class="sp">Глава 2. Стратегия: if/switch, который захотел стать интерфейсом</span></a>
+      <a href="pt04-decorator.html"><span class="sp">Глава 4. Декоратор: добавить поведение, не меняя класс</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

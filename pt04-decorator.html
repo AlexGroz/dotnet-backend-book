@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · Декоратор: добавить поведение, не меняя класс</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="patterns.html">← Оглавление</a>
+  <span class="booktitle">Паттерны в .NET</span>
+  <a href="pt05-chain.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Паттерны · Часть II · Пять паттернов на каждый день</div>
+    <h1>Глава 4. Декоратор: добавить поведение, не меняя класс</h1>
+    <p class="sublead">Кэш, логи, метрики и ретраи поверх готового сервиса — без правки этого сервиса и без
+      «класса на каждую комбинацию».</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Проблема: комбинации разрастаются</h2>
+    <p>Есть репозиторий, и со временем к нему хочется добавить кэш, логирование и метрики. Через наследование
+      получается так:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">EfProductRepository
+CachedProductRepository
+LoggingProductRepository
+CachedLoggingProductRepository
+CachedAndMetricsProductRepository
+…                        ← каждая новая «добавка» удваивает число классов</code></pre>
+    </div>
+    <p>Хуже того: логика кэша дублируется в каждом таком классе, а бизнес-код начинает зависеть от конкретного
+      типа, а не от интерфейса.</p>
+
+    <h2>Решение: обёртка того же интерфейса</h2>
+    <p>Декоратор реализует <strong>тот же интерфейс</strong>, что и оборачиваемый объект, и вызывает его внутри.
+      Внешний код не знает, что получил обёртку.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public interface IProductRepository
+{
+    Task&lt;Product?&gt; GetAsync(Guid id, CancellationToken ct);
+    Task SaveAsync(Product product, CancellationToken ct);
+}
+
+// «Настоящая» реализация — про БД, и только про БД
+public sealed class EfProductRepository(AppDbContext db) : IProductRepository
+{
+    public Task&lt;Product?&gt; GetAsync(Guid id, CancellationToken ct) =&gt;
+        db.Products.AsNoTracking().FirstOrDefaultAsync(p =&gt; p.Id == id, ct);
+
+    public async Task SaveAsync(Product product, CancellationToken ct)
+    {
+        db.Products.Update(product);
+        await db.SaveChangesAsync(ct);
+    }
+}
+
+// Декоратор: кэш, который ничего не знает про EF
+public sealed class CachedProductRepository(
+    IProductRepository inner,
+    IMemoryCache cache) : IProductRepository
+{
+    public async Task&lt;Product?&gt; GetAsync(Guid id, CancellationToken ct)
+    {
+        var key = $"product:{id}";
+        if (cache.TryGetValue&lt;Product&gt;(key, out var cached))
+            return cached;                       // попадание в кэш
+
+        var product = await inner.GetAsync(id, ct);   // промах → идём внутрь
+        if (product is not null)
+            cache.Set(key, product, TimeSpan.FromMinutes(5));
+        return product;
+    }
+
+    public async Task SaveAsync(Product product, CancellationToken ct)
+    {
+        await inner.SaveAsync(product, ct);      // сначала пишем в БД
+        cache.Remove($"product:{product.Id}");   // и инвалидируем кэш
+    }
+}</code></pre>
+    </div>
+    <p>Сборка «слоёного» сервиса — простое оборачивание: сначала настоящий, потом кэш.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddScoped&lt;EfProductRepository&gt;();
+builder.Services.AddScoped&lt;CachedProductRepository&gt;();
+builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt;
+    new CachedProductRepository(
+        sp.GetRequiredService&lt;EfProductRepository&gt;(),
+        sp.GetRequiredService&lt;IMemoryCache&gt;()));</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Почему это лучше</span>
+      <ul>
+        <li><strong>Нет комбинаций:</strong> добавили логи — обернули ещё раз, порядок слоёв виден в коде.</li>
+        <li><strong>Каждый слой про одно:</strong> репозиторий — про БД, декоратор — про кэш.</li>
+        <li><strong>Тесты:</strong> подменяем декоратор «пустым» (или тестовым) и проверяем бизнес-логику без
+          базы.</li>
+      </ul>
+    </div>
+
+    <h2>Декоратор, который .NET даёт «из коробки»: <code>HttpMessageHandler</code></h2>
+    <p>Конвейер <code>HttpClient</code> — это цепочка декораторов: каждый обработчик получает следующий и может
+      добавить поведение. Логирование, заголовки, ретраи — типовые декораторы.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class RequestLoggingHandler(ILogger&lt;RequestLoggingHandler&gt; logger)
+    : DelegatingHandler
+{
+    protected override async Task&lt;HttpResponseMessage&gt; SendAsync(
+        HttpRequestMessage request, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            return await base.SendAsync(request, ct);        // внутрь цепочки
+        }
+        finally
+        {
+            logger.LogInformation("{Method} {Uri} — {Elapsed} мс",
+                request.Method, request.RequestUri, sw.ElapsedMilliseconds);
+        }
+    }
+}
+
+builder.Services.AddHttpClient("payments")
+    .AddHttpMessageHandler&lt;RequestLoggingHandler&gt;();        // обернули клиент</code></pre>
+    </div>
+
+    <h2>Где ещё это работает в .NET</h2>
+    <table>
+      <thead><tr><th>Слой</th><th>Декораторы</th><th>Что добавляют</th></tr></thead>
+      <tbody>
+        <tr><td><code>Stream</code></td><td><code>BufferedStream</code>, <code>GZipStream</code>, <code>DeflateStream</code>, <code>CryptoStream</code></td><td>Буферизацию, сжатие, шифрование — в любом порядке</td></tr>
+        <tr><td><code>HttpClient</code></td><td><code>DelegatingHandler</code></td><td>Заголовки, логи, ретраи, трейсинг</td></tr>
+        <tr><td><code>TextReader</code>/<code>StreamReader</code></td><td>обёртки над потоком</td><td>Кодировку, чтение строками</td></tr>
+        <tr><td>Ваш сервис</td><td>кэш, метрики, аудит</td><td>Всё, что не относится к основной задаче</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Проверяемый факт:</strong> в <code>System.IO</code> именно так и устроена работа с потоками:
+      <code>new GZipStream(new BufferedStream(new FileStream(...)))</code> — вы декорировали поток дважды и не
+      написали ни одного класса.</p>
+
+    <h2>Как не путать с адаптером, прокси и фасадом</h2>
+    <p>Структура у них похожа (обёртка + делегирование), но <strong>цель разная</strong> — об этом спрашивают на
+      интервью.</p>
+    <table>
+      <thead><tr><th>Паттерн</th><th>Интерфейс</th><th>Цель</th><th>Пример</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Декоратор</strong></td><td>Тот же</td><td><strong>Добавить</strong> поведение</td><td>Кэш поверх репозитория</td></tr>
+        <tr><td><strong>Адаптер</strong></td><td>Другой</td><td><strong>Перевести</strong> один интерфейс в другой</td><td>Обёртка над чужим SDK</td></tr>
+        <tr><td><strong>Прокси</strong></td><td>Тот же</td><td><strong>Контролировать доступ</strong>: ленивая загрузка, права, сеть</td><td>Ленивый прокси сущности</td></tr>
+        <tr><td><strong>Фасад</strong></td><td>Проще</td><td><strong>Упростить</strong> подсистему</td><td><code>OrderFacade</code> над пятью сервисами</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Статистика: насколько часто</span>
+      <p><strong>Оценка:</strong> ~<strong>60 %</strong> проектов и <strong>~15 %</strong> от всех применений
+        паттернов.</p>
+      <ul>
+        <li><strong>Факт:</strong> каждый, кто работал с файлами или сжатием, использовал декоратор —
+          <code>GZipStream</code> и <code>CryptoStream</code> устроены именно так.</li>
+        <li><strong>Почему ниже стратегии и фабрики:</strong> свой декоратор пишут реже: он нужен, когда появляется
+          <em>сквозная</em> задача (кэш, логи) поверх готового интерфейса. Плюс мешает «толстый» интерфейс — тогда
+          сначала нужен ISP (разделение интерфейсов).</li>
+        <li><strong>Оговорка:</strong> оценка пропорции, а не измерение (глава 1).</li>
+      </ul>
+    </div>
+
+    <h2>Когда декоратор не нужен</h2>
+    <ul>
+      <li><strong>Поведение нужно в одном месте</strong> и один раз — проще написать его прямо в вызывающем
+        коде.</li>
+      <li><strong>Интерфейс слишком большой:</strong> обёртывать 30 методов ради одного — сигнал, что интерфейс
+        надо разделить.</li>
+      <li><strong>Порядок слоёв критичен и неочевиден:</strong> если «кэш до валидации» ломает логику, а порядок
+        задаётся в DI-регистрации, это станет источником ошибок. Иногда честнее явный сервис-оркестратор.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Декоратор — <strong>обёртка с тем же интерфейсом</strong>, добавляющая поведение через делегирование.</li>
+        <li>Он убирает «комбинаторный взрыв» наследников и оставляет каждый слой про одну задачу.</li>
+        <li>В .NET декоратор — это <code>Stream</code> и <code>DelegatingHandler</code>; вы пользуетесь им, даже не
+          замечая.</li>
+        <li>Отличие от адаптера/прокси/фасада — в <strong>цели</strong>, а не в структуре.</li>
+        <li>Оценка: ~60 % проектов, ~15 % от всех использований паттернов.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="pt03-factory.html">← <span class="sp">Глава 3. Фабрика: почему new HttpClient() — ловушка</span></a>
+      <a href="pt05-chain.html"><span class="sp">Глава 5. Цепочка обязанностей: как устроен конвейер ASP.NET Core</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

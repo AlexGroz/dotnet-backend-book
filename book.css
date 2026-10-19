@@ -66,3 +66,17 @@ tr:last-child td{border-bottom:none}
 .tag.lead{background:#eeeafe;color:#4f46e5;border:1px solid #d9d3f7}
 .tag.core{background:#e7f7ee;color:#0f9d58;border:1px solid #cbebd9}
 .toc .t{margin:4px 0 3px}
+
+/* Телефон в горизонтальной ориентации: экран низкий, и липкая панель «съедает» заметную
+   часть высоты. На таких экранах панель просто уезжает вместе со страницей. */
+@media (max-height: 520px){
+  .topbar{position:static}
+}
+@media (max-height: 520px) and (min-width: 641px){
+  .container{padding-top:20px}
+  .topbar{margin:-20px -22px 16px;padding:10px 22px}
+}
+@media (max-height: 520px) and (max-width: 640px){
+  .container{padding-top:16px}
+  .topbar{margin:-16px -14px 14px;padding:10px 14px}
+}

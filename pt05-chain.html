@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · Цепочка обязанностей: как устроен конвейер ASP.NET Core</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="patterns.html">← Оглавление</a>
+  <span class="booktitle">Паттерны в .NET</span>
+  <a href="pt06-repository.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Паттерны · Часть II · Пять паттернов на каждый день</div>
+    <h1>Глава 5. Цепочка обязанностей: как устроен конвейер ASP.NET Core</h1>
+    <p class="sublead">Последовательность обработчиков, где каждый решает: обработать самому, прервать или
+      передать дальше. Именно так работает каждый запрос в ASP.NET Core.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Проблема: один обработчик знает слишком много</h2>
+    <p>Типичный «толстый» обработчик запроса собирает в себе всё сразу:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.MapPost("/orders", async (HttpContext ctx, CreateOrderDto dto, AppDbContext db) =&gt;
+{
+    if (!ctx.Request.Headers.TryGetValue("X-Api-Key", out var key) || !IsValid(key))
+    {
+        ctx.Response.StatusCode = 401; return;             // 1) аутентификация
+    }
+
+    if (!ctx.User.IsInRole("manager"))
+    {
+        ctx.Response.StatusCode = 403; return;             // 2) авторизация
+    }
+
+    if (!RateLimiter.TryAcquire(ctx.Connection.Id))
+    {
+        ctx.Response.StatusCode = 429; return;             // 3) лимит
+    }
+
+    if (!Validator.Validate(dto, out var errors))
+    {
+        ctx.Response.StatusCode = 400;                     // 4) валидация
+        await ctx.Response.WriteAsJsonAsync(errors); return;
+    }
+
+    // … и только здесь — сама логика заказа
+});</code></pre>
+    </div>
+    <p>С каждым новым требованием (аудит, трейсинг, идемпотентность) этот блок растёт, а бизнес-логика
+      отодвигается всё дальше.</p>
+
+    <h2>Решение: цепочка, где каждый шаг — отдельный обработчик</h2>
+    <p>Ключевая идея: обработчик получает <strong>ссылку на следующий</strong> и сам решает, вызывать его или
+      остановиться. Реализация «руками» — это интерфейс и связанный список:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public abstract class OrderCheck
+{
+    private OrderCheck? _next;
+    public OrderCheck SetNext(OrderCheck next) { _next = next; return next; }
+
+    public async Task&lt;CheckResult&gt; HandleAsync(OrderRequest request, CancellationToken ct)
+    {
+        var result = await CheckAsync(request, ct);
+        if (!result.Passed) return result;                  // прервали цепочку
+        return _next is null
+            ? CheckResult.Ok()
+            : await _next.HandleAsync(request, ct);         // передали дальше
+    }
+
+    protected abstract Task&lt;CheckResult&gt; CheckAsync(OrderRequest request, CancellationToken ct);
+}
+
+// Звенья цепочки: каждое проверяет ровно одно
+public sealed class LimitCheck(decimal max) : OrderCheck
+{
+    protected override Task&lt;CheckResult&gt; CheckAsync(OrderRequest r, CancellationToken ct) =&gt;
+        Task.FromResult(r.Sum &lt;= max ? CheckResult.Ok() : CheckResult.Fail("Сумма превышает лимит"));
+}
+
+public sealed class FraudCheck(IFraudService fraud) : OrderCheck
+{
+    protected override async Task&lt;CheckResult&gt; CheckAsync(OrderRequest r, CancellationToken ct) =&gt;
+        await fraud.IsSuspiciousAsync(r, ct) ? CheckResult.Fail("Подозрительная операция") : CheckResult.Ok();
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Сборка цепочки — один раз, в композиционном корне
+var chain = new LimitCheck(1_000_000m);
+chain.SetNext(new FraudCheck(fraud)).SetNext(new DuplicateCheck(db));
+
+var result = await chain.HandleAsync(request, ct);</code></pre>
+    </div>
+    <p>Теперь новый шаг — это новый класс и одна строка сборки. Порядок проверок виден явно, каждую можно
+      протестировать отдельно.</p>
+
+    <h2>Главный пример: конвейер ASP.NET Core</h2>
+    <p>Middleware — это та же цепочка, только звено называется <code>RequestDelegate</code> и получает
+      <code>HttpContext</code>. Каждый компонент может выполнить свою часть, вызвать следующий и <em>не</em>
+      вызывать его, если решил остановить запрос.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class CorrelationIdMiddleware(RequestDelegate next)
+{
+    public async Task InvokeAsync(HttpContext context)
+    {
+        var id = context.Request.Headers.TryGetValue("X-Correlation-Id", out var value)
+            ? value.ToString()
+            : Guid.NewGuid().ToString();
+
+        context.Items["CorrelationId"] = id;
+        context.Response.Headers["X-Correlation-Id"] = id;
+
+        await next(context);            // передали следующему звену
+    }
+}
+
+// регистрация — цепочка строится порядком строк
+app.UseMiddleware&lt;CorrelationIdMiddleware&gt;();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseRateLimiter();
+app.MapGet("/orders/{id:int}", …);</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Порядок — часть логики</span>
+      <p>Обработка ошибок должна стоять <strong>раньше</strong> остальных звеньев, иначе исключения из следующих
+        компонентов она не увидит. Аутентификация — до авторизации. Это ровно то же свойство цепочки, что в
+        «ручной» реализации: <em>кто раньше — тот и decides</em>, кому передавать запрос.</p>
+    </div>
+
+    <h2>Где ещё в .NET встречается цепочка</h2>
+    <table>
+      <thead><tr><th>Механизм</th><th>Звено</th><th>Что решает звено</th></tr></thead>
+      <tbody>
+        <tr><td>Middleware ASP.NET Core</td><td><code>RequestDelegate</code></td><td>Пропустить запрос дальше или ответить самому</td></tr>
+        <tr><td>Фильтры MVC</td><td><code>IActionFilter</code>, <code>IAsyncActionFilter</code></td><td>Выполнять действие или прервать</td></tr>
+        <tr><td>Конвейер <code>HttpClient</code></td><td><code>DelegatingHandler</code></td><td>Добавить поведение и передать запрос внутрь</td></tr>
+        <tr><td>Логирование</td><td><code>ILoggerProvider</code> + фильтры</td><td>Писать или не писать запись</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Чем цепочка отличается от декоратора</h2>
+    <p>Структура похожа (обёртки), но <strong>смысл разный</strong> — это классический вопрос на интервью.</p>
+    <table>
+      <thead><tr><th></th><th>Декоратор</th><th>Цепочка обязанностей</th></tr></thead>
+      <tbody>
+        <tr><td>Главная идея</td><td><strong>Добавить</strong> поведение к одному объекту</td><td><strong>Выбрать</strong>, кто обработает, и остановить при необходимости</td></tr>
+        <tr><td>Передача дальше</td><td>Как правило, всегда вызывает вложенный объект</td><td>Может не вызывать — это и есть «прерывание»</td></tr>
+        <tr><td>Кто «главный»</td><td>Внешний код работает с последним слоем</td><td>Никто не гарантирует, что запрос дойдёт до конца</td></tr>
+        <tr><td>Пример</td><td>Кэш поверх репозитория</td><td>Проверки заказа, middleware</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box note">
+      <span class="t">Статистика: насколько часто</span>
+      <p><strong>Оценка:</strong> ~<strong>70 %</strong> проектов и <strong>~20 %</strong> от всех применений
+        паттернов.</p>
+      <ul>
+        <li><strong>Факт:</strong> в <em>любом</em> приложении ASP.NET Core есть конвейер middleware — то есть
+          цепочка обязанностей используется в 100 % веб-приложений, даже если разработчик её не писал.</li>
+        <li><strong>Почему оценка проектов ниже 100 %:</strong> в консольных утилитах, фоновых воркерах и
+          библиотеках конвейера нет; там паттерн встречается только если его написали осознанно.</li>
+        <li><strong>Оговорка:</strong> оценка пропорции, а не измерение (глава 1).</li>
+      </ul>
+    </div>
+
+    <h2>Когда цепочка не нужна</h2>
+    <ul>
+      <li><strong>Шагов два-три и они не меняются:</strong> обычный последовательный код читается лучше.</li>
+      <li><strong>Шаги обязаны выполниться все:</strong> это не цепочка обязанностей, а набор действий —
+        например, `foreach` по обработчикам или события.</li>
+      <li><strong>Критичен порядок и он неочевиден:</strong> цепочка, собранная в случайном порядке в DI, — источник
+        трудноуловимых ошибок. Порядок должен быть виден в одном месте.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Цепочка обязанностей — <strong>последовательность обработчиков</strong>, каждый решает: обработать,
+          прервать или передать дальше.</li>
+        <li>Middleware ASP.NET Core — это и есть цепочка; порядок регистрации = порядок выполнения.</li>
+        <li>Отличие от декоратора: декоратор <strong>добавляет</strong> поведение, цепочка <strong>выбирает
+          обработчика</strong> и может остановить запрос.</li>
+        <li>Плюсы: каждый шаг отдельно тестируется, новый шаг не меняет существующие.</li>
+        <li>Оценка: ~70 % проектов, ~20 % от всех использований паттернов (в веб-приложениях — фактически 100 %).</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="pt04-decorator.html">← <span class="sp">Глава 4. Декоратор: добавить поведение, не меняя класс</span></a>
+      <a href="pt06-repository.html"><span class="sp">Глава 6. Репозиторий и Unit of Work: когда они нужны, а когда мешают</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

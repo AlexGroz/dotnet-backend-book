@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 1 · Паттерны и статистика: как считать честно</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="patterns.html">← Оглавление</a>
+  <span class="booktitle">Паттерны в .NET</span>
+  <a href="pt02-strategy.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Паттерны · Часть I · Как это читать</div>
+    <h1>Глава 1. Паттерны и статистика: как считать честно</h1>
+    <p class="sublead">Прежде чем разбирать пять паттернов, договоримся о двух вещах: что такое паттерн в
+      современном C# и что на самом деле известно про частоту его использования.</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Что такое паттерн</h2>
+    <p><strong>Паттерн</strong> — это <em>проверенное решение типовой задачи в определённом контексте</em>.
+      Это не «кубик», который вставляют в код, и не обязательный класс с суффиксом <code>Factory</code>. Это
+      <strong>идея</strong>, у которой в C# может быть несколько форм:</p>
+    <table>
+      <thead><tr><th>Форма в C#</th><th>Пример</th><th>Что это даёт</th></tr></thead>
+      <tbody>
+        <tr><td>Интерфейс + реализации</td><td><code>IComparer&lt;T&gt;</code>, <code>IStrategy</code></td><td>Подмена поведения без правки вызывающего кода</td></tr>
+        <tr><td>Интерфейс + DI</td><td><code>IOrderPricing</code> → <code>DefaultPricing</code></td><td>То же плюс конфигурация и тесты</td></tr>
+        <tr><td>Делегат</td><td><code>Func&lt;T, bool&gt;</code> как предикат</td><td>Простейшая стратегия без класса</td></tr>
+        <tr><td>Middleware</td><td>Конвейер ASP.NET Core</td><td>Цепочка обработки запроса</td></tr>
+        <tr><td>Обёртка того же интерфейса</td><td><code>GZipStream</code> поверх <code>FileStream</code></td><td>Добавить поведение, не меняя класс</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Паттерн, применённый без причины, — это вред</span>
+      <p>Любой паттерн добавляет косвенности: интерфейс, класс, регистрацию. Если задача решается в три строки,
+        паттерн сделает код <em>хуже</em>. Настоящий признак, что паттерн нужен: <strong>изменение, которое
+        приходится делать в нескольких местах</strong>, или <strong>невозможность протестировать</strong> логику
+        без базы и сети.</p>
+    </div>
+
+    <h2>Про статистику: что известно, а что нет</h2>
+    <p>Нужно сказать прямо: <strong>публичных исследований, где измерялся бы процент использования паттернов
+      именно в .NET-проектах, не существует</strong>. Опросы (JetBrains, Stack Overflow) спрашивают про
+      технологии и инструменты, а не про архитектурные решения; поиск по GitHub считает вхождения слов в файлы,
+      а не реальное применение идей.</p>
+    <p>Что <em>действительно</em> можно измерить или проверить:</p>
+    <table>
+      <thead><tr><th>Что</th><th>Насколько надёжно</th><th>Пример</th></tr></thead>
+      <tbody>
+        <tr><td>Паттерны, встроенные в платформу</td><td><strong>Точно</strong>: это часть API</td><td><code>IEnumerable</code> — итератор, <code>Stream</code> — декоратор, middleware — цепочка</td></tr>
+        <tr><td>Исходники .NET / ASP.NET Core</td><td><strong>Точно</strong>, но вручную: можно посчитать классы</td><td>Сколько типов реализуют <code>IDisposable</code>, сколько <code>DelegatingHandler</code> в стеке <code>HttpClient</code></td></tr>
+        <tr><td>Популярность библиотек</td><td>Приблизительно (NuGet-загрузки)</td><td>Polly, MediatR, Scrutor — показывают спрос на идею</td></tr>
+        <tr><td>«Процент проектов, где используют паттерн»</td><td><strong>Только оценка</strong></td><td>По опыту и по типовым корпоративным кодовым базам</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Поэтому в этой книге</span>
+      <p>Проценты ниже — <strong>оценка</strong> (порядок величин и соотношение между паттернами), а не результат
+        исследования. Там, где есть проверяемый факт, он помечен как факт: «в .NET этот паттерн используется
+        внутри платформы». Так вы не запомните красивую цифру, которой не существует, но поймёте пропорции.</p>
+    </div>
+
+    <h2>Пять паттернов, которые в .NET встречаются постоянно</h2>
+    <p>Отбор простой: паттерн попал в книгу, если он <strong>либо встроен в платформу</strong>, либо
+      <strong>встречается почти в любом прикладном проекте</strong> — и без него код объективно хуже
+      (жёстче связан, хуже тестируется или имеет известный дефект).</p>
+    <table>
+      <thead><tr><th>Паттерн</th><th>Где живёт в .NET</th><th>Доля проектов<br><small>оценка</small></th><th>Доля от всех<br>использований<br><small>оценка, Σ = 100 %</small></th></tr></thead>
+      <tbody>
+        <tr><td><strong>Стратегия</strong></td><td>интерфейсы + DI, <code>IComparer&lt;T&gt;</code>, <code>ILoggerProvider</code></td><td>~90 %</td><td>~30 %</td></tr>
+        <tr><td><strong>Фабрика</strong></td><td><code>IHttpClientFactory</code>, <code>ILoggerFactory</code>, <code>IServiceProvider</code></td><td>~85 %</td><td>~25 %</td></tr>
+        <tr><td><strong>Декоратор</strong></td><td><code>Stream</code>, <code>DelegatingHandler</code>, DI-обёртки</td><td>~60 %</td><td>~15 %</td></tr>
+        <tr><td><strong>Цепочка обязанностей</strong></td><td>middleware ASP.NET Core, фильтры</td><td>~70 %</td><td>~20 %</td></tr>
+        <tr><td><strong>Репозиторий + Unit of Work</strong></td><td><code>DbContext</code> + репозитории в прикладном коде</td><td>~50 %</td><td>~10 %</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Как читать эти числа</span>
+      <ul>
+        <li><strong>«Доля проектов»</strong> — в скольких типовых .NET-проектах паттерн реально присутствует
+          (с учётом платформенных вещей, которые используются «сами собой»).</li>
+        <li><strong>«Доля от всех использований»</strong> — какую часть от <em>всех</em> применений паттернов
+          занимает этот паттерн, если принять сумму за 100 %. Это показывает <em>пропорцию</em>: стратегия и
+          фабрика встречаются в разы чаще декоратора.</li>
+        <li><strong>Почему стратегия выше всех:</strong> это самый «дешёвый» паттерн в C# — интерфейс плюс
+          регистрация в DI. Он появляется в проекте даже без осознанного решения «применим стратегию».</li>
+        <li><strong>Почему репозиторий ниже:</strong> EF Core <em>уже</em> даёт репозиторий и Unit of Work,
+          поэтому дополнительные обёртки добавляют не все (и это нормально — см. главу 6).</li>
+      </ul>
+    </div>
+
+    <h2>Что .NET использует «под капотом» — проверяемые факты</h2>
+    <p>Эти паттерны работают в вашем коде, даже если вы ни разу не произносили их названия:</p>
+    <table>
+      <thead><tr><th>Паттерн</th><th>Где именно в .NET</th><th>Что было бы без него</th></tr></thead>
+      <tbody>
+        <tr><td>Итератор</td><td><code>IEnumerable&lt;T&gt;</code>, <code>yield return</code></td><td><code>foreach</code> невозможен</td></tr>
+        <tr><td>Декоратор</td><td><code>Stream</code>: <code>BufferedStream</code>, <code>GZipStream</code>, <code>CryptoStream</code></td><td>Класс на каждую комбинацию «файл + сжатие + шифрование»</td></tr>
+        <tr><td>Цепочка обязанностей</td><td>Middleware ASP.NET Core</td><td>Один гигантский обработчик запроса</td></tr>
+        <tr><td>Стратегия</td><td><code>IComparer&lt;T&gt;</code>, <code>IEqualityComparer&lt;T&gt;</code></td><td>Сортировка только «по умолчанию»</td></tr>
+        <tr><td>Фабрика</td><td><code>ILoggerFactory</code>, <code>IHttpClientFactory</code></td><td>Ручное создание объектов с настройками в бизнес-коде</td></tr>
+        <tr><td>Наблюдатель</td><td>события C#, <code>IObserver&lt;T&gt;</code>, <code>INotifyPropertyChanged</code></td><td>Источник данных должен знать всех получателей</td></tr>
+        <tr><td>Dispose</td><td><code>IDisposable</code>, <code>using</code></td><td>Ручное освобождение ресурсов и утечки</td></tr>
+        <tr><td>Внедрение зависимостей</td><td><code>IServiceProvider</code>, <code>AddScoped/AddSingleton</code></td><td>Классы создают зависимости сами → невозможно подменить в тестах</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Паттерн — <strong>идея решения</strong>, а не класс с обязательным именем.</li>
+        <li>В современном C# паттерн чаще всего выглядит как <strong>интерфейс + DI</strong>, а не как фабрика
+          фабрик.</li>
+        <li>Строгих процентов использования паттернов в .NET <strong>не существует</strong>; есть проверяемые
+          факты о платформе и оценки пропорций.</li>
+        <li>Главный критерий пользы: без паттерна изменение пришлось бы делать в нескольких местах или код нельзя
+          было бы протестировать.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="patterns.html">← <span class="sp">Оглавление</span></a>
+      <a href="pt02-strategy.html"><span class="sp">Глава 2. Стратегия: if/switch, который захотел стать интерфейсом</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

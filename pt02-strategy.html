@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 2 · Стратегия: if/switch, который захотел стать интерфейсом</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="patterns.html">← Оглавление</a>
+  <span class="booktitle">Паттерны в .NET</span>
+  <a href="pt03-factory.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Паттерны · Часть II · Пять паттернов на каждый день</div>
+    <h1>Глава 2. Стратегия: if/switch, который захотел стать интерфейсом</h1>
+    <p class="sublead">Как перестать править один метод при каждом новом способе оплаты, скидки или расчёта —
+      и почему в C# стратегия почти всегда приходит вместе с DI.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Проблема: один метод знает всё</h2>
+    <p>Начинается безобидно: у заказа есть тип клиента, и цена считается по-разному.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public decimal CalculateTotal(Order order, CustomerType type)
+{
+    if (type == CustomerType.Regular)
+        return order.Sum;
+
+    if (type == CustomerType.Vip)
+        return order.Sum * 0.9m;
+
+    if (type == CustomerType.Partner)
+        return order.Sum * 0.8m + 500m;
+
+    throw new ArgumentOutOfRangeException(nameof(type));
+}</code></pre>
+    </div>
+    <p>Что происходит по мере роста:</p>
+    <ul>
+      <li>каждый новый тип клиента — <strong>правка этого метода</strong> (риск сломать существующие ветки);</li>
+      <li>метод растёт, ветки обрастают условиями («а если партнёр и промокод…»);</li>
+      <li>протестировать одну стратегию нельзя — только весь метод целиком;</li>
+      <li>класс, в котором он живёт, начинает зависеть от всех деталей расчёта.</li>
+    </ul>
+    <p>Это нарушение принципа открытости/закрытости: <em>код открыт для расширения, но закрыт для изменения</em>.
+      Здесь же каждое расширение требует изменения.</p>
+
+    <h2>Решение: вынести алгоритм за интерфейс</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1) Контракт: «я умею посчитать итог»
+public interface IPricingStrategy
+{
+    decimal Calculate(Order order);
+}
+
+// 2) Реализации: каждая отвечает за один вариант
+public sealed class RegularPricing : IPricingStrategy
+{
+    public decimal Calculate(Order order) =&gt; order.Sum;
+}
+
+public sealed class VipPricing : IPricingStrategy
+{
+    public decimal Calculate(Order order) =&gt; order.Sum * 0.9m;
+}
+
+public sealed class PartnerPricing : IPricingStrategy
+{
+    public decimal Calculate(Order order) =&gt; order.Sum * 0.8m + 500m;
+}</code></pre>
+    </div>
+    <p>Теперь <strong>выбор стратегии</strong> — отдельная задача, и в .NET она решается контейнером, а не
+      <code>switch</code> в бизнес-коде:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Регистрация один раз при старте
+builder.Services.AddKeyedScoped&lt;IPricingStrategy, RegularPricing&gt;(CustomerType.Regular);
+builder.Services.AddKeyedScoped&lt;IPricingStrategy, VipPricing&gt;(CustomerType.Vip);
+builder.Services.AddKeyedScoped&lt;IPricingStrategy, PartnerPricing&gt;(CustomerType.Partner);
+
+// Использование: сервис зависит от фабрики ключей, а не от всех стратегий
+public sealed class OrderService([FromKeyedServices] Func&lt;CustomerType, IPricingStrategy&gt; resolve)
+{
+    public decimal GetTotal(Order order, CustomerType type)
+        =&gt; resolve(type).Calculate(order);
+}</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Что изменилось</span>
+      <ul>
+        <li><strong>Новый тип клиента</strong> = новый класс + одна строка регистрации. Существующий код не
+          трогаем.</li>
+        <li><strong>Тесты</strong>: каждая стратегия проверяется отдельно, без базы и без остальных ветвей.</li>
+        <li><strong>Ответственность</strong>: расчёт цены перестал быть «одним большим методом» в сервисе заказов.</li>
+      </ul>
+    </div>
+
+    <h2>Где стратегия уже работает в .NET</h2>
+    <table>
+      <thead><tr><th>Интерфейс</th><th>Кто подставляет стратегию</th><th>Что меняется</th></tr></thead>
+      <tbody>
+        <tr><td><code>IComparer&lt;T&gt;</code></td><td><code>List&lt;T&gt;.Sort</code>, <code>OrderBy</code></td><td>Правило сравнения объектов</td></tr>
+        <tr><td><code>IEqualityComparer&lt;T&gt;</code></td><td><code>Dictionary</code>, <code>HashSet</code>, <code>Distinct</code></td><td>Правило «равенства» и хеша</td></tr>
+        <tr><td><code>ILoggerProvider</code></td><td>Механизм логирования</td><td>Куда писать логи: консоль, файл, внешняя система</td></tr>
+        <tr><td><code>IOutputFormatter</code></td><td>ASP.NET Core content negotiation</td><td>В какой формат сериализовать ответ: JSON, XML</td></tr>
+        <tr><td><code>IAuthenticationHandler</code></td><td>Конвейер аутентификации</td><td>Как проверять удостоверение: cookie, JWT, ключ</td></tr>
+      </tbody>
+    </table>
+    <p>Это и есть проверяемый факт «стратегия используется постоянно»: перечисленные интерфейсы — часть платформы,
+      и приложение подставляет в них свои реализации, даже не называя это паттерном.</p>
+
+    <div class="box note">
+      <span class="t">Статистика: насколько часто</span>
+      <p><strong>Оценка:</strong> присутствует примерно в <strong>90 %</strong> .NET-проектов и занимает
+        <strong>~30 %</strong> от всех применений паттернов (если принять сумму за 100 %).</p>
+      <ul>
+        <li><strong>Факт, который объясняет цифру:</strong> стратегия встроена в платформу —
+          <code>IComparer&lt;T&gt;</code>, <code>IEqualityComparer&lt;T&gt;</code>, <code>IOutputFormatter</code>,
+          <code>ILoggerProvider</code>. Вы используете её в любом проекте, где сортируете или настраиваете
+          сериализацию.</li>
+        <li><strong>Почему доля такая высокая:</strong> в C# стратегия — самый дешёвый паттерн: интерфейс и
+          регистрация в DI. Она появляется даже без осознанного решения «применим паттерн».</li>
+        <li><strong>Оговорка:</strong> это оценка пропорции, а не измерение (см. главу 1).</li>
+      </ul>
+    </div>
+
+    <h2>Когда стратегия не нужна</h2>
+    <ul>
+      <li><strong>Вариантов два и они не изменятся.</strong> <code>if (isVip)</code> в одном месте читается лучше,
+        чем интерфейс, два класса, регистрация и резолвер.</li>
+      <li><strong>Логика — одна строка.</strong> <code>Func&lt;Order, decimal&gt;</code> в параметре метода
+        решает задачу без создания иерархии.</li>
+      <li><strong>Выбор зависит от данных, которых у сервиса нет.</strong> Тогда это уже не стратегия, а правило
+        домена — ему место в доменной модели, а не в DI.</li>
+    </ul>
+
+    <h2>Как не путать с соседними паттернами</h2>
+    <table>
+      <thead><tr><th></th><th>Кто отвечает за «что делать»</th><th>Кто создаёт объекты</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Стратегия</strong></td><td>Выбранная реализация алгоритма</td><td>Кто-то снаружи (DI)</td></tr>
+        <tr><td><strong>Фабрика</strong></td><td>Вызывающий код</td><td>Фабрика (глава 3)</td></tr>
+        <tr><td><strong>Декоратор</strong></td><td>Обёрнутая реализация + дополнительное поведение</td><td>Кто-то снаружи (глава 4)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Стратегия заменяет <strong>разрастающийся if/switch по варианту</strong> набором реализаций одного
+          интерфейса.</li>
+        <li>Выбор стратегии — <strong>отдельная ответственность</strong>: DI, ключевые сервисы, фабрика; не
+          <code>switch</code> внутри бизнес-логики.</li>
+        <li>Признак, что паттерн оправдан: <strong>новый вариант требует правки существующего кода</strong> и
+          мешает тестам.</li>
+        <li>В .NET стратегия — почти всегда интерфейс + DI; для простых случаев хватает делегата.</li>
+        <li>Оценка: ~90 % проектов, ~30 % от всех использований паттернов.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="pt01-intro.html">← <span class="sp">Глава 1. Паттерны и статистика: как считать честно</span></a>
+      <a href="pt03-factory.html"><span class="sp">Глава 3. Фабрика: почему new HttpClient() — ловушка</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
