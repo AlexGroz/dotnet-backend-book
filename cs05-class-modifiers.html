@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · Модификаторы типов: sealed, abstract, static, record</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs06-task-run.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы и асинхронность</div>
+    <h1>Глава 5. Модификаторы типов: sealed, abstract, static, record</h1>
+    <p class="sublead">Почему в коде пишут <code>public sealed class</code>, чем <code>abstract</code> отличается
+      от интерфейса, зачем нужен <code>partial</code> и когда брать <code>record</code>.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Карта модификаторов</h2>
+    <table>
+      <thead><tr><th>Модификатор</th><th>Что означает</th><th>Типичный пример</th></tr></thead>
+      <tbody>
+        <tr><td><code>sealed</code></td><td>От типа нельзя наследоваться</td><td><code>public sealed class UserDto</code></td></tr>
+        <tr><td><code>abstract</code></td><td>Нельзя создать экземпляр, нужен наследник</td><td><code>abstract class PaymentHandler</code></td></tr>
+        <tr><td><code>static</code></td><td>Класс-контейнер: экземпляров нет</td><td><code>static class OrderMapper</code></td></tr>
+        <tr><td><code>partial</code></td><td>Определение разбито на несколько файлов</td><td>Генераторы кода, большие классы</td></tr>
+        <tr><td><code>record</code></td><td>Ссылочный тип с семантикой значения (равенство по полям)</td><td><code>public record OrderCreated(Guid Id)</code></td></tr>
+        <tr><td><code>readonly</code></td><td>Поля задаются только в конструкторе</td><td><code>readonly struct Money</code></td></tr>
+      </tbody>
+    </table>
+    <p>Модификаторы <strong>комбинируются</strong>: <code>public sealed record OrderDto</code>,
+      <code>internal static partial class Generated</code>. Порядок слов фиксирован правилами языка, но читается
+      он именно так: доступ → «вид» типа → остальное.</p>
+
+    <h2><code>sealed</code>: запрет наследования</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class UserDto            // от UserDto нельзя наследоваться
+{
+    public int Id { get; init; }
+    public string Name { get; init; } = "";
+}
+
+// class AdminDto : UserDto { }        // ошибка компиляции</code></pre>
+    </div>
+    <p>Зачем это нужно на практике:</p>
+    <ul>
+      <li><strong>Контракт защищён.</strong> Никто (включая вас через год) не «дополнит» DTO наследником и не
+        сломает сериализацию или логику сравнения.</li>
+      <li><strong>Понятнее код.</strong> Читатель видит: это конечный тип, искать наследников не нужно.</li>
+      <li><strong>Производительность.</strong> Для <code>sealed</code>-методов JIT может не проверять таблицу
+        виртуальных вызовов и делать вызов напрямую (девиртуализация) — важно на горячем пути.</li>
+      <li><strong>Безопасность.</strong> Чужой код не сможет подменить поведение наследником.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class Repository
+{
+    public virtual void Save() { … }
+}
+
+public sealed class OrderRepository : Repository
+{
+    public sealed override void Save() { … }   // «дальше уже нельзя переопределять»
+}</code></pre>
+    </div>
+    <p>Классический пример из .NET: <code>string</code> объявлен <code>sealed</code> — иначе можно было бы
+      создать «строку с другим поведением» и сломать все гарантии неизменяемости (глава 1).</p>
+
+    <h2><code>abstract</code> против интерфейса</h2>
+    <table>
+      <thead><tr><th></th><th><code>abstract class</code></th><th><code>interface</code></th></tr></thead>
+      <tbody>
+        <tr><td>Состояние (поля)</td><td>Да</td><td>Нет</td></tr>
+        <tr><td>Конструктор</td><td>Да</td><td>Нет</td></tr>
+        <tr><td>Реализация по умолчанию</td><td>Да (обычные методы)</td><td>Да, начиная с C# 8 (default interface methods)</td></tr>
+        <tr><td>Сколько можно реализовать</td><td>Один базовый класс</td><td>Сколько угодно</td></tr>
+        <tr><td>Смысл</td><td>«Общая основа с частью готовой логики»</td><td>«Умение» или контракт</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public abstract class NotificationSender
+{
+    protected NotificationSender(ILogger logger) =&gt; Logger = logger;   // общее состояние
+    protected ILogger Logger { get; }
+
+    public abstract Task SendAsync(string to, string text, CancellationToken ct);   // обязано быть реализовано
+
+    protected void Log(string message) =&gt; Logger.LogInformation(message);            // готовая логика
+}
+
+public sealed class EmailSender : NotificationSender
+{
+    public EmailSender(ILogger logger) : base(logger) { }
+    public override Task SendAsync(string to, string text, CancellationToken ct) { … }
+}</code></pre>
+    </div>
+    <p>В прикладном коде правило простое: <strong>интерфейс — когда нужен контракт и подмена</strong>
+      (репозиторий, клиент внешнего сервиса), <strong>абстрактный класс — когда есть общая реализация и
+      состояние</strong> (базовый обработчик с общими шагами).</p>
+
+    <h2><code>static</code>: класс без экземпляров</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public static class OrderMapper
+{
+    public static OrderDto ToDto(Order order) =&gt; new() { Id = order.Id, Total = order.Total };
+}
+// вызов: OrderMapper.ToDto(order); — экземпляр не нужен</code></pre>
+    </div>
+    <ul>
+      <li><strong>Статические поля живут всё время работы процесса</strong> и общие для всех потоков. Изменяемое
+        статическое состояние — источник гонок (глава 10 .NET-раздела) и утечек.</li>
+      <li><strong>Статический конструктор</strong> выполняется один раз, лениво, при первом обращении к типу.</li>
+      <li><strong><code>const</code> против <code>static readonly</code>:</strong> <code>const</code>
+        подставляется в код на этапе компиляции (менять нельзя без пересборки потребителей),
+        <code>static readonly</code> — значение, вычисленное один раз в рантайме.</li>
+      <li><strong>Минус:</strong> статический класс нельзя подменить в тестах и он скрывает зависимости. Поэтому
+        «помощники» делают статическими, а сервисы с зависимостями — обычными классами с DI (глава 15).</li>
+    </ul>
+
+    <h2><code>partial</code>: одно определение — несколько файлов</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// OrderService.cs — пишет человек
+public partial class OrderService
+{
+    public Task CreateAsync(Order order, CancellationToken ct) { … }
+}
+
+// OrderService.Generated.cs — генерируется инструментом
+public partial class OrderService
+{
+    public Task CancelAsync(Guid id, CancellationToken ct) { … }
+}</code></pre>
+    </div>
+    <p>Нужен, когда часть кода создаётся автоматически (source generators, дизайнеры, EF Core-миграции) или когда
+      класс физически огромен. Компилятор просто склеивает части в один тип — на поведение это не влияет.
+      <code>partial</code>-методы позволяют объявить «точку расширения», которую генератор может реализовать.</p>
+
+    <h2><code>record</code>: равенство по значениям</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public record OrderCreated(Guid Id, decimal Total);      // позиционный record
+
+var a = new OrderCreated(id, 100m);
+var b = new OrderCreated(id, 100m);
+
+Console.WriteLine(a == b);              // True: сравниваются значения полей
+Console.WriteLine(a);                   // OrderCreated { Id = …, Total = 100 }
+var c = a with { Total = 200m };        // копия с изменением — исходный не тронут</code></pre>
+    </div>
+    <table>
+      <thead><tr><th></th><th><code>class</code></th><th><code>record</code></th></tr></thead>
+      <tbody>
+        <tr><td>Равенство</td><td>По ссылке</td><td>По значениям полей</td></tr>
+        <tr><td><code>ToString</code></td><td>Имя типа</td><td>Поля и значения — удобно для логов</td></tr>
+        <tr><td>Изменение</td><td>Меняем свойства</td><td><code>with</code> создаёт копию</td></tr>
+        <tr><td>Когда использовать</td><td>Сущность с поведением и идентичностью</td><td>DTO, события, сообщения, ответы API</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t"><code>record struct</code> и неизменяемость в DTO</span>
+      <p>Если DTO маленький и нужен без ссылочной семантики — <code>record struct</code>. Чтобы объект нельзя было
+        изменить после создания, свойства объявляют <code>init</code> (задать можно только в инициализаторе) или
+        <code>required</code> (обязательно задать при создании):</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public sealed record UserDto
+{
+    public required int Id { get; init; }        // обязательно указать
+    public required string Name { get; init; }
+}</code></pre>
+      </div>
+    </div>
+
+
+    <h2>Доступ и наследование: что ещё стоит знать рядом</h2>
+    <table>
+      <thead><tr><th>Модификатор</th><th>Кто видит</th></tr></thead>
+      <tbody>
+        <tr><td><code>public</code></td><td>Все</td></tr>
+        <tr><td><code>internal</code></td><td>Только текущая сборка (по умолчанию для типов)</td></tr>
+        <tr><td><code>protected</code></td><td>Наследники</td></tr>
+        <tr><td><code>private</code></td><td>Только внутри типа (по умолчанию для членов)</td></tr>
+        <tr><td><code>protected internal</code></td><td>Наследники <em>или</em> своя сборка</td></tr>
+        <tr><td><code>private protected</code></td><td>Наследники <em>внутри</em> своей сборки</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class Base
+{
+    public virtual void Run() { … }      // можно переопределить
+    public void Fixed() { … }            // переопределить нельзя
+}
+
+public class Derived : Base
+{
+    public override void Run() { … }     // переопределение — вызывается через базовую ссылку
+    public new void Fixed() { … }        // СКРЫТИЕ: вызывается только через Derived — обычно ошибка
+}</code></pre>
+    </div>
+    <p><code>virtual</code>/<code>override</code> — это полиморфизм: <code>Base b = new Derived(); b.Run()</code>
+      вызовет реализацию наследника. <code>new</code> лишь «прячет» член, и такое поведение почти всегда
+      нежелательно: код, работающий с базовым типом, увидит одно, а с производным — другое.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>sealed</code> запрещает наследование: защищает контракт и позволяет JIT вызывать методы
+          напрямую. Для DTO и «конечных» реализаций — норма.</li>
+        <li><code>abstract</code> — общая основа с состоянием и готовой логикой; <code>interface</code> —
+          контракт, который можно реализовать многими способами.</li>
+        <li><code>static</code> — удобно для чистых функций, опасно для состояния: поля живут всё время процесса и
+          общие для потоков.</li>
+        <li><code>partial</code> — для генераторов и больших файлов; на поведение не влияет.</li>
+        <li><code>record</code> — равенство по значениям и <code>with</code>: идеален для DTO, событий и ответов
+          API; <code>class</code> — для сущностей с идентичностью.</li>
+        <li><code>virtual</code>/<code>override</code> — полиморфизм; <code>new</code> — скрытие, которого обычно
+          избегают.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs04-ienumerable.html">← <span class="sp">Глава 4. IEnumerable, yield и IAsyncEnumerable</span></a>
+      <a href="cs06-task-run.html"><span class="sp">Глава 6. Task.Run: когда нужен и когда вредит</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

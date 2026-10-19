@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 6 · Task.Run: когда нужен и когда вредит</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="csharp.html">Оглавление →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы и асинхронность</div>
+    <h1>Глава 6. Task.Run: когда нужен и когда вредит</h1>
+    <p class="sublead">«Обернуть в <code>Task.Run</code>, чтобы стало асинхронно» — самый частый способ сделать
+      хуже. Разберём, что именно делает этот метод и где его место.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что делает <code>Task.Run</code></h2>
+    <p><code>Task.Run(делегат)</code> <strong>ставит делегат в очередь пула потоков</strong> и возвращает
+      <code>Task</code>, который завершится, когда делегат отработает. То есть это про
+      <strong>выполнение кода на другом потоке</strong>, а не про «асинхронность» в смысле освобождения
+      потока.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// тот же код, но выполняется в потоке пула
+Task&lt;int&gt; task = Task.Run(() =&gt; HeavyCompute(data));
+int result = await task;      // ждём результат, не блокируя текущий поток</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Асинхронность ≠ многопоточность</span>
+      <p>Есть два разных типа работы:</p>
+      <ul>
+        <li><strong>I/O-bound</strong> — ждём сеть, диск, базу. Правильный инструмент — <code>await</code>:
+          поток <em>освобождается</em> и обслуживает другие запросы (глава 12 .NET-раздела).</li>
+        <li><strong>CPU-bound</strong> — считаем на процессоре. Здесь <code>await</code> не поможет: кто-то должен
+          реально считать. Поток будет занят — вопрос лишь в том, <em>какой</em>.</li>
+      </ul>
+    </div>
+
+    <h2>Почему на сервере <code>Task.Run</code> вокруг I/O — плохо</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ «сделаем асинхронно»: поток не освобождается, а занимается ожиданием
+public async Task&lt;Order&gt; GetAsync(Guid id, CancellationToken ct)
+{
+    return await Task.Run(() =&gt; _db.Orders.FirstAsync(o =&gt; o.Id == id, ct), ct);
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>Поток всё равно ждёт.</strong> Внутри <code>Task.Run</code> выполняется тот же блокирующий
+        вызов — только теперь он занимает поток пула.</li>
+      <li><strong>Работы становится больше:</strong> планирование задачи, переключение потока, аллокация
+        <code>Task</code>-объектов.</li>
+      <li><strong>Пулу не хватает потоков.</strong> Каждый такой вызов «съедает» поток на всё время ожидания —
+        это и есть голодание пула, о котором глава 9 .NET-раздела.</li>
+      <li><strong>Отмена становится сложнее:</strong> токен нужно пробросить внутрь делегата, иначе операция
+        продолжит выполняться после отмены запроса.</li>
+    </ul>
+    <p>Правильно — <strong>асинхронный вызов до конца</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✔ никакого лишнего потока: ждём ввод-вывод асинхронно
+public Task&lt;Order&gt; GetAsync(Guid id, CancellationToken ct) =&gt;
+    _db.Orders.FirstAsync(o =&gt; o.Id == id, ct);</code></pre>
+    </div>
+
+    <h2>Где <code>Task.Run</code> действительно нужен</h2>
+    <ul>
+      <li><strong>CPU-bound работа, которую надо увести с текущего потока.</strong> Классика — десктоп/UI:
+        поток интерфейса не должен считать, иначе окно «зависает».</li>
+      <li><strong>Параллельные вычисления</strong> с ограничением степени параллелизма — но чаще удобнее
+        <code>Parallel.ForEachAsync</code>/<code>Parallel.For</code> (глава 13 .NET-раздела).</li>
+      <li><strong>Стартовая инициализация в консольном/фоновом приложении:</strong> запустить тяжёлую работу и
+        продолжить настройку.</li>
+      <li><strong>Смешанный сценарий:</strong> синхронная библиотека, у которой нет асинхронного API, но вызвать её
+        нужно из асинхронного кода <em>на клиенте</em> (не в обработчике запроса).</li>
+    </ul>
+    <div class="box danger">
+      <span class="t">«Запустить и забыть» на сервере — нельзя</span>
+      <p><code>_ = Task.Run(() =&gt; DoWork())</code> выглядит безобидно, но: исключения теряются, при
+        перезапуске приложения работа обрывается, отменить её невозможно, а пул может быть перегружен. Для
+        фоновых задач есть <code>BackgroundService</code>/очереди (глава 26 .NET-раздела) и outbox
+        (глава 31).</p>
+    </div>
+
+    <h2><code>Task.Run</code>, <code>Task.Factory.StartNew</code> и <code>async void</code></h2>
+    <table>
+      <thead><tr><th>Способ</th><th>Что делает</th><th>Когда использовать</th></tr></thead>
+      <tbody>
+        <tr><td><code>Task.Run(...)</code></td><td>Ставит в очередь пула, разворачивает вложенные задачи</td><td>По умолчанию для CPU-bound</td></tr>
+        <tr><td><code>Task.Factory.StartNew(...)</code></td><td>Более низкоуровневый: планировщик, <code>TaskCreationOptions</code></td><td>Нужны особые опции, например <code>LongRunning</code></td></tr>
+        <tr><td><code>Task.Factory.StartNew(..., TaskCreationOptions.LongRunning)</code></td><td>Подсказка: «создай отдельный поток, а не бери из пула»</td><td>Долгая блокирующая работа (не для обработчиков запросов)</td></tr>
+        <tr><td><code>async void</code></td><td>Никто не может дождаться и поймать исключение</td><td>Только обработчики событий UI</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ async void: исключение уйдёт в никуда (и уронит процесс)
+public async void SendAsync() { await _client.PostAsync(…); }
+
+// ✔ async Task: вызывающий может дождаться и обработать ошибку
+public async Task SendAsync(CancellationToken ct) =&gt; await _client.PostAsync(…, ct);</code></pre>
+    </div>
+
+    <h2>Исключения, отмена и <code>ConfigureAwait</code></h2>
+    <ul>
+      <li><strong>Исключения</strong> из <code>Task.Run</code> попадают в <code>Task</code> и пробрасываются при
+        <code>await</code>. Если задачу никто не ожидает, исключение может остаться незамеченным
+        (<code>TaskScheduler.UnobservedTaskException</code> — только диагностика, не обработка).</li>
+      <li><strong>Отмена:</strong> передавайте <code>CancellationToken</code> <em>внутрь</em> делегата и проверяйте
+        его в длинных циклах. Сам по себе токен у <code>Task.Run</code> отменяет только <em>запуск</em>, если
+        задача ещё не начала выполняться.</li>
+      <li><strong><code>ConfigureAwait(false)</code></strong> — в библиотечном коде: «не возвращайся в исходный
+        контекст». В ASP.NET Core контекста синхронизации нет, поэтому эффекта почти нет, но в библиотеках это
+        правильная привычка.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var results = await Task.Run(() =&gt;
+{
+    var acc = new List&lt;Report&gt;();
+    foreach (var chunk in chunks)
+    {
+        ct.ThrowIfCancellationRequested();       // отмена по-настоящему работает
+        acc.Add(ComputeReport(chunk));           // CPU-bound работа
+    }
+    return acc;
+}, ct);</code></pre>
+    </div>
+
+    <h2>Пример: CPU-bound работа с ограничением параллелизма</h2>
+    <p>Если таких задач много, нельзя запускать их «все сразу»: пул потоков будет перегружен. Ограничивают
+      параллелизм — либо семафором, либо <code>Parallel.ForEachAsync</code> (подробный разбор — глава 13
+      .NET-раздела):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// не больше 8 тяжёлых вычислений одновременно
+await Parallel.ForEachAsync(
+    documents,
+    new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+    async (doc, token) =&gt;
+    {
+        var report = await Task.Run(() =&gt; BuildReport(doc), token);
+        await SaveAsync(report, token);
+    });</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>Task.Run</code> — это <strong>работа на потоке пула</strong>, а не «асинхронность».</li>
+        <li>Для I/O (<code>await</code>) он <strong>вреден</strong>: поток занят ожиданием, пул голодает, работы
+          больше.</li>
+        <li>Для <strong>CPU-bound</strong> — уместен, особенно когда нужно уйти с текущего потока (UI,
+          инициализация).</li>
+        <li>На сервере не бывает «запустил и забыл»: для фона есть <code>BackgroundService</code>, очереди и
+          outbox.</li>
+        <li><code>async void</code> — только обработчики событий UI; отмена и исключения требуют явной
+          передачи <code>CancellationToken</code> и <code>await</code>.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs05-class-modifiers.html">← <span class="sp">Глава 5. Модификаторы типов: sealed, abstract, static, record</span></a>
+      <a href="csharp.html"><span class="sp">Оглавление</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

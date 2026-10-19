@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 7 · Аллокации на практике: строки, коллекции, пули</title>
+<title>Глава 7 · Аллокации на практике: строки, коллекции, пулы</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -18,7 +18,7 @@
 <div class="container">
   <div class="chapter">
     <div class="part">.NET · Часть II · Память</div>
-    <h1>Глава 7. Аллокации на практике: строки, коллекции, пули</h1>
+    <h1>Глава 7. Аллокации на практике: строки, коллекции, пулы</h1>
     <p class="sublead">Зная, что под нагрузкой дорог не объём памяти, а скорость создания объектов, посмотрим,
       как сократить мусор конкретными приёмами.</p>
 
@@ -50,12 +50,20 @@ var sb = new StringBuilder(4096);
 for (int i = 0; i &lt; 1000; i++) sb.Append(i).Append(',');
 string result = sb.ToString();</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">Почему <code>StringBuilder</code> быстрее</span>
+      <p>Не потому, что «строки лежат в стеке»: <code>string</code> — ссылочный тип, объект живёт в куче, а в
+        переменной лишь ссылка. Причина в другом: <code>StringBuilder</code> <strong>меняет свой буфер</strong> —
+        O(n) вместо O(n²) копирований. Пул интернированных литералов и остальные детали — «C#: язык и типы»,
+        глава 1.</p>
+    </div>
 
     <h2>Коллекции</h2>
     <ul>
       <li>Задавайте <strong>начальную ёмкость</strong>, если знаете размер: <code>new List&lt;T&gt;(count)</code> —
         меньше промежуточных расширений и копирований.</li>
-      <li>Предпочитайте <strong>generic-коллекции</strong> не-generic (нет упаковки, нет приведения типов).</li>
+      <li>Предпочитайте <strong>generic-коллекции</strong> не-generic (нет упаковки, нет приведения типов) —
+        подробный разбор в «C#: язык и типы», глава 3.</li>
       <li>Не создавайте копии без нужды: лишний <code>ToList()</code> — это новый список.</li>
     </ul>
 

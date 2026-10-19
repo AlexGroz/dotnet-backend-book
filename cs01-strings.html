@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 1 · Строки: почему это куча, а не стек</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs02-value-types-memory.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть I · Данные и память</div>
+    <h1>Глава 1. Строки: почему это куча, а не стек</h1>
+    <p class="sublead">Самое частое заблуждение: «string лежит в стеке, поэтому он быстрый». Разберём, где на
+      самом деле живёт строка, при чём тут <code>StringBuilder</code> и когда он действительно нужен.</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Строка — ссылочный тип</h2>
+    <p><code>string</code> (он же <code>System.String</code>) — это <strong>класс</strong>, а не структура.
+      Значит, объект строки всегда живёт <strong>в куче</strong>. В стеке (если переменная локальная) лежит
+      только <em>ссылка</em> на этот объект — четыре или восемь байт адреса.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var name = "Алексей";
+
+// что реально произошло:
+// 1) в куче существует объект-строка "Алексей";
+// 2) в переменной name (на стеке) лежит ССЫЛКА на него.
+
+Console.WriteLine(name.Length);   // 7 — вызываем метод у объекта в куче</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Разбираем путаницу</span>
+      <p>«String лежит в стеке, поэтому он быстрее <code>StringBuilder</code>» — здесь два неверных шага.
+        Во-первых, строка <strong>не в стеке</strong>: в стеке ссылка. Во-вторых,
+        <code>StringBuilder</code> медленнее <em>на одном изменении</em> (это объект, буфер, метод), но
+        <strong>быстрее на сотнях изменений подряд</strong>, потому что меняет свой буфер, а не создаёт новую
+        строку.</p>
+    </div>
+
+    <h2>Почему строка неизменяема</h2>
+    <p>Объект строки после создания <strong>нельзя изменить</strong>. Любая «модификация» возвращает
+      <em>новую</em> строку, а старая остаётся в куче до сборки мусора.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string a = "abc";
+string b = a.ToUpper();     // НЕ меняет a: создаётся новый объект "ABC"
+
+Console.WriteLine(a);       // abc — исходная строка цела
+Console.WriteLine(ReferenceEquals(a, b));   // false — это два разных объекта</code></pre>
+    </div>
+    <p>Неизменяемость — не недостаток, а основа безопасности: строку можно передавать между потоками,
+      использовать как ключ словаря и не бояться, что кто-то её «поправит». Цена — новые объекты при каждой
+      операции.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ 1000 раз создаём новую строку: 1 + 2 + … + 1000 копий символов
+string s = "";
+for (int i = 0; i &lt; 1000; i++)
+    s += i + ",";
+
+// ✔ один буфер, который меняется на месте
+var sb = new StringBuilder(4096);
+for (int i = 0; i &lt; 1000; i++)
+    sb.Append(i).Append(',');
+string result = sb.ToString();     // одна итоговая строка</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Сколько это стоит</span>
+      <p>Конкатенация в цикле — это <strong>O(n²)</strong> по скопированным символам: на каждой итерации
+        создаётся строка длиннее предыдущей и копируется целиком. <code>StringBuilder</code> держит один
+        массив и дописывает в конец — <strong>O(n)</strong>. Разница на 10 000 итераций — секунды против
+        миллисекунд и мегабайты мусора.</p>
+    </div>
+
+    <h2>Литералы и интернирование</h2>
+    <p>Строковые <em>литералы</em> (то, что записано в коде в кавычках) хранятся в метаданных сборки, а при
+      загрузке попадают в специальную таблицу — <strong>пул интернированных строк</strong>
+      (<em>string intern pool</em>). Поэтому два одинаковых литерала — это <strong>один и тот же объект</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string a = "Алексей";
+string b = "Алексей";
+Console.WriteLine(ReferenceEquals(a, b));    // True — один объект из пула
+
+string c = new string('А', 7);               // собрано в рантайме
+Console.WriteLine(ReferenceEquals(a, c));    // False — другой объект
+
+string d = string.Intern(c);                 // явно «положить в пул»
+Console.WriteLine(ReferenceEquals(a, d));    // True</code></pre>
+    </div>
+    <ul>
+      <li><strong>Литерал бесплатен по аллокации</strong> при обращении: объект уже создан один раз.</li>
+      <li><strong>Строка из рантайма</strong> (конкатенация, <code>Substring</code>, <code>ToString</code>) —
+        всегда новая аллокация в куче.</li>
+      <li><strong><code>string.Intern</code></strong> экономит память при множестве одинаковых строк, но
+        <em>удерживает</em> их до конца жизни процесса: злоупотребление — это утечка.</li>
+    </ul>
+
+    <h2>Интерполяция, форматирование и склейка</h2>
+    <table>
+      <thead><tr><th>Способ</th><th>Что происходит</th><th>Когда использовать</th></tr></thead>
+      <tbody>
+        <tr><td><code>"a" + b</code></td><td><code>string.Concat</code>: одна новая строка</td><td>2–3 части, читаемость важнее</td></tr>
+        <tr><td><code>$"{a} {b}"</code></td><td>Интерполяция; в современных версиях C# — через обработчик строк</td><td>Обычное формирование текста</td></tr>
+        <tr><td><code>string.Format</code></td><td>Разбирает шаблон, создаёт промежуточные объекты</td><td>Шаблоны из ресурсов, локализация</td></tr>
+        <tr><td><code>StringBuilder</code></td><td>Мутируемый буфер; <code>ToString()</code> — одна строка</td><td>Циклы, большие тексты (JSON, SQL, отчёты)</td></tr>
+        <tr><td><code>string.Join</code></td><td>Одна аллокация на результат</td><td>Склейка коллекции частей</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Когда <code>StringBuilder</code> не нужен</span>
+      <p>Он создаёт объект и держит буфер. Если частей две-три — конкатенация или интерполяция проще и не
+        медленнее. Правило: <strong><code>StringBuilder</code> — когда число операций заранее неизвестно или
+        велико</strong>.</p>
+    </div>
+
+
+    <h2>Сравнение строк: не всё равно, как сравнивать</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ временная строка на каждое сравнение + культура по умолчанию
+if (email.ToLower() == "admin@example.com") { }
+
+// ✔ без аллокации и с явным правилом сравнения
+if (string.Equals(email, "admin@example.com", StringComparison.OrdinalIgnoreCase)) { }
+
+// ✔ для технических строк (URL, ключи) — Ordinal
+if (path.StartsWith("/api/", StringComparison.Ordinal)) { }</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>==</code> для строк</strong> сравнивает <em>содержимое</em>, а не ссылки;
+        проверить ссылки — <code>ReferenceEquals</code>.</li>
+      <li><strong><code>ToLower()</code> ради сравнения</strong> — лишняя строка в куче.</li>
+      <li><strong><code>Ordinal</code>/<code>OrdinalIgnoreCase</code></strong> — для технических строк;
+        культурные сравнения — только для пользовательского текста и сортировки.</li>
+    </ul>
+
+    <h2>Строка без копий: <code>Span</code></h2>
+    <p><code>Substring</code> создаёт новую строку. Если часть нужно только <em>прочитать</em> — берут «окно»
+      без аллокации (подробнее — глава 7 .NET-раздела):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string line = "10,20,30";
+
+string part = line.Substring(0, 2);             // новая строка
+ReadOnlySpan&lt;char&gt; window = line.AsSpan(0, 2);   // окно, без аллокации
+
+int value = int.Parse(window);                   // парсинг прямо из окна</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>string</code> — <strong>ссылочный тип</strong>: объект в куче, в переменной — ссылка.
+          «Строка в стеке» — неверно.</li>
+        <li>Строка <strong>неизменяема</strong>: каждая «модификация» создаёт новую; в цикле это лавина мусора.</li>
+        <li><code>StringBuilder</code> быстрее не из-за стека, а потому что <strong>меняет свой буфер</strong>:
+          O(n) вместо O(n²).</li>
+        <li>Литералы <strong>интернированы</strong>: одинаковые литералы — один объект; строки из рантайма —
+          новые аллокации.</li>
+        <li>Сравнивайте через <code>string.Equals</code>/<code>StringComparison</code> — без временных строк.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="csharp.html">← <span class="sp">Оглавление</span></a>
+      <a href="cs02-value-types-memory.html"><span class="sp">Глава 2. Где живут значения: struct, стек, куча и бокс</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

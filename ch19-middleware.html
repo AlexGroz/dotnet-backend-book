@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 19 · Конвейер: middleware и маршрутизация</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -18,15 +21,157 @@
     <h1>Глава 19. Конвейер: middleware и маршрутизация</h1>
     <p class="sublead">Путь запроса через приложение; Minimal API против MVC</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <h2>Конвейер: запрос идёт «через слои»</h2>
+    <p>Любой запрос в ASP.NET Core проходит <strong>конвейер</strong> (<em>pipeline</em>): цепочку компонентов
+      <strong>middleware</strong>. Каждый компонент может что-то сделать до следующего, вызвать следующий и
+      что-то сделать после.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">запрос → [логирование] → [обработка ошибок] → [аутентификация] → [авторизация]
+       → [маршрутизация] → [эндпоинт] → и обратно по стеку</code></pre>
     </div>
+    <p>Компонент выглядит как функция с «следующим» компонентом внутри:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.Use(async (context, next) =&gt;
+{
+    var sw = Stopwatch.StartNew();
+
+    await next();                    // передали управление дальше — вплоть до эндпоинта
+
+    sw.Stop();
+    logger.LogInformation("{Path} — {Elapsed} мс", context.Request.Path, sw.ElapsedMilliseconds);
+});</code></pre>
+    </div>
+    <ul>
+      <li><code>app.Use(...)</code> — «пропусти дальше» (есть <code>next</code>).</li>
+      <li><code>app.Run(...)</code> — «терминальный» компонент: дальше не идёт.</li>
+      <li><code>app.Map(...)</code> — ветка по пути: часть запросов уходит в отдельный конвейер.</li>
+      <li><code>app.UseMiddleware&lt;T&gt;()</code> — то же, но классом (удобно, когда есть зависимости).</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Порядок middleware — это поведение</span>
+      <p>Обработка ошибок должна стоять <strong>раньше</strong> остальных, аутентификация — до авторизации,
+        маршрутизация — до эндпоинтов. Переставили две строки — получили «ошибки не логируются» или «проверка
+        прав видит пустого пользователя».</p>
+    </div>
+
+    <h2>Маршрутизация: как запрос находит обработчик</h2>
+    <p>Маршрутизация сопоставляет <strong>метод + шаблон пути</strong> с обработчиком. Параметры маршрута
+      извлекаются из пути автоматически:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// GET /orders/42
+app.MapGet("/orders/{id:int}", (int id) =&gt; Results.Ok(new { id }));</code></pre>
+    </div>
+    <p>Ограничения (<code>:int</code>, <code>:guid</code>) не только документируют формат, но и позволяют не
+      вызывать обработчик для заведомо неподходящих путей.</p>
+
+    <h2>Minimal API: что это</h2>
+    <p><strong>Minimal API</strong> — это способ объявить эндпоинт <em>прямо в</em> <code>Program.cs</code>,
+      функцией, без контроллеров и без отдельных классов:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+
+app.MapGet("/orders/{id:int}", async (int id, OrdersDb db, CancellationToken ct) =&gt;
+{
+    var order = await db.Orders.FindAsync(new object[] { id }, ct);
+    return order is null ? Results.NotFound() : Results.Ok(order);
+});
+
+app.Run();</code></pre>
+    </div>
+    <p>Зависимости (<code>OrdersDb</code>, <code>CancellationToken</code>) подставляются в параметры
+      автоматически — контейнер и привязка модели работают и здесь.</p>
+
+    <h2>Контроллеры (MVC): что дают</h2>
+    <p>В MVC эндпоинты описываются классами-контроллерами. У них есть атрибуты и соглашения, которые берут часть
+      работы на себя:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">[ApiController]                       // ← включает автоматическую валидацию модели
+[Route("api/orders")]
+public sealed class OrdersController : ControllerBase
+{
+    [HttpGet("{id:int}")]
+    public async Task&lt;ActionResult&lt;Order&gt;&gt; Get(int id, CancellationToken ct)
+    {
+        var order = await _db.Orders.FindAsync(new object[] { id }, ct);
+        return order is null ? NotFound() : Ok(order);
+    }
+
+    [HttpPost]
+    public async Task&lt;IActionResult&gt; Create(CreateOrderDto dto, CancellationToken ct)
+    {
+        // если dto невалиден, [ApiController] уже вернул 400 — сюда управление не дошло
+        …
+    }
+}</code></pre>
+    </div>
+    <table>
+      <thead><tr><th></th><th>Minimal API</th><th>Контроллеры (MVC)</th></tr></thead>
+      <tbody>
+        <tr><td>Кода на эндпоинт</td><td>Меньше</td><td>Больше: класс, атрибуты</td></tr>
+        <tr><td>Структура</td><td>Группы через <code>MapGroup</code>, расширения</td><td>Классы и соглашения</td></tr>
+        <tr><td>Валидация модели</td><td>Вручную или фильтром</td><td><code>[ApiController]</code> + <code>ModelState</code></td></tr>
+        <tr><td>Фильтры</td><td>Эндпоинт-фильтры и middleware</td><td>Action- и Result-фильтры</td></tr>
+        <tr><td>Когда выбирать</td><td>Небольшие сервисы и API</td><td>Большая команда, много общих правил</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Почему в Minimal API нет автоматической проверки модели</h2>
+    <p>Автоматическая валидация — это поведение атрибута <code>[ApiController]</code>: он проверяет
+      <code>ModelState</code> до вызова действия и возвращает <code>400</code>, если данные не прошли проверки.
+      В Minimal API такого атрибута и такого «действия» нет — обработчик просто вызывается. Значит, проверять
+      нужно <strong>явно</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✔ 1) ручная проверка — минимум
+app.MapPost("/orders", async (CreateOrderDto dto, OrdersDb db, CancellationToken ct) =&gt;
+{
+    var errors = Validate(dto);
+    if (errors.Count &gt; 0)
+        return Results.ValidationProblem(errors);      // 400 + описание
+
+    …
+});
+
+// ✔ 2) FluentValidation + эндпоинт-фильтр — для сложных правил
+builder.Services.AddValidatorsFromAssemblyContaining&lt;CreateOrderValidator&gt;();
+app.MapPost("/orders", (CreateOrderDto dto) =&gt; …)
+   .AddEndpointFilter&lt;ValidationFilter&lt;CreateOrderDto&gt;&gt;();</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">«Почему нельзя как в контроллерах»</span>
+      <p>Можно — но это придётся <strong>сделать явно</strong>. Автоматизм — не свойство Minimal API, а
+        конкретная фича контроллеров. Само правило не меняется: клиенту доверять нельзя, проверки нужны
+        (глава 30).</p>
+    </div>
+
+    <h2>Что выбрать</h2>
+    <ul>
+      <li><strong>Minimal API</strong> — небольшие сервисы, API из нескольких эндпоинтов, микросервисы.</li>
+      <li><strong>Контроллеры</strong> — большая команда, много общих правил: валидация, фильтры, соглашения.</li>
+      <li>Можно <strong>смешивать</strong>: Minimal API для простых частей, контроллеры — для крупных.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Запрос идёт по <strong>конвейеру</strong> middleware; порядок регистрации = порядок выполнения.</li>
+        <li>Маршрутизация сопоставляет метод и шаблон пути; ограничения (<code>:int</code>) отсекают лишнее.</li>
+        <li><strong>Minimal API</strong> — эндпоинты функциями в <code>Program.cs</code>; зависимости
+          подставляются в параметры.</li>
+        <li><strong>Контроллеры</strong> дают соглашения и автоматическую валидацию через
+          <code>[ApiController]</code>.</li>
+        <li>В Minimal API валидация <strong>явная</strong>: ручная проверка, FluentValidation или
+          эндпоинт-фильтр.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="ch18-http-kestrel.html">← <span class="sp">Глава 18. HTTP и веб-сервер: сокеты и Kestrel</span></a>
       <a href="ch20-logging.html"><span class="sp">Глава 20. Логирование и наблюдаемость</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+

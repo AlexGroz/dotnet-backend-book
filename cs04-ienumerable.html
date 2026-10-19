@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · IEnumerable, yield и IAsyncEnumerable</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs05-class-modifiers.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть II · Коллекции и перечисления</div>
+    <h1>Глава 4. IEnumerable, yield и IAsyncEnumerable</h1>
+    <p class="sublead">Что значит «по чему-то можно пройти в <code>foreach</code>», откуда берётся отложенное
+      выполнение LINQ и зачем понадобился <code>IAsyncEnumerable</code>.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Идея: не «коллекция», а «умение выдавать элементы»</h2>
+    <p><code>IEnumerable&lt;T&gt;</code> — это <strong>контракт</strong>: «я умею выдавать элементы по одному».
+      Ему не важно, что у вас внутри — массив, список, результат запроса к базе или бесконечная
+      последовательность. Методу достаточно этого контракта, чтобы пройти по данным.</p>
+    <p>Работают два интерфейса в паре:</p>
+    <ul>
+      <li><strong><code>IEnumerable&lt;T&gt;</code></strong> — «источник»: умеет создать <em>курсор</em>
+        (<code>GetEnumerator()</code>).</li>
+      <li><strong><code>IEnumerator&lt;T&gt;</code></strong> — «курсор»: <code>MoveNext()</code> (есть ли
+        следующий), <code>Current</code> (текущий), <code>Dispose()</code> (освободить ресурсы).</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// то, что делает foreach, — примерно так:
+IEnumerator&lt;Order&gt; e = orders.GetEnumerator();
+try
+{
+    while (e.MoveNext())
+    {
+        Order current = e.Current;
+        Console.WriteLine(current.Id);
+    }
+}
+finally
+{
+    e.Dispose();               // важно: освобождает ресурсы (файл, соединение, курсор БД)
+}</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Зачем <code>Dispose</code> в перечислении</span>
+      <p>Источником может быть не массив, а файл или результат запроса к БД: у него есть ресурсы. Поэтому
+        <code>foreach</code> всегда вызывает <code>Dispose</code>, даже если внутри было исключение.</p>
+    </div>
+
+    <h2>Свой итератор: <code>yield return</code></h2>
+    <p>Писать класс с <code>MoveNext</code> вручную не нужно: компилятор делает это за вас, если метод содержит
+      <code>yield return</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static IEnumerable&lt;int&gt; EvenNumbers(int limit)
+{
+    for (int i = 0; i &lt;= limit; i += 2)
+        yield return i;             // «выдать значение и запомнить, где остановились»
+}
+
+foreach (var n in EvenNumbers(6))
+    Console.WriteLine(n);           // 0, 2, 4, 6</code></pre>
+    </div>
+    <p>Компилятор превращает такой метод в <strong>машину состояний</strong>: она хранит текущую позицию и
+      продолжает работу с того места, где остановилась. Отсюда два следствия:</p>
+    <ul>
+      <li><strong>Ленивость:</strong> код внутри итератора выполняется не при вызове метода, а при каждом
+        <code>MoveNext()</code>.</li>
+      <li><strong>Бесконечные последовательности возможны:</strong> <code>while (true) yield return …</code> —
+        пока вызывающий не остановится.</li>
+    </ul>
+
+    <h2>Отложенное выполнение LINQ</h2>
+    <p><code>Where</code>, <code>Select</code>, <code>OrderBy</code> <strong>ничего не выполняют</strong> в момент
+      вызова — они строят описание запроса. Работа начинается при перечислении:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var query = numbers
+    .Where(n =&gt; { Console.WriteLine($"проверяю {n}"); return n % 2 == 0; });
+
+Console.WriteLine("запрос построен");       // ни одной проверки ещё не было
+
+foreach (var n in query) { }                // вот теперь пошли проверки</code></pre>
+    </div>
+    <p>В EF Core это же свойство означает: <strong>запрос к базе выполняется при перечислении</strong>, а не при
+      сборке LINQ. Пока вы не начали перечислять (или не вызвали <code>ToList</code>/<code>First</code>), SQL
+      не отправлен.</p>
+    <div class="box warn">
+      <span class="t">Главная ловушка: многократное перечисление</span>
+      <p>Каждое перечисление <code>IEnumerable</code> может заново выполнить работу. Для LINQ-to-Objects это
+        лишние вычисления, для EF Core — <strong>повторные SQL-запросы</strong>. Если последовательность нужна
+        дважды, материализуйте её: <code>var list = query.ToList()</code>.</p>
+    </div>
+
+    <h2>Ещё три бытовые ловушки</h2>
+    <ul>
+      <li><strong><code>Count()</code> против <code>Any()</code>.</strong> «Есть ли хоть один элемент?» — это
+        <code>Any()</code>: он останавливается на первом. <code>Count() &gt; 0</code> может перечислить всё
+        (у <code>ICollection&lt;T&gt;</code> — нет, у него есть свойство <code>Count</code>).</li>
+      <li><strong>Изменение коллекции во время перечисления</strong> — <code>InvalidOperationException</code>.
+        Нужно менять — сначала соберите список изменений, потом применяйте.</li>
+      <li><strong><code>using</code> внутри итератора:</strong> ресурс освободится, когда вызывающий вызовет
+        <code>Dispose</code> у энумератора (то есть выйдет из <code>foreach</code> или прервёт перечисление).</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static IEnumerable&lt;string&gt; ReadLines(string path)
+{
+    using var reader = new StreamReader(path);   // файл закроется при Dispose
+    string? line;
+    while ((line = reader.ReadLine()) is not null)
+        yield return line;
+}
+
+// ✔ foreach гарантирует Dispose — файл не «утечёт»
+foreach (var line in ReadLines("log.txt")) { … }</code></pre>
+    </div>
+
+    <h2>IEnumerable, ICollection, IList: кто что умеет</h2>
+    <table>
+      <thead><tr><th>Интерфейс</th><th>Возможности</th><th>Когда достаточен</th></tr></thead>
+      <tbody>
+        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление</td><td>«Мне нужно пройти по элементам»</td></tr>
+        <tr><td><code>ICollection&lt;T&gt;</code></td><td>+ <code>Count</code>, <code>Add</code>, <code>Remove</code></td><td>Нужен размер или изменение</td></tr>
+        <tr><td><code>IList&lt;T&gt;</code></td><td>+ индексатор</td><td>Нужен доступ по номеру</td></tr>
+        <tr><td><code>IReadOnlyList&lt;T&gt;</code></td><td>Индексатор и <code>Count</code>, без изменения</td><td>Результат выборки «только для чтения»</td></tr>
+      </tbody>
+    </table>
+    <p>Практический смысл: <code>IEnumerable&lt;T&gt;</code> <strong>ничего не обещает</strong> про размер и
+      повторяемость. Если вы принимаете его как параметр, не вызывайте <code>Count</code> несколько раз и не
+      перечисляйте дважды, не сказав об этом в документации.</p>
+
+    <h2><code>IAsyncEnumerable&lt;T&gt;</code>: перечисление с ожиданием</h2>
+    <p>Обычный <code>IEnumerable&lt;T&gt;</code> синхронный: чтобы получить следующий элемент, поток
+      <strong>ждёт</strong> (например, пока база вернёт порцию строк). На сервере это то же самое, что
+      блокирующий вызов — мы уже знаем, чем это плохо (глава 9 .NET-раздела).</p>
+    <p><code>IAsyncEnumerable&lt;T&gt;</code> — тот же «контракт выдачи элементов», но <code>MoveNext</code>
+      асинхронный:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// источник: итератор, который может ждать
+public async IAsyncEnumerable&lt;OrderRow&gt; StreamAsync(
+    [EnumeratorCancellation] CancellationToken ct = default)
+{
+    await foreach (var order in db.Orders.AsAsyncEnumerable().WithCancellation(ct))
+    {
+        yield return Map(order);          // отдаём по одному, не загружая всё в память
+    }
+}
+
+// потребитель
+await foreach (var row in StreamAsync(ct))
+    await WriteAsync(row, ct);</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>await foreach</code></strong> — аналог <code>foreach</code>, но каждый шаг может ждать,
+        не занимая поток.</li>
+      <li><strong><code>yield return</code></strong> работает и в <code>async</code>-итераторах (C# 8+).</li>
+      <li><strong><code>[EnumeratorCancellation]</code></strong> нужен, чтобы токен отмены передавался в
+        итератор (иначе компилятор предупредит).</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Почему не <code>Task&lt;IEnumerable&lt;T&gt;&gt;</code></span>
+      <p><code>Task&lt;IEnumerable&lt;T&gt;&gt;</code> означает «подожди, пока <em>весь</em> результат будет
+        готов, и получи последовательность». Для потока из базы или файла это плохо: всё окажется в памяти до
+        начала обработки. <code>IAsyncEnumerable&lt;T&gt;</code> отдаёт элементы <strong>по мере появления</strong> —
+        это и есть потоковая обработка (backpressure обсуждается в главе 13 .NET-раздела).</p>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ сначала всё в память, потом обработка
+Task&lt;List&lt;OrderRow&gt;&gt; GetAllAsync();
+
+// ✔ элементы приходят по одному
+IAsyncEnumerable&lt;OrderRow&gt; StreamAsync(CancellationToken ct);</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>IEnumerable&lt;T&gt;</code> — это <strong>контракт «выдаю элементы по одному»</strong>, а не
+          «коллекция»; за него отвечает <code>IEnumerator&lt;T&gt;</code> с <code>MoveNext</code>/<code>Current</code>.</li>
+        <li><code>foreach</code> всегда вызывает <code>Dispose</code> — поэтому итератор может держать файл или
+          соединение.</li>
+        <li><code>yield return</code> превращает метод в <strong>машину состояний</strong>: код выполняется по мере
+          перечисления.</li>
+        <li>LINQ <strong>ленив</strong>: запрос выполняется при перечислении. Поэтому повторное перечисление — это
+          повторная работа (в EF Core — повторный SQL).</li>
+        <li><code>IAsyncEnumerable&lt;T&gt;</code> + <code>await foreach</code> — потоковая выдача без блокировки
+          потока; <code>Task&lt;IEnumerable&lt;T&gt;&gt;</code> этого не даёт.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs03-collections.html">← <span class="sp">Глава 3. Коллекции: generic против non-generic</span></a>
+      <a href="cs05-class-modifiers.html"><span class="sp">Глава 5. Модификаторы типов: sealed, abstract, static, record</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

@@ -82,6 +82,20 @@
 message GetOrderRequest { int32 id = 1; }
 message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">Что означает <code>rpc</code> в этом файле</span>
+      <p><code>rpc</code> — <em>remote procedure call</em>, «удалённый вызов процедуры». Это ключевое слово
+        Protobuf-контракта: «объяви метод, который можно вызвать по сети».</p>
+      <ul>
+        <li><code>service Orders</code> — набор методов, аналог интерфейса.</li>
+        <li><code>rpc GetOrder (GetOrderRequest) returns (OrderReply)</code> — метод <code>GetOrder</code>
+          принимает сообщение <code>GetOrderRequest</code> и возвращает <code>OrderReply</code>.</li>
+        <li><code>message …</code> — структуры данных (аналог DTO); числа <code>= 1</code> — номера полей для
+          бинарного формата.</li>
+      </ul>
+      <p>Из этого файла генератор создаёт <strong>серверный интерфейс и клиентский класс</strong>: в C# вызов
+        выглядит как обычный метод, а по сети уходят бинарные кадры HTTP/2.</p>
+    </div>
     <p><strong>Плюсы:</strong></p>
     <ul>
       <li><strong>компактнее и быстрее</strong>: бинарный формат + сериализация без лишних строк;</li>

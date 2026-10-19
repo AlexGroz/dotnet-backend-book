@@ -57,12 +57,68 @@ var rows = await db.Orders
     .Select(o =&gt; new OrderRow(o.Id, o.Total, o.Customer.Name))
     .ToListAsync(ct);</code></pre>
     </div>
-    <div class="box note">
-      <span class="t">Include: осторожно с «декартовым взрывом»</span>
-      <p>Несколько <code>Include</code> подряд (две коллекции в одной сущности) дают один запрос с большим
-        соединением и дублирующимися строками. Тогда используют <code>AsSplitQuery()</code> — несколько запросов
-        вместо одного. Выбирать нужно <em>по измерениям</em>, а не по привычке.</p>
+    <h2>«N+1»: главная болезнь ORM</h2>
+    <p>«N+1» — это когда для списка из N элементов приложение делает <strong>1 запрос за списком и ещё N
+      запросов за связанными данными</strong>. Итого N+1 обращений к базе вместо одного-двух. На 20 заказах это
+      незаметно, на 10 000 — превращается в секунды и забитый пул соединений.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ 1 запрос за заказами + N запросов за клиентами (по одному на заказ)
+var orders = await db.Orders.Take(100).ToListAsync(ct);    // 1
+foreach (var o in orders)
+    Console.WriteLine(o.Customer.Name);                     // +100 запросов
+
+// ✔ один запрос: связь загружается сразу
+var orders2 = await db.Orders
+    .Include(o =&gt; o.Customer)
+    .Take(100)
+    .ToListAsync(ct);
+
+// ✔ ещё лучше: проекция — только нужные поля
+var rows = await db.Orders
+    .Select(o =&gt; new { o.Id, o.Total, Customer = o.Customer.Name })
+    .Take(100)
+    .ToListAsync(ct);</code></pre>
     </div>
+    <ul>
+      <li><strong>Откуда берётся:</strong> ленивая загрузка (lazy loading) или обращение к навигационному
+        свойству после того, как список уже получен.</li>
+      <li><strong>Как заметить:</strong> счётчик SQL-запросов на один HTTP-запрос; в логах — одинаковые запросы,
+        отличающиеся только параметром.</li>
+      <li><strong>Как лечить:</strong> <code>Include</code> (нужна вся сущность), проекция (нужны несколько
+        полей) или отдельный запрос по списку ключей (<code>WHERE Id IN (…)</code>) — два запроса вместо N+1.</li>
+    </ul>
+
+    <h2><code>Include</code> и <code>AsSplitQuery</code>: в чём разница</h2>
+    <p><code>Include</code> по умолчанию собирает всё <strong>одним SQL</strong> с <code>JOIN</code>. Если
+      включить две коллекции сразу, строки начинают дублироваться: каждая комбинация «заказ × позиция ×
+      комментарий» — отдельная строка результата.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// один запрос с JOIN: 10 заказов × 5 позиций × 3 комментария = 150 строк
+var orders = await db.Orders
+    .Include(o =&gt; o.Items)
+    .Include(o =&gt; o.Comments)
+    .Take(10)
+    .ToListAsync(ct);
+
+// несколько запросов: без «декартова взрыва» и дублирующихся строк
+var orders2 = await db.Orders
+    .Include(o =&gt; o.Items)
+    .Include(o =&gt; o.Comments)
+    .AsSplitQuery()
+    .Take(10)
+    .ToListAsync(ct);</code></pre>
+    </div>
+    <table>
+      <thead><tr><th></th><th>Один запрос (<code>Include</code>)</th><th><code>AsSplitQuery()</code></th></tr></thead>
+      <tbody>
+        <tr><td>Сколько SQL</td><td>1</td><td>Несколько — по одному на коллекцию</td></tr>
+        <tr><td>Дублирование строк</td><td>Растёт с числом коллекций</td><td>Нет</td></tr>
+        <tr><td>Согласованность</td><td>Один снимок данных</td><td>Между запросами данные могут измениться</td></tr>
+        <tr><td>Когда выбирать</td><td>Одна коллекция или мало строк</td><td>Две и более коллекции, большие выборки</td></tr>
+      </tbody>
+    </table>
+    <p>Выбор делается <em>по измерениям</em>: смотрим SQL из логов, размер результата и время. «Всегда
+      <code>AsSplitQuery</code>» и «всегда один запрос» — одинаково неверные стратегии.</p>
 
     <h2>Смена провайдера: Oracle → PostgreSQL</h2>
     <p>SQL пишет <strong>провайдер</strong> (<code>Oracle.EntityFrameworkCore</code> →
@@ -164,5 +220,6 @@ var last = await db.Orders
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

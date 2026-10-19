@@ -64,6 +64,36 @@ finally { Gate.Release(); }</code></pre>
     async (id, token) =&gt; await ProcessOneAsync(id, token));</code></pre>
     </div>
 
+    <div class="box note">
+      <span class="t">Что означают все части этих примеров</span>
+      <p><strong>Задача.</strong> Есть коллекция <code>ids</code> — например, идентификаторы заказов, которые надо
+        обработать. Обработка одной штуки вынесена в <code>ProcessOneAsync(id, ct)</code>: в реальном коде это
+        «сходить в базу», «вызвать внешний сервис», «отправить письмо». Это <em>не</em> метод из .NET — просто
+        имя-заглушка для вашей операции.</p>
+      <p><strong>Зачем лимит.</strong> Если элементов тысяча, а в пуле 20 соединений, то 980 будут ждать и всё
+        кончится таймаутами. Лимит параллелизма — это «не больше N одновременно».</p>
+      <p><strong>Вариант 1, <code>SemaphoreSlim</code>:</strong></p>
+      <ul>
+        <li><code>new SemaphoreSlim(initialCount: 8)</code> — семафор с <strong>8 разрешениями</strong>
+          («пропусками»). <code>initialCount</code> — сколько одновременных входов разрешено.</li>
+        <li><code>await Gate.WaitAsync(ct)</code> — «возьми пропуск». Если все 8 заняты, вызов ждёт
+          <em>асинхронно</em> (поток не блокируется).</li>
+        <li><code>try/finally</code> + <code>Gate.Release()</code> — «верни пропуск» всегда, даже при исключении.
+          Забыли вернуть — пропусков стало меньше, и со временем ждут все.</li>
+        <li><strong>Почему 8?</strong> Не магическое число, а выбранный лимит: сколько операций пускать
+          одновременно (например, по числу соединений в пуле).</li>
+      </ul>
+      <p><strong>Вариант 2, <code>Parallel.ForEachAsync</code>:</strong></p>
+      <ul>
+        <li><code>ids</code> — что перебираем.</li>
+        <li><code>new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }</code> — «не больше 8
+          обработок одновременно» и токен отмены.</li>
+        <li><code>async (id, token) =&gt; …</code> — тело цикла: текущий элемент и токен; внутри — ваша операция.</li>
+        <li>В отличие от семафора, «пропуск» вручную не берут: <code>ForEachAsync</code> сам держит лимит и
+          дожидается завершения всех задач.</li>
+      </ul>
+    </div>
+
     <h2>Потоковая обработка: IAsyncEnumerable</h2>
     <p>Если результат большой, не нужно грузить его целиком в память — можно отдавать по мере чтения:</p>
     <div class="codewrap">

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 2 · Где живут значения: struct, стек, куча и бокс</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs03-collections.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть I · Данные и память</div>
+    <h1>Глава 2. Где живут значения: struct, стек, куча и бокс</h1>
+    <p class="sublead">«Значимые типы создаются без аллокации» — верно, но не всегда. Разберём правило, из
+      которого следует всё остальное: значение живёт там, где живёт его <em>контейнер</em>.</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Два места и два времени жизни</h2>
+    <ul>
+      <li><strong>Стек</strong> — область для <em>кадров методов</em>: параметры и локальные переменные. Живёт
+        ровно столько, сколько выполняется метод, и освобождается автоматически.</li>
+      <li><strong>Куча</strong> — область для <em>объектов</em>. Объект живёт, пока на него есть ссылки;
+        освобождает его сборщик мусора (глава 6 .NET-раздела).</li>
+    </ul>
+    <p>Ключевая мысль: стек и куча — это не «свойства типа», а <strong>места, куда попадает переменная или
+      объект</strong>. Один и тот же <code>struct</code> может оказаться и на стеке, и в куче — зависит от
+      контекста.</p>
+
+    <h2>Правило: значение живёт там, где его контейнер</h2>
+    <table>
+      <thead><tr><th>Где объявлено значение</th><th>Где лежит</th><th>Аллокация?</th></tr></thead>
+      <tbody>
+        <tr><td>Локальная переменная, параметр метода</td><td>В кадре на <strong>стеке</strong></td><td>Нет (только сдвиг указателя стека)</td></tr>
+        <tr><td>Поле класса или поля внутри другого класса</td><td><strong>Внутри объекта в куче</strong></td><td>Была одна — при создании родительского объекта</td></tr>
+        <tr><td>Элемент массива <code>T[]</code> / <code>List&lt;T&gt;</code></td><td>Внутри массива в куче</td><td>Была при создании массива</td></tr>
+        <tr><td><code>static</code>-поле</td><td>В статическом хранилище типа</td><td>Один раз на тип</td></tr>
+        <tr><td>Захвачено лямбдой или локальной функцией</td><td>В объекте-замыкании в <strong>куче</strong></td><td><strong>Да</strong></td></tr>
+        <tr><td>Переменная, «пережившая» <code>await</code></td><td>В полях state machine (куча)</td><td><strong>Да</strong> (если компилятор не смог обойтись стеком)</td></tr>
+        <tr><td>Приведено к <code>object</code> или интерфейсу (<em>boxing</em>)</td><td>Новый объект в куче</td><td><strong>Да</strong></td></tr>
+      </tbody>
+    </table>
+
+    <h2>Пять примеров, чтобы это закрепить</h2>
+    <div class="codewrap">
+      <p class="cap">1. Локальная переменная — стек, аллокации нет</p>
+      <pre><code class="language-csharp">struct Point { public int X, Y; }
+
+void Draw()
+{
+    Point p = new Point { X = 3, Y = 5 };   // значение на стеке
+    Console.WriteLine(p.X);
+}   // вышли из метода — значение исчезло вместе с кадром</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">2. Поле класса — значение лежит внутри объекта в куче</p>
+      <pre><code class="language-csharp">class Shape
+{
+    public Point Origin;      // Point — часть объекта Shape
+}
+
+var s = new Shape();          // одна аллокация: место под объект целиком,
+                              // включая поле Origin внутри него
+s.Origin.X = 1;               // отдельной аллокации для Point НЕТ</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">3. Массив и список — значения внутри массива в куче</p>
+      <pre><code class="language-csharp">var points = new Point[100];        // одна аллокация массива на 100 значений
+points[0].X = 7;                    // пишем прямо в массив
+
+var list = new List&lt;Point&gt;();       // внутри — массив Point[]
+list.Add(new Point());              // копирование значения в массив</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">4. Захват в лямбду — значение переезжает в кучу</p>
+      <pre><code class="language-csharp">Func&lt;int&gt; MakeCounter()
+{
+    int counter = 0;                 // локальная переменная
+    return () =&gt; ++counter;          // но лямбда её «захватила»
+}
+// компилятор создаёт объект-замыкание в куче: counter живёт в его поле</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">5. Бокс — явная аллокация</p>
+      <pre><code class="language-csharp">int n = 42;
+object boxed = n;        // ✘ упаковка: в куче создан объект со значением 42
+int back = (int)boxed;   // распаковка: значение копируется обратно
+
+// ✘ то же самое, но незаметно: интерфейс без generic-версии
+IComparable c = n;       // упаковка, если у типа нет IComparable&lt;int&gt;</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Ответ на вопрос «почему часто, а не всегда»</span>
+      <p>«Часто» — потому что <strong>большинство значений в обычном коде — локальные переменные и
+        параметры</strong>, а они на стеке. «Не всегда» — потому что struct может быть полем класса, элементом
+        массива, захваченным лямбдой, упакованным в <code>object</code> или пережившим <code>await</code>. Во
+        всех этих случаях значение оказывается в куче.</p>
+    </div>
+
+    <h2>Бокс: самая частая «невидимая» аллокация</h2>
+    <p><strong>Упаковка (boxing)</strong> — превращение значения в объект. Происходит всегда, когда значение
+      требуется там, где ожидается ссылочный тип:</p>
+    <ul>
+      <li>приведение к <code>object</code> или к интерфейсу, у которого нет generic-версии;</li>
+      <li>не-generic коллекции (<code>ArrayList</code>, <code>Hashtable</code>) — глава 3;</li>
+      <li><code>string.Format</code>/интерполяция со значением в <code>object</code>-параметре;</li>
+      <li>сравнение структур через <code>Equals(object)</code> без <code>IEquatable&lt;T&gt;</code>.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ каждое добавление упаковывает int
+var list = new ArrayList();
+for (int i = 0; i &lt; 1000; i++) list.Add(i);      // 1000 объектов в куче
+
+// ✔ generic-коллекция хранит значения как значения
+var list2 = new List&lt;int&gt;();
+for (int i = 0; i &lt; 1000; i++) list2.Add(i);     // ни одной упаковки
+
+// ✔ свой struct со сравнением без упаковки
+public readonly struct Money : IEquatable&lt;Money&gt;
+{
+    public long Kopeks { get; }
+    public Money(long kopeks) =&gt; Kopeks = kopeks;
+
+    public bool Equals(Money other) =&gt; Kopeks == other.Kopeks;
+    public override bool Equals(object? obj) =&gt; obj is Money m &amp;&amp; Equals(m);
+    public override int GetHashCode() =&gt; Kopeks.GetHashCode();
+}</code></pre>
+    </div>
+
+    <h2>Почему struct не «всегда быстрее»</h2>
+    <ul>
+      <li><strong>Копирование.</strong> Присваивание, передача в метод и возврат копируют всё значение. Большой
+        struct (сотни байт) копировать дороже, чем передать ссылку.</li>
+      <li><strong>Упаковка.</strong> Если struct попадает в <code>object</code> или в не-generic API — аллокация
+        всё равно будет.</li>
+      <li><strong>Защитные копии</strong> (<em>defensive copies</em>): вызов не-<code>readonly</code> метода или
+        обращение к свойству через <code>in</code>-параметр может создать копию.</li>
+      <li><strong><code>default</code>-значения.</strong> У struct всегда есть состояние «все поля нули», которое не всегда
+        осмысленно (например, нулевая сумма).</li>
+      <li><strong>Нет наследования и null-семантики</strong> — иногда это именно то, что нужно, а иногда мешает.</li>
+    </ul>
+
+    <h2>Когда выбирать struct, а когда class</h2>
+    <table>
+      <thead><tr><th>Признак</th><th>struct</th><th>class</th></tr></thead>
+      <tbody>
+        <tr><td>Размер</td><td>Маленький (ориентир — до ~16–24 байт)</td><td>Любой</td></tr>
+        <tr><td>Семантика</td><td>«Значение»: деньги, точка, диапазон, идентификатор</td><td>«Сущность с поведением»: заказ, клиент, сервис</td></tr>
+        <tr><td>Изменяемость</td><td>Лучше <code>readonly struct</code></td><td>Обычно изменяемый</td></tr>
+        <tr><td>Наследование</td><td>Не поддерживается</td><td>Поддерживается</td></tr>
+        <tr><td>Копирование</td><td>Копируется целиком</td><td>Копируется ссылка</td></tr>
+        <tr><td>Ссылочная идентичность</td><td>Нет (два одинаковых значения «равны»)</td><td>Есть (два объекта — разные)</td></tr>
+      </tbody>
+    </table>
+
+    <h2><code>readonly struct</code> и <code>in</code>: как не копировать зря</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public readonly struct Range
+{
+    public int From { get; }
+    public int To { get; }
+
+    public Range(int from, int to) { From = from; To = to; }
+    public bool Contains(int x) =&gt; x &gt;= From &amp;&amp; x &lt;= To;
+}
+
+// in — передача по ссылке, но только для чтения: без копии и без изменения
+static bool Check(in Range range, int value) =&gt; range.Contains(value);</code></pre>
+    </div>
+    <p><code>readonly struct</code> гарантирует, что состояние не изменится, поэтому компилятор не делает
+      защитных копий при вызове методов. <code>in</code> полезен для структур побольше (условно от 24 байт);
+      для <code>int</code> выгоды нет — копия стоит столько же, сколько ссылка.</p>
+
+    <h2>Отдельный случай: <code>ref struct</code></h2>
+    <p><code>Span&lt;T&gt;</code> и <code>ReadOnlySpan&lt;T&gt;</code> объявлены как <code>ref struct</code>: они
+      <strong>гарантированно не могут попасть в кучу</strong> — их нельзя положить в поле класса, в
+      <code>List&lt;&gt;</code>, «пережить» ими <code>await</code>. Это цена за скорость и безопасность: окно на
+      память не должно пережить саму память (глава 7 .NET-раздела).</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Значение живёт <strong>там, где его контейнер</strong>: локальная переменная — стек; поле класса,
+          элемент массива, замыкание, state machine — куча.</li>
+        <li>«Struct всегда в стеке» — неверное упрощение. Верно: <strong>локальные значения</strong> обычно не
+          требуют аллокации.</li>
+        <li><strong>Бокс</strong> — самая частая незаметная аллокация; лечится generic-коллекциями и
+          <code>IEquatable&lt;T&gt;</code>.</li>
+        <li>Struct не всегда быстрее: копирование, бокс и защитные копии могут съесть всю выгоду.</li>
+        <li><code>readonly struct</code> и <code>in</code> убирают лишние копии; <code>ref struct</code>
+          принципиально живёт только на стеке.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs01-strings.html">← <span class="sp">Глава 1. Строки: почему это куча, а не стек</span></a>
+      <a href="cs03-collections.html"><span class="sp">Глава 3. Коллекции: generic против non-generic</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

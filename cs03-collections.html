@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Коллекции: generic против non-generic</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs04-ienumerable.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть II · Коллекции и перечисления</div>
+    <h1>Глава 3. Коллекции: generic против non-generic</h1>
+    <p class="sublead">Почему <code>List&lt;int&gt;</code> лучше <code>ArrayList</code>, что такое
+      <em>generic</em> и как выбрать коллекцию под задачу.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что такое generic</h2>
+    <p><strong>Generic</strong> («обобщённый тип») — это тип с <em>параметром типа</em>. Вы пишете
+      <code>List&lt;T&gt;</code>, а при использовании подставляете конкретный тип: <code>List&lt;int&gt;</code>,
+      <code>List&lt;Order&gt;</code>. Компилятор создаёт «специализацию» и знает <strong>точный тип
+      элементов</strong>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// generic: тип элемента известен компилятору
+var numbers = new List&lt;int&gt;();
+numbers.Add(42);
+int first = numbers[0];        // никаких приведений
+
+// non-generic: хранит object, тип «стирается»
+var legacy = new ArrayList();
+legacy.Add(42);                // 42 упаковывается в object
+int old = (int)legacy[0];      // приведение вручную</code></pre>
+    </div>
+    <p>Отсюда три выгоды generic-коллекций, и все три — про надёжность и скорость:</p>
+    <ol>
+      <li><strong>Нет упаковки</strong> для значимых типов: <code>List&lt;int&gt;</code> хранит <code>int</code>,
+        а <code>ArrayList</code> — <code>object</code>, то есть каждый элемент упаковывается (глава 2).</li>
+      <li><strong>Нет приведений</strong> при чтении: тип известен, приведение не нужно.</li>
+      <li><strong>Ошибки видно на компиляции</strong>, а не в рантайме.</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ non-generic: компилятор пропустит, упадёт в рантайме
+var list = new ArrayList();
+list.Add(1);
+list.Add("два");                    // никто не запретил
+int sum = 0;
+foreach (object item in list)
+    sum += (int)item;               // InvalidCastException на "два"
+
+// ✔ generic: не скомпилируется — и это хорошо
+var list2 = new List&lt;int&gt;();
+list2.Add("два");                   // ошибка компиляции</code></pre>
+    </div>
+
+    <h2>Кто на кого заменяется</h2>
+    <table>
+      <thead><tr><th>Non-generic (старое)</th><th>Generic (современное)</th><th>Что изменилось</th></tr></thead>
+      <tbody>
+        <tr><td><code>ArrayList</code></td><td><code>List&lt;T&gt;</code></td><td>Нет упаковки и приведений, тип проверяется компилятором</td></tr>
+        <tr><td><code>Hashtable</code></td><td><code>Dictionary&lt;TKey, TValue&gt;</code></td><td>Типизированные ключи и значения, быстрее</td></tr>
+        <tr><td><code>Queue</code>, <code>Stack</code></td><td><code>Queue&lt;T&gt;</code>, <code>Stack&lt;T&gt;</code></td><td>То же плюс отсутствие бокса</td></tr>
+        <tr><td><code>SortedList</code></td><td><code>SortedList&lt;TKey, TValue&gt;</code>, <code>SortedDictionary&lt;TKey, TValue&gt;</code></td><td>Типизация; разная внутренняя структура и сложность</td></tr>
+        <tr><td><code>CollectionBase</code></td><td><code>Collection&lt;T&gt;</code></td><td>Готовые проверки и уведомления об изменениях</td></tr>
+        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 4)</td></tr>
+      </tbody>
+    </table>
+    <p>Non-generic-версии остались ради совместимости. В новом коде их не используют — исключение только
+      взаимодействие со старыми API.</p>
+
+    <h2>Интерфейсы коллекций: что возвращать из методов</h2>
+    <table>
+      <thead><tr><th>Интерфейс</th><th>Что умеет</th><th>Когда использовать в сигнатуре</th></tr></thead>
+      <tbody>
+        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 4)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
+        <tr><td><code>IReadOnlyCollection&lt;T&gt;</code></td><td>Перечисление + <code>Count</code></td><td>Чтение набора</td></tr>
+        <tr><td><code>IReadOnlyList&lt;T&gt;</code></td><td>Плюс доступ по индексу</td><td>Результат выборки, который нельзя менять</td></tr>
+        <tr><td><code>ICollection&lt;T&gt;</code>, <code>IList&lt;T&gt;</code></td><td>Добавление, удаление, индексатор</td><td>Когда вызывающий действительно должен менять коллекцию</td></tr>
+        <tr><td><code>IDictionary&lt;TKey, TValue&gt;</code></td><td>Ключ → значение</td><td>Словарь</td></tr>
+        <tr><td><code>ISet&lt;T&gt;</code></td><td>Множество, объединение/пересечение</td><td>Уникальность и «есть ли элемент»</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✔ слабый достаточный контракт: Count и индексатор есть, менять нельзя
+public IReadOnlyList&lt;OrderRow&gt; GetPage(int page) { … }
+
+// ✘ вернуть List&lt;T&gt; — разрешить менять внутренние данные
+public List&lt;OrderRow&gt; GetPageBad(int page) { … }
+
+// параметр: если только читаем, IEnumerable&lt;T&gt; достаточен
+public decimal Sum(IEnumerable&lt;OrderRow&gt; rows) =&gt; rows.Sum(r =&gt; r.Total);</code></pre>
+    </div>
+
+    <h2>Как выбрать коллекцию</h2>
+    <table>
+      <thead><tr><th>Коллекция</th><th>Что хорошо</th><th>Что дорого</th></tr></thead>
+      <tbody>
+        <tr><td><code>List&lt;T&gt;</code></td><td>Индекс O(1), добавление в конец амортизированно O(1)</td><td>Вставка/удаление в середине O(n)</td></tr>
+        <tr><td><code>Dictionary&lt;TKey, TValue&gt;</code></td><td>Поиск/вставка/удаление по ключу ~O(1)</td><td>Нет порядка; нужен хороший <code>GetHashCode</code></td></tr>
+        <tr><td><code>HashSet&lt;T&gt;</code></td><td>«Есть ли элемент» ~O(1), пересечения</td><td>Нет индексов и порядка</td></tr>
+        <tr><td><code>Queue&lt;T&gt;</code> / <code>Stack&lt;T&gt;</code></td><td>FIFO / LIFO за O(1)</td><td>Нет доступа к произвольному элементу</td></tr>
+        <tr><td><code>LinkedList&lt;T&gt;</code></td><td>Вставка/удаление по узлу O(1)</td><td>Плохая локальность памяти, нет индексов</td></tr>
+        <tr><td><code>SortedDictionary&lt;TKey,TValue&gt;</code></td><td>Всегда отсортировано, O(log n)</td><td>Медленнее <code>Dictionary</code></td></tr>
+        <tr><td><code>ConcurrentDictionary</code>, <code>ConcurrentQueue</code></td><td>Безопасны для нескольких потоков</td><td>Дороже обычных из-за синхронизации</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Правило выбора</span>
+      <p>Сформулируйте <strong>операцию, которая выполняется чаще всего</strong>. Поиск по ключу →
+        <code>Dictionary</code>. Проверка уникальности → <code>HashSet</code>. Обход в порядке добавления →
+        <code>List</code>. Очередь задач → <code>Queue</code>/<code>Channel</code>. Остальное — редкость.</p>
+    </div>
+
+
+    <h2>Ёмкость и рост</h2>
+    <p><code>List&lt;T&gt;</code> внутри — массив. Когда он заполняется, создаётся новый (обычно вдвое больше) и
+      элементы копируются. Если размер известен заранее, этого можно избежать:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var list = new List&lt;Order&gt;(capacity: 10_000);   // сразу нужный массив
+list.EnsureCapacity(20_000);                    // заранее расширить
+
+var dict = new Dictionary&lt;int, Order&gt;(capacity: 10_000);   // меньше перестроений</code></pre>
+    </div>
+
+    <h2><code>foreach</code> и скрытая аллокация</h2>
+    <ul>
+      <li><strong><code>List&lt;T&gt;</code> в конкретном типе</strong> — энумератор это <code>struct</code>,
+        аллокации нет.</li>
+      <li><strong>Через интерфейс</strong> <code>IEnumerable&lt;T&gt;</code> — энумератор упаковывается в
+        <code>object</code>: аллокация на каждый цикл.</li>
+      <li><strong>LINQ</strong> (<code>Where</code>, <code>Select</code>) — создаёт объекты-итераторы; на горячем
+        пути лучше один явный цикл или <code>Span</code>.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✔ без упаковки: foreach по List&lt;T&gt; использует struct-энумератор
+foreach (var order in list) { … }
+
+// ✘ параметр объявлен как IEnumerable&lt;T&gt; — энумератор будет упакован
+void Print(IEnumerable&lt;Order&gt; orders)
+{
+    foreach (var order in orders) { … }
+}</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Generic</strong> — тип с параметром типа: компилятор знает точный тип элементов.</li>
+        <li>Generic-коллекции дают <strong>отсутствие упаковки</strong>, отсутствие приведений и ошибки на
+          компиляции.</li>
+        <li>Возвращайте <strong>самый слабый достаточный интерфейс</strong> — обычно
+          <code>IReadOnlyList&lt;T&gt;</code> или <code>IEnumerable&lt;T&gt;</code>.</li>
+        <li>Коллекцию выбирают по <strong>главной операции</strong>: поиск → <code>Dictionary</code>,
+          уникальность → <code>HashSet</code>, порядок → <code>List</code>.</li>
+        <li>Задавайте <strong>ёмкость</strong>, если размер известен; помните, что перечисление через интерфейс
+          упаковывает энумератор.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs02-value-types-memory.html">← <span class="sp">Глава 2. Где живут значения: struct, стек, куча и бокс</span></a>
+      <a href="cs04-ienumerable.html"><span class="sp">Глава 4. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
