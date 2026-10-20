@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 21 · MVCC в PostgreSQL: версии строк и снимки</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -18,15 +21,308 @@
     <h1>Глава 21. MVCC в PostgreSQL: версии строк и снимки</h1>
     <p class="sublead">Как читатели и писатели не мешают друг другу</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <h2>Зачем вообще MVCC</h2>
+    <p>Представьте, что читатель ждёт писателя. Если чтение блокирует запись, а запись блокирует чтение, то под
+      нагрузкой база превращается в очередь: отчёты мешают заказам, а один долгий <code>UPDATE</code> тормозит
+      всех. На высоконагруженном сервисе это неприемлемо.</p>
+    <p><strong>MVCC</strong> (<em>Multi-Version Concurrency Control</em>, «управление конкурентным доступом с
+      помощью версий») решает это так: <strong>читатель никогда не блокирует писателя, а писатель —
+      читателя</strong>. Каждый видит <em>свою</em> версию данных:</p>
+    <ul>
+      <li><strong>читатель</strong> видит согласованный снимок (snapshot) — набор версий, актуальных на момент
+        начала его запроса или транзакции;</li>
+      <li><strong>писатель</strong> создаёт <em>новую</em> версию строки, не трогая ту, которую кто-то читает.</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Следствие, которое надо помнить всегда</span>
+      <p>В PostgreSQL <strong><code>UPDATE</code> не изменяет строку на месте</strong>: он создаёт новую версию, а
+        старая остаётся в странице, пока её не уберёт <code>VACUUM</code>. Отсюда и <code>VACUUM</code>, и bloat,
+        и HOT-апдейты (глава 23), и требование к <code>fillfactor</code>.</p>
     </div>
+
+    <h2>Версия строки: <code>xmin</code>, <code>xmax</code>, <code>ctid</code></h2>
+    <p>У каждой физической версии строки есть системные поля:</p>
+    <table>
+      <thead><tr><th>Поле</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>ctid</code></td><td>Физический адрес версии: номер страницы и смещение внутри неё. <strong>Меняется при каждом UPDATE</strong></td></tr>
+        <tr><td><code>xmin</code></td><td>ID транзакции, которая <strong>создала</strong> эту версию</td></tr>
+        <tr><td><code>xmax</code></td><td>ID транзакции, которая её <strong>удалила или обновила</strong>; <code>0</code> — версия актуальна</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-sql">INSERT INTO orders (id, status) VALUES (1, 'new');
+
+SELECT ctid, xmin, xmax, status FROM orders WHERE id = 1;
+--  ctid  | xmin  | xmax | status
+-- -------+-------+------+--------
+--  (0,1) | 7401  |    0 | new          ← создана транзакцией 7401, никем не удалена
+
+UPDATE orders SET status = 'paid' WHERE id = 1;
+
+SELECT ctid, xmin, xmax, status FROM orders WHERE id = 1;
+--  ctid  | xmin  | xmax | status
+-- -------+-------+------+--------
+--  (0,2) | 7402  |    0 | paid         ← НОВАЯ версия, созданная 7402
+
+-- старая версия физически осталась: (0,1) с xmax = 7402
+SELECT ctid, xmin, xmax, status
+FROM orders;   -- обычный SELECT её уже не покажет: правило видимости</code></pre>
+    </div>
+    <p>Отсюда три правила, которые объясняют всё остальное:</p>
+    <ul>
+      <li><strong>UPDATE</strong> = новая версия (<code>xmin</code> = моя транзакция) + у старой проставляется
+        <code>xmax</code> = моя транзакция;</li>
+      <li><strong>DELETE</strong> = у версии проставляется <code>xmax</code>, сама строка остаётся на диске;</li>
+      <li><strong>ROLLBACK</strong> не удаляет созданную версию — она просто остаётся «невидимой» как
+        прерванная, и её тоже уберёт <code>VACUUM</code>.</li>
+    </ul>
+
+    <h2>Снимок: что именно «видит» транзакция</h2>
+    <p><strong>Снимок</strong> (<em>snapshot</em>) — это описание того, какие транзакции уже завершены, а какие
+      ещё «в полёте». Он состоит из трёх вещей:</p>
+    <ul>
+      <li><strong><code>xmin</code> снимка</strong> — самый старый номер транзакции, который ещё активен;</li>
+      <li><strong><code>xmax</code> снимка</strong> — граница «будущего»: транзакции с большим номером начались
+        после снимка;</li>
+      <li><strong>список активных</strong> — те, что начались, но не завершились.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN;
+SELECT txid_current_snapshot();
+-- 7405:7412:7406,7409
+--  ^     ^     ^
+--  |     |     активные транзакции
+--  |     следующая «будущая»
+--  все транзакции с номером меньше 7405 уже завершены
+
+-- в PostgreSQL 13+ удобнее смотреть свой xid:
+SELECT pg_current_xact_id();</code></pre>
+    </div>
+    <p><strong>Правило видимости</strong> (упрощённо): версия строки видна этой транзакции, если</p>
+    <ol>
+      <li><code>xmin</code> версии — «свой» или завершённый (зафиксированный) и <em>не</em> входит в список
+        активных снимка, и</li>
+      <li><code>xmax</code> версии — пустой (<code>0</code>), либо прерванный, либо «невидимый» снимку.</li>
+    </ol>
+    <p>Из этого правила следуют два вывода, важных на практике:</p>
+    <ul>
+      <li><strong>Читатель со «старым» снимком продолжает видеть старые версии</strong> — даже если писатель уже
+        закоммитил новые. Именно поэтому чтение не блокирует запись.</li>
+      <li><strong>Пока снимок жив, мёртвые версии убрать нельзя</strong>: они ещё кому-то видны. Поэтому долгая
+        транзакция мешает <code>VACUUM</code> и раздувает таблицу (глава 23).</li>
+    </ul>
+
+    <h2>Уровни изоляции: разница именно в снимках</h2>
+    <p>Уровень изоляции в PostgreSQL — это, по сути, ответ на вопрос «<em>когда берётся снимок</em>».</p>
+    <table>
+      <thead><tr><th>Уровень</th><th>Когда берётся снимок</th><th>Что возможно</th><th>Что невозможно</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Read Uncommitted</strong></td><td>—</td><td>Работает как Read Committed</td><td>Грязного чтения в PostgreSQL нет никогда</td></tr>
+        <tr><td><strong>Read Committed</strong><br><small>по умолчанию</small></td><td>На <strong>каждый оператор</strong></td><td>Неповторяющееся чтение (два одинаковых <code>SELECT</code> дают разное), фантомы</td><td>Чтения «грязных» данных</td></tr>
+        <tr><td><strong>Repeatable Read</strong></td><td>Один на <strong>всю транзакцию</strong></td><td>Аномалии сериализации (например, write skew)</td><td>Неповторяющегося чтения, фантомов, потерянных обновлений (второй апдейт получит <code>40001</code>)</td></tr>
+        <tr><td><strong>Serializable</strong></td><td>Один на транзакцию + отслеживание конфликтов (SSI)</td><td>Только откат с <code>40001</code> — это штатное поведение</td><td>Любых сериализационных аномалий</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Repeatable Read в PostgreSQL «сильнее» стандарта</span>
+      <p>В стандарте SQL Repeatable Read допускает фантомы, но в PostgreSQL этот уровень реализован как
+        <strong>snapshot isolation</strong>: один снимок на транзакцию, поэтому фантомов тоже нет. А вместо
+        «тихого» потерянного обновления вы получите ошибку <code>could not serialize access due to concurrent
+        update</code> (код <code>40001</code>) — и транзакцию нужно повторить.</p>
+    </div>
+
+    <h2>Две сессии: увидеть разницу своими глазами</h2>
+    <p>Один и тот же сценарий при двух уровнях изоляции. Сессия <strong>A</strong> читает баланс, сессия
+      <strong>B</strong> его меняет и коммитит, затем A читает снова.</p>
+    <div class="codewrap">
+      <p class="cap">Read Committed: снимок берётся на каждый оператор</p>
+      <pre><code class="language-sql">-- Сессия A                                  -- Сессия B
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+SELECT balance FROM accounts WHERE id = 1;      -- 100
+
+                                              UPDATE accounts SET balance = 50 WHERE id = 1;
+                                              COMMIT;
+
+SELECT balance FROM accounts WHERE id = 1;      -- 50   ← новый снимок
+COMMIT;</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Repeatable Read: снимок один на всю транзакцию</p>
+      <pre><code class="language-sql">-- Сессия A                                  -- Сессия B
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+SELECT balance FROM accounts WHERE id = 1;      -- 100
+
+                                              UPDATE accounts SET balance = 50 WHERE id = 1;
+                                              COMMIT;
+
+SELECT balance FROM accounts WHERE id = 1;      -- 100  ← тот же снимок
+COMMIT;</code></pre>
+    </div>
+    <p>Это и есть «неповторяющееся чтение»: при Read Committed два одинаковых запроса в одной транзакции дают
+      разные ответы. Отчёт, который делает несколько таких запросов, увидит «рваную» картину.</p>
+
+    <h2>Какие аномалии ловит какой уровень</h2>
+    <table>
+      <thead><tr><th>Аномалия</th><th>Read Committed</th><th>Repeatable Read</th><th>Serializable</th></tr></thead>
+      <tbody>
+        <tr><td>Грязное чтение (видно незакоммиченное)</td><td>нет</td><td>нет</td><td>нет</td></tr>
+        <tr><td>Неповторяющееся чтение</td><td>да</td><td>нет</td><td>нет</td></tr>
+        <tr><td>Фантомное чтение (появились новые строки)</td><td>да</td><td>нет</td><td>нет</td></tr>
+        <tr><td>Потерянное обновление (read-modify-write)</td><td>да, <strong>молча</strong></td><td>нет: <code>40001</code></td><td>нет</td></tr>
+        <tr><td>Write skew («каждый проверил, вместе нарушили»)</td><td>да</td><td>да</td><td>нет: <code>40001</code></td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- «Потерянное обновление» в прикладном коде (Read Committed)
+-- Сессия A: SELECT balance FROM accounts WHERE id = 1;   → 100
+-- Сессия B: UPDATE ... SET balance = 50; COMMIT;
+-- Сессия A: UPDATE accounts SET balance = 40 WHERE id = 1;  ← записал «своё», 50 потеряно
+
+-- Тот же код при Repeatable Read:
+-- UPDATE accounts SET balance = 40 WHERE id = 1;
+-- ERROR: could not serialize access due to concurrent update  (SQLSTATE 40001)</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Что это значит для кода</span>
+      <p>Повышение уровня изоляции <strong>не убирает конфликт</strong> — оно превращает «тихую порчу данных» в
+        ошибку. Значит, транзакцию нужно <strong>повторять</strong>: код с <code>40001</code> обязан иметь retry
+        (глава 22), иначе под нагрузкой вы получите поток ошибок вместо корректных данных.</p>
+    </div>
+
+    <h2>Повтор транзакции — часть работы с MVCC</h2>
+    <p>Если уровень изоляции <code>Repeatable Read</code> или <code>Serializable</code> «поймал» конфликт,
+      PostgreSQL откатывает транзакцию с кодом <code>40001</code>. Это не ошибка программиста, а сигнал
+      «повтори». На C# это выглядит так:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public async Task WithdrawAsync(Guid id, decimal amount, CancellationToken ct)
+{
+    for (var attempt = 1; ; attempt++)
+    {
+        try
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(
+                IsolationLevel.RepeatableRead, ct);
+
+            var account = await db.Accounts.FirstAsync(a =&gt; a.Id == id, ct);
+            account.Withdraw(amount);                 // бизнес-правило: баланс не может быть отрицательным
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return;
+        }
+        catch (DbUpdateException ex) when (IsSerializationFailure(ex) &amp;&amp; attempt &lt; 3)
+        {
+            db.ChangeTracker.Clear();                 // контекст после ошибки нужно «очистить»
+            await Task.Delay(TimeSpan.FromMilliseconds(50 * attempt), ct);   // backoff
+        }
+    }
+}
+
+private static bool IsSerializationFailure(DbUpdateException ex) =&gt;
+    ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.SerializationFailure };</code></pre>
+    </div>
+    <p>Правила, без которых retry бессмысленен: <strong>транзакция должна быть целиком повторяемой</strong>
+      (никаких внешних вызовов внутри), а контекст после ошибки — очищен, иначе EF Core попытается сохранить
+      «грязное» состояние.</p>
+
+    <h2>Цена MVCC: горизонт и мёртвые версии</h2>
+    <p>Версии, которые больше никому не видны, — это мусор. Его убирает <code>VACUUM</code>, но у него есть
+      ограничение: <strong>пока снимок хоть одной транзакции может видеть версию, удалить её нельзя</strong>.
+      Самый старый такой снимок называют <strong>горизонтом</strong>.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- кто сейчас держит горизонт (и как долго)
+SELECT pid,
+       state,
+       backend_xmin,
+       age(backend_xmin)             AS xmin_age,
+       now() - xact_start            AS xact_age,
+       left(query, 40)               AS last_query
+FROM pg_stat_activity
+WHERE backend_xmin IS NOT NULL
+ORDER BY age(backend_xmin) DESC
+LIMIT 10;</code></pre>
+    </div>
+    <ul>
+      <li><strong>Долгая транзакция</strong> (или <code>idle in transaction</code>) держит горизонт — и таблица
+        растёт, хотя никто не мешает ей работать.</li>
+      <li><strong>Открытый слот репликации</strong> — та же история: он тоже держит версии.</li>
+      <li><strong>Следствие</strong>: <code>n_dead_tup</code> растёт, autovacuum не справляется, появляется bloat
+        и деградация (глава 23).</li>
+      <li><strong>Проверка «а не я ли виноват»:</strong> посмотрите на самое старое
+        <code>now() - xact_start</code> в <code>pg_stat_activity</code> — если там минуты, проблема в приложении,
+        а не в базе.</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Простое правило для сервиса</span>
+      <p><strong>Транзакция должна жить миллисекунды.</strong> Всё, что требует сети (HTTP, брокер, внешний API),
+        выносится до или после транзакции — иначе вы одновременно держите соединение, блокировки и горизонт
+        (глава 4 конспектов и глава 23 .NET-раздела).</p>
+    </div>
+
+    <h2>Что выбирать в .NET</h2>
+    <table>
+      <thead><tr><th>Сценарий</th><th>Что использовать</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>Обычные CRUD-операции</td><td><code>Read Committed</code> (по умолчанию)</td><td>Дёшево, чтение ничего не блокирует</td></tr>
+        <tr><td>Отчёт из нескольких запросов</td><td><code>Repeatable Read</code> или один запрос</td><td>Все чтения из одного снимка — «рваной» картины нет</td></tr>
+        <tr><td>«Проверить лимит и записать»</td><td><code>Serializable</code> + retry либо атомарный <code>UPDATE</code>/<code>ON CONFLICT</code></td><td>Проверка и запись должны быть согласованы</td></tr>
+        <tr><td>Не перезаписать чужое изменение</td><td>Оптимистичный параллелизм: <code>xmin</code> как токен</td><td>Конфликт виден как исключение, а не как потеря данных</td></tr>
+        <tr><td>Нужно заблокировать строку</td><td><code>SELECT … FOR UPDATE</code></td><td>Пессимистичный вариант: остальные ждут (глава 22)</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Оптимистичный параллелизм на системном поле xmin (Npgsql)
+modelBuilder.Entity&lt;Account&gt;()
+    .Property&lt;uint&gt;("xmin")
+    .HasColumnType("xid")
+    .ValueGeneratedOnAddOrUpdate()
+    .IsConcurrencyToken();
+
+// EF Core добавит в UPDATE условие WHERE xmin = @old_xmin.
+// Если строку успел изменить кто-то другой, обновится 0 строк →
+// DbUpdateConcurrencyException: транзакцию повторяем или сообщаем о конфликте.</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Три частые ошибки</span>
+      <ul>
+        <li><strong>Ставить Serializable «для надёжности».</strong> Получите поток <code>40001</code> без выигрыша
+          в корректности; уровень повышают под конкретную операцию.</li>
+        <li><strong>Держать транзакцию во время HTTP-вызова.</strong> Горизонт и блокировки живут всё время
+          сетевого ожидания.</li>
+        <li><strong>Игнорировать <code>40001</code>.</strong> Без retry под нагрузкой это выглядит как «случайные»
+          отказы заказов.</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>MVCC</strong>: читатель видит снимок и <strong>не блокирует</strong> писателя; писатель создаёт
+          новую версию строки.</li>
+        <li><strong><code>UPDATE</code> = новая версия</strong>: <code>xmin</code> — кто создал, <code>xmax</code> —
+          кто удалил/обновил, <code>ctid</code> — где физически лежит.</li>
+        <li>Уровень изоляции определяет, <strong>когда берётся снимок</strong>: на оператор (RC) или на транзакцию
+          (RR, Serializable).</li>
+        <li><strong>Read Committed</strong> — по умолчанию; <strong>Repeatable Read</strong> в PostgreSQL — это
+          snapshot isolation; <strong>Serializable</strong> ловит аномалии сериализации.</li>
+        <li>Конфликт при высоком уровне изоляции — это ошибка <code>40001</code>, и её нужно
+          <strong>повторять</strong>.</li>
+        <li>Цена MVCC — <strong>мёртвые версии</strong>: <code>VACUUM</code> не может их убрать, пока их «видит»
+          чей-то снимок → горизонт, bloat (глава 23).</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="sql20-transactions-isolation.html">← <span class="sp">Глава 20. Транзакции и уровни изоляции</span></a>
       <a href="sql22-locks.html"><span class="sp">Глава 22. Блокировки, deadlock и retry</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
