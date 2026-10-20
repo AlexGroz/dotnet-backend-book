@@ -118,6 +118,15 @@ public sealed class OrderService([FromKeyedServices] Func&lt;CustomerType, IPric
         =&gt; resolve(type).Calculate(order);
 }</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">Почему в регистрации два типа</span>
+      <p><code>AddKeyedScoped&lt;IPricingStrategy, VipPricing&gt;(…)</code> — это <strong>правило для
+        контейнера</strong>: «на запрос <code>IPricingStrategy</code> с этим ключом создай <code>VipPricing</code>».
+        Первый тип — то, что <em>просят</em> (интерфейс в конструкторе), второй — то, что <em>создают</em>.</p>
+      <p>Двух типов не избежать: у интерфейса три реализации — «очевидной» не существует, её задаёте вы. Все
+        случаи (несколько интерфейсов у одного класса, несколько реализаций, фабричные делегаты, открытые
+        дженерики, <code>TryAdd</code>) разобраны в книге «Backend на .NET», глава 15.</p>
+    </div>
     <div class="box tip">
       <span class="t">Что изменилось</span>
       <ul>

@@ -78,6 +78,155 @@ app.Run();</code></pre>
     <p>Если зависимость не зарегистрирована — приложение падает <strong>на старте</strong>, а не «где-то
       потом». Это заставляет держать граф зависимостей в порядке.</p>
 
+    <h2>Почему в регистрации два типа</h2>
+    <p>Строка <code>AddScoped&lt;IOrderRepository, OrderRepository&gt;()</code> — это <strong>не описание
+      класса</strong>, а <strong>правило для контейнера</strong>: «когда попросят <code>IOrderRepository</code>,
+      создай <code>OrderRepository</code>». Два типа — это два разных вопроса:</p>
+    <ul>
+      <li><strong>первый тип (<em>service</em>)</strong> — то, что <em>просят</em> (обычно интерфейс, который стоит в
+        конструкторах);</li>
+      <li><strong>второй тип (<em>implementation</em>)</strong> — то, что <em>создают</em>.</li>
+    </ul>
+    <p>Потребитель никогда не просит конкретный класс — он просит контракт:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class OrderService(IOrderRepository repo)   // просит ИНТЕРФЕЙС
+{
+    public Task&lt;Order&gt; GetAsync(int id) =&gt; repo.GetAsync(id);
+}</code></pre>
+    </div>
+    <p>Значит, контейнер должен знать, что отдать на запрос <code>IOrderRepository</code>. Если зарегистрировать
+      только реализацию —</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddScoped&lt;OrderRepository&gt;();   // класс зарегистрирован «сам как себя»
+// запрос IOrderRepository → ошибка при попытке создать OrderService:
+// InvalidOperationException: Unable to resolve service for type
+// 'IOrderRepository' while attempting to activate 'OrderService'.</code></pre>
+    </div>
+    <p>«Но ведь <code>OrderRepository</code> реализует <code>IOrderRepository</code>, это же очевидно» — контейнер
+      так не рассуждает по двум причинам: <strong>у класса может быть несколько интерфейсов</strong>, а
+      <strong>у интерфейса — несколько реализаций</strong>. В обоих случаях «очевидного» ответа нет, его задаёте
+      вы — регистрацией.</p>
+
+    <h3>Случай 1: один класс — несколько интерфейсов</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class OrderService : IOrderService, IOrderValidator, IDisposable
+{ … }
+
+// регистрируем отдельно под каждый контракт, который будут просить
+builder.Services.AddScoped&lt;IOrderService, OrderService&gt;();
+builder.Services.AddScoped&lt;IOrderValidator, OrderService&gt;();   // ⚠ это ДВА разных экземпляра
+builder.Services.AddScoped&lt;IDisposable, OrderService&gt;();</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Если нужен один и тот же экземпляр под двумя интерфейсами</span>
+      <p>Обычная регистрация создаст <strong>два отдельных объекта</strong>. Чтобы отдать один, регистрируют класс и
+        затем ссылаются на него из фабрик:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">builder.Services.AddScoped&lt;OrderService&gt;();                     // сам класс
+builder.Services.AddScoped&lt;IOrderService&gt;(sp =&gt; sp.GetRequiredService&lt;OrderService&gt;());
+builder.Services.AddScoped&lt;IOrderValidator&gt;(sp =&gt; sp.GetRequiredService&lt;OrderService&gt;());</code></pre>
+      </div>
+    </div>
+
+    <h3>Случай 2: один интерфейс — несколько реализаций</h3>
+    <p>Это ровно то, ради чего существует стратегия (книга «Паттерны», глава 3). Два способа развести реализации:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// а) ключи (.NET 8+): на запрос с ключом — конкретная реализация
+builder.Services.AddKeyedScoped&lt;IPricingStrategy, RegularPricing&gt;(CustomerType.Regular);
+builder.Services.AddKeyedScoped&lt;IPricingStrategy, VipPricing&gt;(CustomerType.Vip);
+
+public sealed class OrderService([FromKeyedServices(CustomerType.Vip)] IPricingStrategy pricing) { … }
+// или вручную: sp.GetRequiredKeyedService&lt;IPricingStrategy&gt;(CustomerType.Vip)
+
+// б) без ключей: несколько регистраций одного интерфейса
+builder.Services.AddScoped&lt;IPricingStrategy, RegularPricing&gt;();
+builder.Services.AddScoped&lt;IPricingStrategy, VipPricing&gt;();
+
+// запрос ОДНОГО даст ПОСЛЕДНЮЮ регистрацию:
+var one = sp.GetRequiredService&lt;IPricingStrategy&gt;();        // VipPricing
+
+// запрос набора даст ВСЕ, в порядке регистрации:
+var all = sp.GetServices&lt;IPricingStrategy&gt;();               // [RegularPricing, VipPricing]</code></pre>
+    </div>
+    <p>Вариант «б» — это готовый механизм для цепочки обработчиков или цепочки проверок: получили все реализации и
+      прошли по ним (книга «Паттерны», глава 6).</p>
+
+    <h3>Случай 3: класс как сам себе сервис</h3>
+    <p>Один тип в регистрации — это законная форма: «на запрос <code>EfProductRepository</code> создай его же».
+      Нужна, когда интерфейса нет или когда класс требуется именно как класс (например, чтобы обернуть его
+      декоратором — книга «Паттерны», глава 5).</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddScoped&lt;EfProductRepository&gt;();
+
+// просят конкретный класс
+var repo = sp.GetRequiredService&lt;EfProductRepository&gt;();</code></pre>
+    </div>
+
+    <h3>Случай 4: фабричный делегат — когда нужна логика создания</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt;
+    new CachedProductRepository(                              // 1) что создать
+        sp.GetRequiredService&lt;EfProductRepository&gt;(),         // 2) кого обернуть
+        sp.GetRequiredService&lt;IMemoryCache&gt;()));              // 3) остальные зависимости
+
+// когда так делают: декораторы, выбор реализации по конфигурации,
+// значения, которые нельзя получить из конструктора</code></pre>
+    </div>
+
+    <h3>Случай 5: открытые дженерики</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddScoped(typeof(IRepository&lt;&gt;), typeof(Repository&lt;&gt;));
+
+// одна строка закрывает все типы: запрос IRepository&lt;Order&gt; → Repository&lt;Order&gt;</code></pre>
+    </div>
+
+    <h3>Случай 6: готовый экземпляр</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var settings = new JsonOptions { WriteIndented = false };
+builder.Services.AddSingleton(settings);        // отдаём именно этот объект, а не создаём новый</code></pre>
+    </div>
+
+    <h3>Случай 7: библиотеки и <code>TryAdd</code></h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Add — добавит ещё одну регистрацию (последняя выиграет для одиночного запроса)
+builder.Services.AddSingleton&lt;IClock, SystemClock&gt;();
+
+// TryAdd — только если такой сервис ещё НЕ зарегистрирован.
+// Так делают библиотеки, чтобы не перезаписывать выбор приложения.
+builder.Services.TryAddSingleton&lt;IClock, SystemClock&gt;();</code></pre>
+    </div>
+
+    <h3>Случай 8: один класс с разным временем жизни</h3>
+    <p>Технически можно зарегистрировать один класс несколько раз — под разные интерфейсы и с разными lifetime.
+      На практике это почти всегда ошибка: получаются <strong>разные экземпляры с разным временем жизни</strong>, и
+      данные между ними не совпадают. Если нужен один объект — регистрируйте его один раз и ссылайтесь на него
+      через фабрику (случай 1).</p>
+
+    <h3>Почему дженерики, а не <code>Type</code></h3>
+    <ul>
+      <li><strong>Проверка на этапе компиляции:</strong> <code>AddScoped&lt;IFoo, Foo&gt;()</code> не скомпилируется,
+        если <code>Foo</code> не реализует <code>IFoo</code>. С типами-аргументами такая ошибка всплыла бы только в
+        рантайме.</li>
+      <li><strong>Не нужно приводить типы</strong> и работать с <code>Type</code> вручную.</li>
+      <li><strong>Динамика остаётся доступной:</strong> для случаев, когда типы известны только в рантайме, есть
+        <code>Add(ServiceDescriptor)</code> и <code>AddScoped(typeof(IFoo), typeof(Foo))</code>.</li>
+    </ul>
+
+    <h3>Шпаргалка: что просят → что регистрировать</h3>
+    <table>
+      <thead><tr><th>Что стоит в конструкторе потребителя</th><th>Как регистрировать</th></tr></thead>
+      <tbody>
+        <tr><td><code>IOrderRepository</code></td><td><code>AddScoped&lt;IOrderRepository, OrderRepository&gt;()</code></td></tr>
+        <tr><td><code>OrderRepository</code> (конкретный класс)</td><td><code>AddScoped&lt;OrderRepository&gt;()</code></td></tr>
+        <tr><td><code>IPricingStrategy</code> с ключом</td><td><code>AddKeyedScoped&lt;IPricingStrategy, VipPricing&gt;(key)</code></td></tr>
+        <tr><td><code>IEnumerable&lt;IPricingStrategy&gt;</code> (все реализации)</td><td>несколько <code>AddScoped&lt;IPricingStrategy, X&gt;()</code></td></tr>
+        <tr><td><code>IRepository&lt;T&gt;</code> для любого <code>T</code></td><td><code>AddScoped(typeof(IRepository&lt;&gt;), typeof(Repository&lt;&gt;))</code></td></tr>
+        <tr><td>готовый объект (настройки, кэш)</td><td><code>AddSingleton(instance)</code></td></tr>
+      </tbody>
+    </table>
+    <p>Зачем вообще нужны интерфейсы в конструкторах — глава 14. Как выбирать время жизни и не ловить captive
+      dependency — дальше в этой главе.</p>
+
     <h2>Жизненные циклы</h2>
     <table>
       <thead><tr><th>Lifetime</th><th>Сколько живёт</th><th>Типичный пример</th></tr></thead>
