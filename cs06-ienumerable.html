@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 4 · IEnumerable, yield и IAsyncEnumerable</title>
+<title>Глава 6 · IEnumerable, yield и IAsyncEnumerable</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs05-class-modifiers.html">Далее →</a>
+  <a href="cs07-class-modifiers.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 4. IEnumerable, yield и IAsyncEnumerable</h1>
+    <h1>Глава 6. IEnumerable, yield и IAsyncEnumerable</h1>
     <p class="sublead">Что значит «по чему-то можно пройти в <code>foreach</code>», откуда берётся отложенное
       выполнение LINQ и зачем понадобился <code>IAsyncEnumerable</code>.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -35,7 +35,10 @@
         следующий), <code>Current</code> (текущий), <code>Dispose()</code> (освободить ресурсы).</li>
     </ul>
     <div class="codewrap">
-      <pre><code class="language-csharp">// то, что делает foreach, — примерно так:
+      <pre><code class="language-csharp">// orders — это ЛЮБОЙ IEnumerable<Order>: List<Order>, массив, результат LINQ
+IEnumerable&lt;Order&gt; orders = new List&lt;Order&gt; { new() { Id = 1 }, new() { Id = 2 } };
+
+// то, что делает foreach, — примерно так:
 IEnumerator&lt;Order&gt; e = orders.GetEnumerator();
 try
 {
@@ -50,6 +53,18 @@ finally
     e.Dispose();               // важно: освобождает ресурсы (файл, соединение, курсор БД)
 }</code></pre>
     </div>
+    <div class="box tip">
+      <span class="t">Кто здесь кто</span>
+      <ul>
+        <li><code>orders</code> — <strong><code>IEnumerable&lt;Order&gt;</code></strong>: это «источник», у него есть
+          метод <code>GetEnumerator()</code>.</li>
+        <li><code>e</code> — <strong><code>IEnumerator&lt;Order&gt;</code></strong>: это «курсор», у него есть
+          <code>MoveNext()</code> и <code>Current</code>.</li>
+        <li>Один источник создаёт сколько угодно курсоров: поэтому по одному и тому же <code>IEnumerable</code>
+          можно пройти несколько раз — каждый раз с новым <code>GetEnumerator()</code>.</li>
+      </ul>
+    </div>
+
     <div class="box tip">
       <span class="t">Зачем <code>Dispose</code> в перечислении</span>
       <p>Источником может быть не массив, а файл или результат запроса к БД: у него есть ресурсы. Поэтому
@@ -101,9 +116,11 @@ foreach (var n in query) { }                // вот теперь пошли п
 
     <h2>Ещё три бытовые ловушки</h2>
     <ul>
-      <li><strong><code>Count()</code> против <code>Any()</code>.</strong> «Есть ли хоть один элемент?» — это
-        <code>Any()</code>: он останавливается на первом. <code>Count() &gt; 0</code> может перечислить всё
-        (у <code>ICollection&lt;T&gt;</code> — нет, у него есть свойство <code>Count</code>).</li>
+      <li><strong><code>Count()</code> против <code>Any()</code>.</strong> Вопрос «есть ли хоть один элемент?» —
+        это <code>Any()</code>: он останавливается на первом же. <code>Count() &gt; 0</code> на «чистом»
+        <code>IEnumerable&lt;T&gt;</code> вынужден пройти <strong>все</strong> элементы, чтобы их посчитать.
+        Исключение — если коллекция реализует <code>ICollection&lt;T&gt;</code>: у неё есть <strong>свойство</strong>
+        <code>Count</code> (не метод), и оно возвращает число мгновенно.</li>
       <li><strong>Изменение коллекции во время перечисления</strong> — <code>InvalidOperationException</code>.
         Нужно менять — сначала соберите список изменений, потом применяйте.</li>
       <li><strong><code>using</code> внутри итератора:</strong> ресурс освободится, когда вызывающий вызовет
@@ -196,8 +213,8 @@ IAsyncEnumerable&lt;OrderRow&gt; StreamAsync(CancellationToken ct);</code></pre>
     </div>
 
     <div class="pager">
-      <a href="cs03-collections.html">← <span class="sp">Глава 3. Коллекции: generic против non-generic</span></a>
-      <a href="cs05-class-modifiers.html"><span class="sp">Глава 5. Модификаторы типов: sealed, abstract, static, record</span> →</a>
+      <a href="cs05-collections.html">← <span class="sp">Глава 5. Коллекции: generic против non-generic</span></a>
+      <a href="cs07-class-modifiers.html"><span class="sp">Глава 7. Модификаторы типов: sealed, abstract, static, record</span> →</a>
     </div>
   </div>
 </div>

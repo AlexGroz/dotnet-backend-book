@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · struct: что это и когда применять</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs04-ref-struct-span.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть I · Как устроена память</div>
+    <h1>Глава 3. struct: что это и когда применять</h1>
+    <p class="sublead">Целый тип, объявленный одним словом <code>struct</code>: что в нём можно хранить, чем он
+      отличается от класса и почему с ним так легко выстрелить себе в ногу.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что такое struct</h2>
+    <p><strong><code>struct</code> — это способ объявить свой значимый тип.</strong> Переменная такого типа хранит
+      <em>само значение</em>, а не ссылку на объект в куче. Скопировали переменную — скопировалось значение.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public struct Point        // значимый тип
+{
+    public int X;
+    public int Y;
+}
+
+var a = new Point { X = 1, Y = 2 };
+var b = a;                 // копия значения
+b.X = 99;
+
+Console.WriteLine(a.X);    // 1 — оригинал не изменился
+Console.WriteLine(b.X);    // 99</code></pre>
+    </div>
+    <p>Встроенные значимые типы — это тоже структуры: <code>int</code> (<code>System.Int32</code>),
+      <code>double</code>, <code>bool</code>, <code>DateTime</code>, <code>Guid</code>. То есть «struct» — не
+      экзотика, а способ сделать <em>свой</em> такой тип.</p>
+    <div class="box tip">
+      <span class="t">Три следствия, которые надо принять сразу</span>
+      <ul>
+        <li><strong>Копирование.</strong> Присваивание, передача в метод и возврат копируют всё значение.</li>
+        <li><strong>Нет <code>null</code>.</strong> Переменная struct всегда существует. «Пустое» состояние — это
+          <code>default</code> (все поля = 0/<code>null</code>).</li>
+        <li><strong>Нет наследования.</strong> От struct нельзя наследоваться, и он не может наследовать класс.</li>
+      </ul>
+    </div>
+
+    <h2>Что можно и что нельзя объявить внутри</h2>
+    <table>
+      <thead><tr><th>Можно</th><th>Нельзя</th></tr></thead>
+      <tbody>
+        <tr><td>Поля <strong>любых типов</strong>: значимые <em>и ссылочные</em> (<code>string</code>, классы, массивы)</td><td>Наследоваться от класса или другого struct</td></tr>
+        <tr><td>Методы, свойства, индексаторы, события</td><td>Объявлять <code>virtual</code>, <code>abstract</code>, <code>protected</code></td></tr>
+        <tr><td>Конструкторы (в том числе без параметров, C# 10+)</td><td>Финализатор (деструктор)</td></tr>
+        <tr><td>Реализацию интерфейсов</td><td>Иметь «нулевую» ссылку (<code>null</code>) — только через <code>Point?</code></td></tr>
+        <tr><td>Вложенные типы, константы</td><td>Наследовать поля — struct всегда «плоский» набор полей</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public struct Money : IEquatable&lt;Money&gt;     // интерфейсы — можно
+{
+    public long Kopeks { get; }                // свойство
+    public string Currency { get; }            // ССЫЛОЧНОЕ поле — можно!
+
+    public Money(long kopeks, string currency) // конструктор
+    {
+        Kopeks = kopeks;
+        Currency = currency;
+    }
+
+    public Money Add(Money other) =&gt;          // метод
+        new(Kopeks + other.Kopeks, Currency);
+
+    public bool Equals(Money other) =&gt; Kopeks == other.Kopeks &amp;&amp; Currency == other.Currency;
+    public override bool Equals(object? obj) =&gt; obj is Money m &amp;&amp; Equals(m);
+    public override int GetHashCode() =&gt; HashCode.Combine(Kopeks, Currency);
+}</code></pre>
+    </div>
+    <p>Да, внутри struct могут быть <strong>методы</strong> и <strong>ссылочные поля</strong> — это обычный тип, просто
+      со «значимой» семантикой. Именно поэтому вопрос «структура или класс» — не про «есть ли методы», а про то,
+      <em>как тип должен вести себя при копировании</em>.</p>
+
+    <h2>Копирование: что именно копируется</h2>
+    <p>Копируется <strong>всё значение целиком</strong>: поля значимых типов — по значению, поля ссылочных — как
+      ссылка. Второе — самый частый источник ошибок.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Customer { public string Name = ""; }
+
+public struct OrderInfo
+{
+    public int Id;                 // значимое поле
+    public Customer Customer;      // ссылочное поле
+}
+
+var customer = new Customer { Name = "Алексей" };
+var a = new OrderInfo { Id = 1, Customer = customer };
+
+var b = a;                         // копия структуры
+
+b.Id = 99;                         // a.Id остаётся 1 — значения независимы
+b.Customer.Name = "Иван";          // a.Customer.Name ТОЖЕ стало "Иван"!
+
+// потому что скопировалась ссылка, а объект Customer — один и тот же</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Поле</th><th>Что происходит при копировании</th><th>Результат</th></tr></thead>
+      <tbody>
+        <tr><td><code>int Id</code></td><td>Копируется значение</td><td>Изменение копии не влияет на оригинал</td></tr>
+        <tr><td><code>Customer Customer</code></td><td>Копируется <strong>ссылка</strong></td><td>Оба struct смотрят на один объект</td></tr>
+        <tr><td><code>string Name</code></td><td>Копируется ссылка (строка неизменяема)</td><td>Безопасно: «изменить» строку нельзя</td></tr>
+        <tr><td><code>Point Point</code> (вложенный struct)</td><td>Копируется значение целиком</td><td>Полностью независимая копия</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Struct — это не «глубокая копия»</span>
+      <p>Если внутри структуры лежит ссылка на изменяемый объект, копия структуры <strong>не</strong> копирует этот
+        объект. Нужна настоящая независимость — придётся реализовать копирование вручную (и лучше не проектировать
+        структуру с изменяемыми ссылочными полями вовсе).</p>
+    </div>
+
+    <h2>Изменяемость и «ловушка копии»</h2>
+    <p>Метод структуры может менять её поля — и это работает, пока вы вызываете его на <em>переменной</em>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public struct Counter
+{
+    public int Value;
+    public void Inc() =&gt; Value++;      // меняет поле ЭТОГО значения
+}
+
+var c = new Counter();
+c.Inc();
+Console.WriteLine(c.Value);            // 1 — всё ожидаемо
+
+// а теперь та же структура внутри класса:
+public sealed class Holder { public Counter C { get; set; } }
+
+var h = new Holder();
+h.C.Inc();                             // ⚠ вызов на КОПИИ, которую вернуло свойство
+Console.WriteLine(h.C.Value);          // 0 — изменение потеряно, без единой ошибки компиляции</code></pre>
+    </div>
+    <p>Свойство возвращает <em>копию</em> значения. Метод меняет копию — и она выбрасывается. Такие ошибки не
+      ловятся компилятором в момент вызова метода, поэтому изменяемые структуры считаются плохой практикой.</p>
+    <div class="box tip">
+      <span class="t">Правило, которое снимает половину проблем</span>
+      <p>Объявляйте структуры <strong><code>readonly struct</code></strong>, а методы делайте возвращающими
+        <em>новое</em> значение:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public readonly struct Point
+{
+    public int X { get; }
+    public int Y { get; }
+
+    public Point(int x, int y) { X = x; Y = y; }
+
+    public Point Move(int dx, int dy) =&gt; new(X + dx, Y + dy);   // новое значение
+}
+
+var p = new Point(1, 2);
+p = p.Move(1, 1);        // явно присваиваем результат — «ловушки копии» нет</code></pre>
+      </div>
+    </div>
+
+    <h2><code>in</code>: что было бы без него</h2>
+    <p>Параметр-структура по умолчанию <strong>копируется при каждом вызове</strong>. Для <code>int</code> это
+      незаметно, для структуры из десяти полей — уже нет.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// без in: p — копия, метод не может испортить оригинал, но копирует всё значение
+static double Length(Point p) =&gt; Math.Sqrt(p.X * p.X + p.Y * p.Y);
+
+// с in: p передаётся по ссылке, но менять его компилятор запрещает
+static double Length(in Point p) =&gt; Math.Sqrt(p.X * p.X + p.Y * p.Y);</code></pre>
+    </div>
+    <ul>
+      <li><strong>Без <code>in</code></strong> — копия (безопасно, но для больших структур дорого).</li>
+      <li><strong>С <code>in</code></strong> — ссылка только для чтения: копии нет, изменить нельзя.</li>
+      <li><strong>Для маленьких типов</strong> (<code>int</code>, <code>Guid</code>, <code>Point</code> из двух
+        <code>int</code>) выгоды нет: копия стоит столько же, сколько ссылка.</li>
+      <li><strong>Важно:</strong> если метод структуры не помечен <code>readonly</code>, компилятор может сделать
+        <em>защитную копию</em> даже при <code>in</code> — и выгода исчезает. Поэтому <code>in</code> имеет смысл
+        вместе с <code>readonly struct</code>.</li>
+    </ul>
+
+
+    <h2>Равенство: почему «по умолчанию» дорого</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var p1 = new Point(1, 2);
+var p2 = new Point(1, 2);
+
+// Console.WriteLine(p1 == p2);      // ✘ для своего struct оператор == не определён
+Console.WriteLine(p1.Equals(p2));    // True — но работает через Equals(object)</code></pre>
+    </div>
+    <p>Что происходит за кулисами <code>p1.Equals(p2)</code>:</p>
+    <ol>
+      <li>значение <code>p1</code> <strong>упаковывается</strong> в <code>object</code> (аллокация в куче);</li>
+      <li><code>ValueType.Equals</code> сравнивает поля <strong>через рефлексию</strong>.</li>
+    </ol>
+    <p>Поэтому в <code>HashSet&lt;Point&gt;</code>, <code>Dictionary&lt;Point, …&gt;</code> и
+      <code>List.Contains</code> структура без <code>IEquatable&lt;T&gt;</code> работает заметно медленнее
+      ожидаемого.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public readonly struct Money : IEquatable&lt;Money&gt;
+{
+    public long Kopeks { get; }
+    public Money(long kopeks) =&gt; Kopeks = kopeks;
+
+    public bool Equals(Money other) =&gt; Kopeks == other.Kopeks;      // без бокса, по значению
+    public override bool Equals(object? obj) =&gt; obj is Money m &amp;&amp; Equals(m);
+    public override int GetHashCode() =&gt; Kopeks.GetHashCode();
+
+    public static bool operator ==(Money a, Money b) =&gt; a.Equals(b);
+    public static bool operator !=(Money a, Money b) =&gt; !a.Equals(b);
+}</code></pre>
+    </div>
+    <p>Реализовав <code>IEquatable&lt;T&gt;</code>, вы получаете быстрое сравнение, нормальную работу в коллекциях и
+      возможность определить <code>==</code>.</p>
+
+    <h2>Бокс: когда значение всё-таки уезжает в кучу</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var p = new Point(1, 2);
+
+object boxed = p;          // ✘ аллокация в куче + копия значения
+IComparable c = p;         // ✘ то же, если у типа нет generic-интерфейса
+
+var list = new List&lt;Point&gt;();   // ✔ generic-коллекция: значения как значения
+list.Add(p);</code></pre>
+    </div>
+    <p>Бокс «невидим» там, где API ждёт <code>object</code>: не-generic коллекции, старый <code>string.Format</code>,
+      сравнение через <code>Equals(object)</code>. Лечится generic-типами и <code>IEquatable&lt;T&gt;</code>
+      (глава 5).</p>
+
+    <h2>Отличия от класса</h2>
+    <table>
+      <thead><tr><th></th><th><code>struct</code></th><th><code>class</code></th></tr></thead>
+      <tbody>
+        <tr><td>Что хранит переменная</td><td>Само значение</td><td>Ссылку на объект в куче</td></tr>
+        <tr><td>Присваивание</td><td>Копирует значение</td><td>Копирует ссылку (тот же объект)</td></tr>
+        <tr><td>Может быть <code>null</code></td><td>Нет (только <code>Point?</code>)</td><td>Да</td></tr>
+        <tr><td>Наследование</td><td>Нет</td><td>Да</td></tr>
+        <tr><td><code>virtual</code>/<code>abstract</code></td><td>Нет</td><td>Да</td></tr>
+        <tr><td>Равенство по умолчанию</td><td>По полям (медленно, через рефлексию)</td><td>По ссылке</td></tr>
+        <tr><td>Накладные расходы</td><td>Без заголовка объекта (если не упаковано)</td><td>Заголовок + выравнивание (~24 байта минимум)</td></tr>
+        <tr><td>Типичное применение</td><td>«Значение»: деньги, точка, диапазон, дата</td><td>«Сущность»: заказ, клиент, сервис</td></tr>
+      </tbody>
+    </table>
+
+
+    <h2>Когда struct, когда class</h2>
+    <table>
+      <thead><tr><th>Критерий</th><th>Выбирайте struct</th><th>Выбирайте class</th></tr></thead>
+      <tbody>
+        <tr><td>Размер</td><td>Маленький: ориентир — до ~16–24 байт</td><td>Любой</td></tr>
+        <tr><td>Смысл</td><td>Одно «значение» без идентичности</td><td>Объект с идентичностью и поведением</td></tr>
+        <tr><td>Изменяемость</td><td>Неизменяемый (<code>readonly struct</code>)</td><td>Обычно изменяемый</td></tr>
+        <tr><td>Наследование</td><td>Не нужно</td><td>Нужно</td></tr>
+        <tr><td>Количество</td><td>Много короткоживущих экземпляров (массивы, циклы)</td><td>Немного долгоживущих объектов</td></tr>
+        <tr><td>Примеры</td><td><code>DateTime</code>, <code>Guid</code>, <code>Money</code>, <code>Range</code></td><td><code>Order</code>, <code>Customer</code>, <code>DbContext</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Частая ошибка: «сделаю struct, будет быстрее»</span>
+      <p>Для сущности с десятком полей и изменяемым состоянием структура делает <em>хуже</em>: каждое присваивание
+        копирует всё значение, а изменение через свойство теряется. Struct — это про
+        <strong>семантику значения</strong>, а не про «оптимизацию на всякий случай».</p>
+    </div>
+    <p>Особый подвид — <strong><code>ref struct</code></strong> (например, <code>Span&lt;T&gt;</code>): такие типы
+      принципиально живут только на стеке. Это отдельная тема — глава 4.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>struct</code> — <strong>значимый тип</strong>: переменная хранит значение, присваивание копирует.</li>
+        <li>Внутри можно объявлять <strong>методы, свойства, интерфейсы и ссылочные поля</strong>; нельзя —
+          наследование, <code>virtual</code>/<code>abstract</code>, финализатор.</li>
+        <li>Копия структуры <strong>не глубокая</strong>: ссылочные поля указывают на тот же объект.</li>
+        <li>Изменяемые структуры опасны: метод, вызванный на копии (например, через свойство), меняет копию.</li>
+        <li><code>readonly struct</code> + <code>IEquatable&lt;T&gt;</code> убирают защитные копии, бокс и медленное
+          сравнение.</li>
+        <li><code>in</code> — про отсутствие копии при передаче; для маленьких типов смысла нет.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs02-strings.html">← <span class="sp">Глава 2. Строки: неизменяемость, пул строк и StringBuilder</span></a>
+      <a href="cs04-ref-struct-span.html"><span class="sp">Глава 4. ref struct и Span: окно в память</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

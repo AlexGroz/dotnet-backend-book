@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 6 · Task.Run: когда нужен и когда вредит</title>
+<title>Глава 8 · Task.Run: когда нужен и когда вредит</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -18,7 +18,7 @@
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть III · Типы и асинхронность</div>
-    <h1>Глава 6. Task.Run: когда нужен и когда вредит</h1>
+    <h1>Глава 8. Task.Run: когда нужен и когда вредит</h1>
     <p class="sublead">«Обернуть в <code>Task.Run</code>, чтобы стало асинхронно» — самый частый способ сделать
       хуже. Разберём, что именно делает этот метод и где его место.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -67,6 +67,26 @@ public async Task&lt;Order&gt; GetAsync(Guid id, CancellationToken ct)
       <pre><code class="language-csharp">// ✔ никакого лишнего потока: ждём ввод-вывод асинхронно
 public Task&lt;Order&gt; GetAsync(Guid id, CancellationToken ct) =&gt;
     _db.Orders.FirstAsync(o =&gt; o.Id == id, ct);</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Где здесь <code>async</code> и <code>await</code>?</span>
+      <p>Их нет — и не нужно. <strong>Асинхронность создаёт сам источник</strong>: <code>FirstAsync</code>
+        возвращает <code>Task&lt;Order&gt;</code>, внутри которого уже работает асинхронный ввод-вывод. Наш метод
+        просто возвращает эту задачу дальше, ничего не дожидаясь.</p>
+      <p><code>async</code>/<code>await</code> нужны, когда после ожидания надо <strong>что-то сделать</strong>:</p>
+      <div class="codewrap">
+        <pre><code class="language-text">// без async: «верни задачу как есть»
+public Task&lt;Order&gt; GetAsync(...) =&gt; _db.Orders.FirstAsync(...);
+
+// с async/await: «дождись, потом обработай результат»
+public async Task&lt;decimal&gt; GetTotalAsync(Guid id, CancellationToken ct)
+{
+    var order = await _db.Orders.FirstAsync(o =&gt; o.Id == id, ct);  // ← вот здесь await
+    return order.Total * 1.2m;                                     // и работа с результатом
+}</code></pre>
+      </div>
+      <p>Проверка: если метод только возвращает результат другого асинхронного вызова, <code>async</code>/<code>await</code>
+        можно убрать — меньше машины состояний и накладных расходов.</p>
     </div>
 
     <h2>Где <code>Task.Run</code> действительно нужен</h2>
@@ -130,6 +150,19 @@ public async Task SendAsync(CancellationToken ct) =&gt; await _client.PostAsync(
     return acc;
 }, ct);</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">Откуда здесь <code>chunks</code></span>
+      <p><code>chunks</code> — обычная локальная переменная: список частей, на которые заранее разбили данные.
+        Например, так:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">// миллион записей разбили на пачки по 1000 — меньше пиков по памяти
+List&lt;Order[]&gt; chunks = allOrders.Chunk(1000).ToList();
+
+var results = await Task.Run(() =&gt; { /* … foreach (var chunk in chunks) … */ }, ct);</code></pre>
+      </div>
+      <p>Смысл примера: тяжёлая обработка <strong>каждой пачки</strong> уходит в пул потоков, а
+        <code>CancellationToken</code> проверяется между пачками — чтобы отмена срабатывала быстро.</p>
+    </div>
 
     <h2>Пример: CPU-bound работа с ограничением параллелизма</h2>
     <p>Если таких задач много, нельзя запускать их «все сразу»: пул потоков будет перегружен. Ограничивают
@@ -163,7 +196,7 @@ await Parallel.ForEachAsync(
     </div>
 
     <div class="pager">
-      <a href="cs05-class-modifiers.html">← <span class="sp">Глава 5. Модификаторы типов: sealed, abstract, static, record</span></a>
+      <a href="cs07-class-modifiers.html">← <span class="sp">Глава 7. Модификаторы типов: sealed, abstract, static, record</span></a>
       <a href="csharp.html"><span class="sp">Оглавление</span> →</a>
     </div>
   </div>

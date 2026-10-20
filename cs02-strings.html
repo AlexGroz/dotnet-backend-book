@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 1 · Строки: почему это куча, а не стек</title>
+<title>Глава 2 · Строки: неизменяемость, пул строк и StringBuilder</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,14 +13,16 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs02-value-types-memory.html">Далее →</a>
+  <a href="cs03-struct.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
-    <div class="part">C# · Часть I · Данные и память</div>
-    <h1>Глава 1. Строки: почему это куча, а не стек</h1>
+    <div class="part">C# · Часть I · Как устроена память</div>
+    <h1>Глава 2. Строки: неизменяемость, пул строк и StringBuilder</h1>
     <p class="sublead">Самое частое заблуждение: «string лежит в стеке, поэтому он быстрый». Разберём, где на
-      самом деле живёт строка, при чём тут <code>StringBuilder</code> и когда он действительно нужен.</p>
+      самом деле живёт строка (карта памяти — глава 1), что такое пул строк, как читать
+      <code>new string('А', 7)</code> и <code>$"{a} {b}"</code> — и когда действительно нужен
+      <code>StringBuilder</code>.</p>
     <p><span class="tag lead">подводящая глава</span></p>
 
     <h2>Строка — ссылочный тип</h2>
@@ -101,6 +103,29 @@ Console.WriteLine(ReferenceEquals(a, d));    // True</code></pre>
         <em>удерживает</em> их до конца жизни процесса: злоупотребление — это утечка.</li>
     </ul>
 
+    <div class="box note">
+      <span class="t">Где лежит пул строк</span>
+      <p>Пул — это <strong>таблица ссылок внутри рантайма</strong>, а не отдельная область памяти. Сами объекты
+        строк лежат в обычной управляемой куче, а пул держит на них ссылки — поэтому сборщик мусора их не удаляет.
+        Подробнее с картинкой — глава 1.</p>
+    </div>
+
+    <h3>Что означает <code>new string('А', 7)</code></h3>
+    <p>Это конструктор <code>String(Char, Int32)</code>: «сделай строку из символа <code>'А'</code>, повторённого
+      <strong>7 раз</strong>». Второе число — <em>количество повторений</em>, а не индекс и не длина в байтах.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string c = new string('А', 7);        // "ААААААА" — 7 символов
+Console.WriteLine(c.Length);          // 7
+
+// другие конструкторы, которые встречаются на практике
+new string(new[] { 'h', 'i' });       // "hi" — из массива символов
+new string('*', 20);                  // "********************" — разделитель в логе
+string.Create(5, 0, (span, _) =&gt; span.Fill('x'));   // "xxxxx" — без промежуточных строк</code></pre>
+    </div>
+    <p>Результат такого конструктора — <strong>новая строка в куче</strong>, и она <em>не</em> попадает в пул
+      автоматически (в отличие от литерала). Поэтому <code>ReferenceEquals</code> с литералом даёт
+      <code>false</code>.</p>
+
     <h2>Интерполяция, форматирование и склейка</h2>
     <table>
       <thead><tr><th>Способ</th><th>Что происходит</th><th>Когда использовать</th></tr></thead>
@@ -112,6 +137,30 @@ Console.WriteLine(ReferenceEquals(a, d));    // True</code></pre>
         <tr><td><code>string.Join</code></td><td>Одна аллокация на результат</td><td>Склейка коллекции частей</td></tr>
       </tbody>
     </table>
+    <h3>Как читать <code>$"{a} {b}"</code></h3>
+    <p>Знак <code>$</code> перед кавычками включает <strong>интерполяцию</strong>: внутри строки можно писать
+      выражения в фигурных скобках, и они подставятся в текст.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">int count = 3;
+string name = "Алексей";
+
+string s1 = $"{name}: {count} заказа";          // "Алексей: 3 заказа"
+string s2 = $"Итого: {count * 100:N0} ₽";       // "Итого: 300 ₽" (формат N0 — без копеек)
+string s3 = $"{name,10}|";                      // выравнивание по ширине 10
+string s4 = $"{DateTime.UtcNow:yyyy-MM-dd}";    // формат даты после двоеточия</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>{выражение}</code></strong> — подставить значение (можно любое выражение, не только
+        переменную);</li>
+      <li><strong><code>{значение,ширина}</code></strong> — выровнять по ширине (плюс — вправо, минус — влево);</li>
+      <li><strong><code>{значение:формат}</code></strong> — применить формат: <code>N0</code>,
+        <code>yyyy-MM-dd</code>, <code>F2</code>;</li>
+      <li><strong><code>{{</code> и <code>}}</code></strong> — чтобы вывести сами фигурные скобки.</li>
+    </ul>
+    <p>Раньше компилятор превращал такую строку в <code>string.Format</code> с промежуточными объектами. Начиная
+      с C# 10 используется <em>интерполяционный обработчик строк</em>, и во многих случаях результат собирается
+      <strong>без лишних промежуточных строк</strong>.</p>
+
     <div class="box warn">
       <span class="t">Когда <code>StringBuilder</code> не нужен</span>
       <p>Он создаёт объект и держит буфер. Если частей две-три — конкатенация или интерполяция проще и не
@@ -122,7 +171,7 @@ Console.WriteLine(ReferenceEquals(a, d));    // True</code></pre>
 
     <h2>Сравнение строк: не всё равно, как сравнивать</h2>
     <div class="codewrap">
-      <pre><code class="language-csharp">// ✘ временная строка на каждое сравнение + культура по умолчанию
+      <pre><code class="language-csharp">// ✘ новая строка на КАЖДОЕ сравнение + зависимость от культуры
 if (email.ToLower() == "admin@example.com") { }
 
 // ✔ без аллокации и с явным правилом сравнения
@@ -139,6 +188,26 @@ if (path.StartsWith("/api/", StringComparison.Ordinal)) { }</code></pre>
         культурные сравнения — только для пользовательского текста и сортировки.</li>
     </ul>
 
+    <div class="box warn">
+      <span class="t">Почему «строка на каждое сравнение» — и как это выглядит</span>
+      <p><code>ToLower()</code> ничего не меняет на месте (строка неизменяема): он <strong>создаёт новый
+        объект</strong> в куче. В цикле по 10 000 адресов получится 10 000 временных строк — и все они станут
+        мусором.</p>
+      <div class="codewrap">
+        <pre><code class="language-text">email = "Admin@Example.com"
+   │
+   ├─ ToLower()  →  в куче создан НОВЫЙ объект "admin@example.com"
+   ├─ сравнение с литералом → true
+   └─ временная строка больше не нужна → мусор для GC
+
+string.Equals(email, "admin@example.com", StringComparison.OrdinalIgnoreCase)
+   └─ сравнение «на месте»: новых строк нет, регистр учитывается в момент сравнения</code></pre>
+      </div>
+      <p>Второй нюанс: <code>ToLower()</code> без аргумента зависит от <strong>текущей культуры</strong>, поэтому
+        на разных машинах результат может отличаться (классический пример — турецкая «i»).
+        <code>OrdinalIgnoreCase</code> сравнивает предсказуемо и быстрее.</p>
+    </div>
+
     <h2>Строка без копий: <code>Span</code></h2>
     <p><code>Substring</code> создаёт новую строку. Если часть нужно только <em>прочитать</em> — берут «окно»
       без аллокации (подробнее — глава 7 .NET-раздела):</p>
@@ -149,6 +218,26 @@ string part = line.Substring(0, 2);             // новая строка
 ReadOnlySpan&lt;char&gt; window = line.AsSpan(0, 2);   // окно, без аллокации
 
 int value = int.Parse(window);                   // парсинг прямо из окна</code></pre>
+    </div>
+
+    <div class="box tip">
+      <span class="t">Как «окно» может ничего не хранить?</span>
+      <p><code>Span&lt;T&gt;</code> — это <strong>маленькая структура из двух чисел</strong>: ссылка на начало данных
+        и длина. Символы она <em>не копирует</em> — они остаются в исходной строке.</p>
+      <div class="codewrap">
+        <pre><code class="language-text">line: "10,20,30"    (объект строки в куче)
+       ▲
+       │ window = line.AsSpan(0, 2)
+       │
+       └── ┌───────────────────────┐
+           │ ссылка на начало: 0   │  ← сам Span лежит на стеке,
+           │ длина: 2              │     это 16 байт
+           └───────────────────────┘
+      новых символов в куче НЕ появилось</code></pre>
+      </div>
+      <p>Отсюда и ограничения: <code>Span</code> живёт только на стеке — его нельзя положить в поле класса или
+        «пережить» им <code>await</code>, иначе окно осталось бы, когда данных уже нет. Подробно и с примерами —
+        глава 4.</p>
     </div>
 
     <div class="box gold">
@@ -166,8 +255,8 @@ int value = int.Parse(window);                   // парсинг прямо и
     </div>
 
     <div class="pager">
-      <a href="csharp.html">← <span class="sp">Оглавление</span></a>
-      <a href="cs02-value-types-memory.html"><span class="sp">Глава 2. Где живут значения: struct, стек, куча и бокс</span> →</a>
+      <a href="cs01-memory-map.html">← <span class="sp">Глава 1. Стек, куча и статическая память: карта</span></a>
+      <a href="cs03-struct.html"><span class="sp">Глава 3. struct: что это и когда применять</span> →</a>
     </div>
   </div>
 </div>

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · ref struct и Span: окно в память без аллокаций</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs05-collections.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть I · Как устроена память</div>
+    <h1>Глава 4. ref struct и Span: окно в память без аллокаций</h1>
+    <p class="sublead">Как смотреть на часть строки или массива, ничего не копируя, — и почему такие типы
+      принципиально не могут попасть в кучу.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Проблема: «прочитать часть» обычно значит «скопировать»</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string line = "10,20,30";
+
+string[] parts = line.Split(',');     // массив + три новые строки
+string first = line.Substring(0, 2);  // ещё одна новая строка
+
+ReadOnlySpan&lt;char&gt; window = line.AsSpan(0, 2);   // окно — без новых строк</code></pre>
+    </div>
+    <p>В первых двух строках появились <strong>новые объекты в куче</strong> (глава 1), которые потом станут мусором
+      для GC. Третья строка создаёт только «окно» — и в этом весь смысл <code>Span</code>.</p>
+
+    <h2>Что такое Span</h2>
+    <p><code>Span&lt;T&gt;</code> — это <strong>ссылка на участок памяти + длина</strong>. Он не владеет данными и
+      не копирует их: он <em>указывает</em> на уже существующие символы или элементы.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">строка в куче:   " 1 0 , 2 0 , 3 0 "
+                   ▲
+                   │  line.AsSpan(0, 2)
+                   │
+                   └─ Span (лежит на стеке, ~16 байт)
+                      ┌──────────────────────────┐
+                      │ ссылка: на символ «1»     │
+                      │ длина: 2                  │
+                      └──────────────────────────┘
+
+новых символов в куче нет — есть только два числа на стеке</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>ReadOnlySpan&lt;char&gt;</code></strong> — окно только для чтения; именно его возвращает
+        <code>string.AsSpan()</code>.</li>
+      <li><strong><code>Span&lt;T&gt;</code></strong> — окно, через которое можно и менять данные (для массивов и
+        <code>stackalloc</code>).</li>
+      <li><strong>Слайсинг</strong> (<code>span.Slice(начало, длина)</code>) тоже не копирует — создаёт новое окно
+        внутри того же участка.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string line = "10,20,30";
+ReadOnlySpan&lt;char&gt; all = line.AsSpan();          // всё окно
+
+ReadOnlySpan&lt;char&gt; first = all.Slice(0, 2);      // "10" — без копии
+ReadOnlySpan&lt;char&gt; tail  = all.Slice(3);         // "20,30" — без копии
+
+int value = int.Parse(first);                    // парсинг прямо из окна
+Console.WriteLine(value + 1);                    // 11</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Почему это быстрее</span>
+      <p>Обычный путь: <code>Substring</code> → новая строка в куче → мусор → работа GC. Путь со
+        <code>Span</code>: два числа на стеке → работа с теми же символами. На одном вызове разница
+        незаметна; на разборе миллиона строк — это разница в разы.</p>
+    </div>
+
+    <h2>Пример: разбор строки без единой аллокации</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// считает непустые поля в CSV-строке, ничего не копируя
+static int CountNotEmpty(ReadOnlySpan&lt;char&gt; line)
+{
+    int count = 0;
+
+    while (!line.IsEmpty)
+    {
+        int comma = line.IndexOf(',');
+        ReadOnlySpan&lt;char&gt; field = comma &lt; 0 ? line : line.Slice(0, comma);
+
+        if (!field.IsWhiteSpace())
+            count++;
+
+        if (comma &lt; 0)
+            break;
+
+        line = line.Slice(comma + 1);     // сдвигаем окно, а не строку
+    }
+
+    return count;
+}
+
+string csv = "10, ,30,";      // три поля с данными + пустое
+Console.WriteLine(CountNotEmpty(csv));   // 2</code></pre>
+    </div>
+    <ul>
+      <li><code>IndexOf</code> и <code>Slice</code> не создают объектов — только меняют «окно».</li>
+      <li><code>field</code> — это тоже окно внутри исходной строки, а не копия.</li>
+      <li>На входе <code>string</code> превращается в <code>ReadOnlySpan&lt;char&gt;</code> одним вызовом
+        <code>AsSpan()</code>.</li>
+    </ul>
+
+    <h2><code>stackalloc</code>: буфер на стеке</h2>
+    <p>Если нужен временный массив, его можно вообще не выделять в куче:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Span&lt;int&gt; buffer = stackalloc int[64];        // память на стеке, GC не участвует
+for (int i = 0; i &lt; buffer.Length; i++)
+    buffer[i] = i;
+
+// временный буфер символов для форматирования числа
+Span&lt;char&gt; chars = stackalloc char[8];
+if (123.TryFormat(chars, out int written))
+    Console.WriteLine(new string(chars[..written]));   // "123"</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Осторожно: стек конечен</span>
+      <p>Стек потока ~1 МБ. <code>stackalloc</code> на десятки килобайт — путь к
+        <code>StackOverflowException</code>, который нельзя перехватить. Правило: <strong>небольшой фиксированный
+        размер</strong> (десятки-сотни байт), и только на горячем пути.</p>
+    </div>
+
+    <h2>Почему <code>Span</code> — <code>ref struct</code></h2>
+    <p><code>Span&lt;T&gt;</code> и <code>ReadOnlySpan&lt;T&gt;</code> объявлены как <code>ref struct</code>. Это
+      означает: <strong>такой тип может жить только на стеке</strong>. Компилятор запрещает всё, что могло бы
+      «утащить» его в кучу.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ поле класса — окно переживёт данные
+public sealed class Parser
+{
+    private ReadOnlySpan&lt;char&gt; _line;     // CS8345: нельзя
+}
+
+// ✘ в коллекции или массиве
+var list = new List&lt;ReadOnlySpan&lt;char&gt;&gt;();   // CS0306: нельзя использовать как аргумент типа
+
+// ✘ в async-методе: окно «переживёт» await
+async Task&lt;int&gt; CountAsync(ReadOnlySpan&lt;char&gt; line)   // ошибка компиляции
+{
+    await Task.Delay(1);
+    return line.Length;
+}
+
+// ✘ захват в лямбду
+Func&lt;int&gt; f = () =&gt; line.Length;            // ошибка компиляции</code></pre>
+    </div>
+    <p><strong>Причина одна:</strong> окно не владеет памятью. Если бы его можно было сохранить в куче (или
+      пережить им <code>await</code>), оно могло бы остаться, когда исходные данные уже освобождены или стек
+      «схлопнулся». Компилятор просто не даёт создать такую ситуацию.</p>
+    <div class="box tip">
+      <span class="t">Что делать, если очень нужно через <code>await</code></span>
+      <p>Используйте <code>Memory&lt;T&gt;</code>/<code>ReadOnlyMemory&lt;T&gt;</code> — это «переносимое» окно
+        (оно может жить в куче), но работать с ним медленнее. Либо передавайте <code>string</code> или массив и
+        внутри метода берите <code>AsSpan()</code> — так делают почти всегда.</p>
+    </div>
+
+    <h2>Когда <code>Span</code> действительно нужен</h2>
+    <ul>
+      <li><strong>Да:</strong> разбор текста и протоколов, работа с большими массивами, циклы с миллионами
+        итераций, код, где профилировщик показал много мусора (глава 7 .NET-раздела).</li>
+      <li><strong>Нет:</strong> обычный прикладной код, где <code>string</code> и <code>List&lt;T&gt;</code>
+        читаются лучше. Преждевременное усложнение здесь дороже выигрыша.</li>
+    </ul>
+
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>Span&lt;T&gt;</code> — «окно»: ссылка на участок памяти + длина; данные <strong>не копируются</strong>.</li>
+        <li><code>AsSpan()</code> и <code>Slice()</code> не создают объектов, а <code>Substring</code>/<code>Split</code> — создают.</li>
+        <li><code>stackalloc</code> даёт буфер на стеке: быстро, но стек конечен — только небольшие фиксированные размеры.</li>
+        <li><code>ref struct</code> живёт только на стеке: его нельзя в поле класса, в коллекцию, в <code>async</code>-метод, в лямбду.</li>
+        <li>Причина ограничений — безопасность: «окно» не должно пережить данные, на которые смотрит.</li>
+        <li>Применять на горячем пути (парсинг, протоколы), а не везде подряд.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs03-struct.html">← <span class="sp">Глава 3. struct: что это и когда применять</span></a>
+      <a href="cs05-collections.html"><span class="sp">Глава 5. Коллекции: generic против non-generic</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

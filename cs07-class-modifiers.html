@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 5 · Модификаторы типов: sealed, abstract, static, record</title>
+<title>Глава 7 · Модификаторы типов: sealed, abstract, static, record</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs06-task-run.html">Далее →</a>
+  <a href="cs08-task-run.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть III · Типы и асинхронность</div>
-    <h1>Глава 5. Модификаторы типов: sealed, abstract, static, record</h1>
+    <h1>Глава 7. Модификаторы типов: sealed, abstract, static, record</h1>
     <p class="sublead">Почему в коде пишут <code>public sealed class</code>, чем <code>abstract</code> отличается
       от интерфейса, зачем нужен <code>partial</code> и когда брать <code>record</code>.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -103,6 +103,20 @@ public sealed class EmailSender : NotificationSender
     <p>В прикладном коде правило простое: <strong>интерфейс — когда нужен контракт и подмена</strong>
       (репозиторий, клиент внешнего сервиса), <strong>абстрактный класс — когда есть общая реализация и
       состояние</strong> (базовый обработчик с общими шагами).</p>
+    <div class="box note">
+      <span class="t">А если <code>abstract</code> не писать?</span>
+      <p>Тогда метод должен иметь <strong>тело</strong>, иначе код не скомпилируется. Три варианта:</p>
+      <ul>
+        <li><code>public abstract Task SendAsync(...);</code> — <strong>без тела</strong>; каждый наследник
+          <em>обязан</em> реализовать.</li>
+        <li><code>public Task SendAsync(...) { … }</code> — обычный метод с реализацией; наследник не может его
+          переопределить.</li>
+        <li><code>public virtual Task SendAsync(...) { … }</code> — есть реализация по умолчанию, наследник
+          <em>может</em> переопределить.</li>
+      </ul>
+      <p>И ещё: у <code>abstract</code>-класса <strong>нельзя создать экземпляр</strong> —
+        <code>new NotificationSender(...)</code> не скомпилируется. Создаются только наследники.</p>
+    </div>
 
     <h2><code>static</code>: класс без экземпляров</h2>
     <div class="codewrap">
@@ -119,6 +133,8 @@ public sealed class EmailSender : NotificationSender
       <li><strong><code>const</code> против <code>static readonly</code>:</strong> <code>const</code>
         подставляется в код на этапе компиляции (менять нельзя без пересборки потребителей),
         <code>static readonly</code> — значение, вычисленное один раз в рантайме.</li>
+      <li><strong>От <code>static</code>-класса нельзя наследоваться</strong> (ошибка компиляции CS0709), и сам он
+        не может наследовать класс: у него нет экземпляров. Реализовывать интерфейсы статический класс тоже не может.</li>
       <li><strong>Минус:</strong> статический класс нельзя подменить в тестах и он скрывает зависимости. Поэтому
         «помощники» делают статическими, а сервисы с зависимостями — обычными классами с DI (глава 15).</li>
     </ul>
@@ -142,6 +158,32 @@ public partial class OrderService
       <code>partial</code>-методы позволяют объявить «точку расширения», которую генератор может реализовать.</p>
 
     <h2><code>record</code>: равенство по значениям</h2>
+    <p>У <code>record</code> компилятор сам генерирует <code>Equals</code>, <code>GetHashCode</code>,
+      <code>ToString</code> и <code>with</code> — и всё это <strong>по значениям полей</strong>. Сравните с обычным
+      классом:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class OrderClass
+{
+    public Guid Id { get; init; }
+    public decimal Total { get; init; }
+}
+
+public sealed record OrderRecord(Guid Id, decimal Total);
+
+var c1 = new OrderClass  { Id = id, Total = 100m };
+var c2 = new OrderClass  { Id = id, Total = 100m };
+
+var r1 = new OrderRecord(id, 100m);
+var r2 = new OrderRecord(id, 100m);
+
+Console.WriteLine(c1 == c2);                              // False — разные объекты
+Console.WriteLine(r1 == r2);                              // True  — одинаковые данные
+Console.WriteLine(r1.GetHashCode() == r2.GetHashCode());  // True  — работает в Dictionary/HashSet
+Console.WriteLine(c1);                                    // OrderClass
+Console.WriteLine(r1);                                    // OrderRecord { Id = …, Total = 100 }</code></pre>
+    </div>
+    <p>Поэтому <code>record</code> удобен для <strong>DTO, событий, сообщений, ключей кэша</strong>: два одинаковых
+      сообщения — «одно и то же», их можно сравнивать и складывать в коллекции.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">public record OrderCreated(Guid Id, decimal Total);      // позиционный record
 
@@ -204,6 +246,18 @@ public class Derived : Base
     <p><code>virtual</code>/<code>override</code> — это полиморфизм: <code>Base b = new Derived(); b.Run()</code>
       вызовет реализацию наследника. <code>new</code> лишь «прячет» член, и такое поведение почти всегда
       нежелательно: код, работающий с базовым типом, увидит одно, а с производным — другое.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Base b = new Derived();      // переменная базового типа
+b.Run();                     // Derived.Run  ← сработал override (полиморфизм)
+b.Fixed();                   // Base.Fixed   ← метод не виртуальный: выбор по типу ПЕРЕМЕННОЙ
+
+Derived d = new Derived();
+d.Fixed();                   // Derived.Fixed ← сработало «скрытие» (new)</code></pre>
+    </div>
+    <p>Зачем этот пример на собеседовании: он проверяет, понимаете ли вы разницу между
+      <strong>переопределением</strong> (выбор по фактическому типу объекта) и <strong>скрытием</strong> (выбор по
+      типу переменной). Из-за скрытия один и тот же метод ведёт себя по-разному в зависимости от того, через какую
+      ссылку его вызвали — источник трудноуловимых ошибок.</p>
 
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
@@ -223,8 +277,8 @@ public class Derived : Base
     </div>
 
     <div class="pager">
-      <a href="cs04-ienumerable.html">← <span class="sp">Глава 4. IEnumerable, yield и IAsyncEnumerable</span></a>
-      <a href="cs06-task-run.html"><span class="sp">Глава 6. Task.Run: когда нужен и когда вредит</span> →</a>
+      <a href="cs06-ienumerable.html">← <span class="sp">Глава 6. IEnumerable, yield и IAsyncEnumerable</span></a>
+      <a href="cs08-task-run.html"><span class="sp">Глава 8. Task.Run: когда нужен и когда вредит</span> →</a>
     </div>
   </div>
 </div>

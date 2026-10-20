@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 3 · Коллекции: generic против non-generic</title>
+<title>Глава 5 · Коллекции: generic против non-generic</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs04-ienumerable.html">Далее →</a>
+  <a href="cs06-ienumerable.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 3. Коллекции: generic против non-generic</h1>
+    <h1>Глава 5. Коллекции: generic против non-generic</h1>
     <p class="sublead">Почему <code>List&lt;int&gt;</code> лучше <code>ArrayList</code>, что такое
       <em>generic</em> и как выбрать коллекцию под задачу.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -88,15 +88,26 @@ list2.Add("два");                   // ошибка компиляции</cod
       </tbody>
     </table>
     <div class="codewrap">
-      <pre><code class="language-csharp">// ✔ слабый достаточный контракт: Count и индексатор есть, менять нельзя
+      <pre><code class="language-csharp">// ✔ ХОРОШО: возвращаем интерфейс «только для чтения».
+// Вызывающему хватает перечисления, Count и индексатора,
+// но изменить нашу коллекцию он не сможет.
 public IReadOnlyList&lt;OrderRow&gt; GetPage(int page) { … }
 
-// ✘ вернуть List&lt;T&gt; — разрешить менять внутренние данные
+var page1 = service.GetPage(1);
+foreach (var row in page1) Console.WriteLine(row.Total);   // ✔ читать можно
+Console.WriteLine(page1.Count);                            // ✔ размер известен
+// page1.Add(…)                                            // ✘ метода нет — данные защищены
+
+// ✘ ПЛОХО: вернули List&lt;T&gt; — кто угодно может менять внутренние данные
 public List&lt;OrderRow&gt; GetPageBad(int page) { … }
 
-// параметр: если только читаем, IEnumerable&lt;T&gt; достаточен
+// параметр: если внутри только читаем — достаточно IEnumerable&lt;T&gt;
 public decimal Sum(IEnumerable&lt;OrderRow&gt; rows) =&gt; rows.Sum(r =&gt; r.Total);</code></pre>
     </div>
+    <p>Правило простое: <strong>возвращайте самый узкий интерфейс, которого хватает вызывающему</strong>. Ему нужно
+      только пройти по элементам — <code>IEnumerable&lt;T&gt;</code>; нужен размер — <code>IReadOnlyCollection&lt;T&gt;</code>;
+      нужен ещё и индекс — <code>IReadOnlyList&lt;T&gt;</code>. Чем уже контракт, тем меньше способов случайно
+      испортить данные.</p>
 
     <h2>Как выбрать коллекцию</h2>
     <table>
@@ -128,6 +139,20 @@ list.EnsureCapacity(20_000);                    // заранее расшири
 
 var dict = new Dictionary&lt;int, Order&gt;(capacity: 10_000);   // меньше перестроений</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">А если элементов окажется больше?</span>
+      <p>Ничего страшного: <strong>ёмкость — не лимит, а подсказка</strong>. Когда внутренний массив заполнится,
+        список создаст новый (обычно вдвое больше), скопирует туда элементы и продолжит работу. Ошибки
+        «переполнения» не будет — вы просто заплатите за копирование.</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">var list = new List&lt;int&gt;(capacity: 2);    // «на два элемента»
+list.AddRange(new[] { 1, 2, 3, 4, 5 });   // ✔ работает: список вырос сам
+Console.WriteLine(list.Count);            // 5
+Console.WriteLine(list.Capacity);         // 8 — вырос (обычно удвоением)</code></pre>
+      </div>
+      <p>Поэтому ёмкость указывают не «чтобы поместилось», а <strong>чтобы не копировать зря</strong>: при известном
+        размере (10 000) вы избегаете десятка промежуточных расширений и копирований.</p>
+    </div>
 
     <h2><code>foreach</code> и скрытая аллокация</h2>
     <ul>
@@ -155,8 +180,9 @@ void Print(IEnumerable&lt;Order&gt; orders)
         <li><strong>Generic</strong> — тип с параметром типа: компилятор знает точный тип элементов.</li>
         <li>Generic-коллекции дают <strong>отсутствие упаковки</strong>, отсутствие приведений и ошибки на
           компиляции.</li>
-        <li>Возвращайте <strong>самый слабый достаточный интерфейс</strong> — обычно
-          <code>IReadOnlyList&lt;T&gt;</code> или <code>IEnumerable&lt;T&gt;</code>.</li>
+        <li>Возвращайте <strong>самый узкий интерфейс, которого хватает вызывающему</strong> — обычно
+          <code>IReadOnlyList&lt;T&gt;</code> или <code>IEnumerable&lt;T&gt;</code>: нужные операции есть, а менять
+          ваши данные нельзя.</li>
         <li>Коллекцию выбирают по <strong>главной операции</strong>: поиск → <code>Dictionary</code>,
           уникальность → <code>HashSet</code>, порядок → <code>List</code>.</li>
         <li>Задавайте <strong>ёмкость</strong>, если размер известен; помните, что перечисление через интерфейс
@@ -165,8 +191,8 @@ void Print(IEnumerable&lt;Order&gt; orders)
     </div>
 
     <div class="pager">
-      <a href="cs02-value-types-memory.html">← <span class="sp">Глава 2. Где живут значения: struct, стек, куча и бокс</span></a>
-      <a href="cs04-ienumerable.html"><span class="sp">Глава 4. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+      <a href="cs04-ref-struct-span.html">← <span class="sp">Глава 4. ref struct и Span: окно в память без аллокаций</span></a>
+      <a href="cs06-ienumerable.html"><span class="sp">Глава 6. IEnumerable, yield и IAsyncEnumerable</span> →</a>
     </div>
   </div>
 </div>
