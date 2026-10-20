@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 4 · Декоратор: добавить поведение, не меняя класс</title>
+<title>Глава 5 · Декоратор: добавить поведение, не меняя класс</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,15 +13,45 @@
 <div class="topbar"><div class="in">
   <a href="patterns.html">← Оглавление</a>
   <span class="booktitle">Паттерны в .NET</span>
-  <a href="pt05-chain.html">Далее →</a>
+  <a href="pt06-chain.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">Паттерны · Часть II · Пять паттернов на каждый день</div>
-    <h1>Глава 4. Декоратор: добавить поведение, не меняя класс</h1>
+    <h1>Глава 5. Декоратор: добавить поведение, не меняя класс</h1>
     <p class="sublead">Кэш, логи, метрики и ретраи поверх готового сервиса — без правки этого сервиса и без
       «класса на каждую комбинацию».</p>
     <p><span class="tag core">основная глава</span></p>
+
+    <h2>Разминка: идея на десяти строках</h2>
+    <p>Нужно добавить к готовому сервису логирование, не меняя сервис. Обёртка того же интерфейса:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public interface IGreeter { string Greet(string name); }
+
+public sealed class Greeter : IGreeter                  // «настоящая» работа
+{
+    public string Greet(string name) =&gt; $"Привет, {name}!";
+}
+
+public sealed class TimedGreeter : IGreeter             // обёртка: тот же интерфейс
+{
+    private readonly IGreeter _inner;                   // кого оборачиваем
+    public TimedGreeter(IGreeter inner) =&gt; _inner = inner;
+
+    public string Greet(string name)
+    {
+        var started = DateTime.UtcNow;                      // до
+        var result = _inner.Greet(name);                    // делегировали работу
+        Console.WriteLine($"заняло {DateTime.UtcNow - started}");
+        return result;                                      // после
+    }
+}
+
+IGreeter greeter = new TimedGreeter(new Greeter());
+Console.WriteLine(greeter.Greet("Алексей"));</code></pre>
+    </div>
+    <p>Снаружи ничего не изменилось: тип тот же (<code>IGreeter</code>), а поведение дополнилось. Дальше — кэш
+      поверх репозитория и HTTP-handler'ы, где этот приём работает в .NET.</p>
 
     <h2>Проблема: комбинации разрастаются</h2>
     <p>Есть репозиторий, и со временем к нему хочется добавить кэш, логирование и метрики. Через наследование
@@ -86,13 +116,21 @@ public sealed class CachedProductRepository(
     </div>
     <p>Сборка «слоёного» сервиса — простое оборачивание: сначала настоящий, потом кэш.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">builder.Services.AddScoped&lt;EfProductRepository&gt;();
+      <pre><code class="language-csharp">// 1) «настоящая» реализация: только про базу
+builder.Services.AddScoped&lt;EfProductRepository&gt;();
+
+// 2) декоратор — тоже обычный класс, его можно зарегистрировать
 builder.Services.AddScoped&lt;CachedProductRepository&gt;();
+
+// 3) сборка цепочки: кто просит IProductRepository, получит кэш поверх базы
 builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt;
     new CachedProductRepository(
-        sp.GetRequiredService&lt;EfProductRepository&gt;(),
-        sp.GetRequiredService&lt;IMemoryCache&gt;()));</code></pre>
+        sp.GetRequiredService&lt;EfProductRepository&gt;(),   // ← кого оборачиваем
+        sp.GetRequiredService&lt;IMemoryCache&gt;()));         // ← зависимость декоратора</code></pre>
     </div>
+    <p>Читается так: «на <code>IProductRepository</code> отдаём <code>CachedProductRepository</code>, а внутри у
+      него — <code>EfProductRepository</code>». Добавить логи — ещё одна обёртка в этой же строке, остальной код
+      не меняется.</p>
     <div class="box tip">
       <span class="t">Почему это лучше</span>
       <ul>
@@ -194,8 +232,8 @@ builder.Services.AddHttpClient("payments")
     </div>
 
     <div class="pager">
-      <a href="pt03-factory.html">← <span class="sp">Глава 3. Фабрика: почему new HttpClient() — ловушка</span></a>
-      <a href="pt05-chain.html"><span class="sp">Глава 5. Цепочка обязанностей: как устроен конвейер ASP.NET Core</span> →</a>
+      <a href="pt04-factory.html">← <span class="sp">Глава 4. Фабрика: почему new HttpClient() — ловушка</span></a>
+      <a href="pt06-chain.html"><span class="sp">Глава 6. Цепочка обязанностей: как устроен конвейер ASP.NET Core</span> →</a>
     </div>
   </div>
 </div>

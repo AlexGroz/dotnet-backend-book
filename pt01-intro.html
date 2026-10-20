@@ -13,7 +13,7 @@
 <div class="topbar"><div class="in">
   <a href="patterns.html">← Оглавление</a>
   <span class="booktitle">Паттерны в .NET</span>
-  <a href="pt02-strategy.html">Далее →</a>
+  <a href="pt02-ideas.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
@@ -65,6 +65,46 @@
       <p>Проценты ниже — <strong>оценка</strong> (порядок величин и соотношение между паттернами), а не результат
         исследования. Там, где есть проверяемый факт, он помечен как факт: «в .NET этот паттерн используется
         внутри платформы». Так вы не запомните красивую цифру, которой не существует, но поймёте пропорции.</p>
+    </div>
+
+    <h2>Как устроены примеры в этой книге</h2>
+    <p>В каждой главе про паттерн один и тот же порядок — от простого к реальному:</p>
+    <ol>
+      <li><strong>Разминка</strong> — 10–15 строк кода без фреймворков: только идея.</li>
+      <li><strong>Проблема</strong> — как это выглядит в настоящем проекте и почему становится больно.</li>
+      <li><strong>Решение</strong> — паттерн, с комментариями к строкам.</li>
+      <li><strong>Где это уже работает в .NET</strong> — платформенные примеры.</li>
+      <li><strong>Когда не нужно</strong> — честная граница применения.</li>
+    </ol>
+    <div class="box note">
+      <span class="t">Обозначения в коде</span>
+      <table>
+        <thead><tr><th>Пометка</th><th>Что означает</th></tr></thead>
+        <tbody>
+          <tr><td><code>// ✘</code> / <code>// ✔</code></td><td>так делать не надо / так лучше</td></tr>
+          <tr><td><code>// 1)</code>, <code>// 2)</code></td><td>порядок шагов — читайте по номерам</td></tr>
+          <tr><td><code>// ←</code></td><td>пояснение к строке</td></tr>
+          <tr><td><code>…</code></td><td>часть кода опущена: она не важна для идеи</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="box tip">
+      <span class="t">Мини-словарь, без которого тяжело</span>
+      <ul>
+        <li><strong>DI (внедрение зависимостей)</strong> — объект не создаёт зависимости сам, их передают в
+          конструктор.</li>
+        <li><strong>Контейнер</strong> — часть приложения, которая создаёт объекты и подставляет зависимости
+          (глава 4).</li>
+        <li><strong><code>scoped</code></strong> — время жизни «на один запрос»; <code>singleton</code> — «на всё
+          приложение».</li>
+        <li><strong>handler</strong> — обработчик; в <code>HttpClient</code> — звено, через которое идёт запрос
+          (глава 5).</li>
+        <li><strong>DTO</strong> — простой объект для передачи данных, без логики.</li>
+        <li><strong><code>_payments</code>, <code>_inner</code></strong> — поля с зависимостями (подчёркивание —
+          соглашение).</li>
+        <li><strong><code>ct</code></strong> — <code>CancellationToken</code>, «токен отмены»; приходит
+          параметром.</li>
+      </ul>
     </div>
 
     <h2>Пять паттернов, которые в .NET встречаются постоянно</h2>
@@ -127,7 +167,7 @@
 
     <div class="pager">
       <a href="patterns.html">← <span class="sp">Оглавление</span></a>
-      <a href="pt02-strategy.html"><span class="sp">Глава 2. Стратегия: if/switch, который захотел стать интерфейсом</span> →</a>
+      <a href="pt02-ideas.html"><span class="sp">Глава 2. Четыре идеи, из которых сделаны все паттерны</span> →</a>
     </div>
   </div>
 </div>

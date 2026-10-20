@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 3 · Фабрика: почему new HttpClient() — ловушка</title>
+<title>Глава 4 · Фабрика: почему new HttpClient() — ловушка</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,15 +13,42 @@
 <div class="topbar"><div class="in">
   <a href="patterns.html">← Оглавление</a>
   <span class="booktitle">Паттерны в .NET</span>
-  <a href="pt04-decorator.html">Далее →</a>
+  <a href="pt05-decorator.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">Паттерны · Часть II · Пять паттернов на каждый день</div>
-    <h1>Глава 3. Фабрика: почему <code>new HttpClient()</code> — ловушка</h1>
+    <h1>Глава 4. Фабрика: почему <code>new HttpClient()</code> — ловушка</h1>
     <p class="sublead">Фабрика нужна не для красоты, а чтобы спрятать <em>создание</em> и <em>время жизни</em>
       объектов. В .NET это видно на двух классических авариях.</p>
     <p><span class="tag core">основная глава</span></p>
+
+    <h2>Разминка: идея на десяти строках</h2>
+    <p>Задача: в разных местах нужно уведомление, но создаётся оно по-разному. Фабрика — это «кто-то, кто знает,
+      как создать».</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public interface INotification { void Show(); }
+
+public sealed class EmailNote : INotification { public void Show() =&gt; Console.WriteLine("email"); }
+public sealed class SmsNote   : INotification { public void Show() =&gt; Console.WriteLine("sms"); }
+
+// Единственное место, где решается «что создать»
+public static class NotificationFactory
+{
+    public static INotification Create(string channel) =&gt; channel switch
+    {
+        "email" =&gt; new EmailNote(),
+        "sms"   =&gt; new SmsNote(),
+        _       =&gt; throw new ArgumentOutOfRangeException(nameof(channel))
+    };
+}
+
+// Потребитель не знает про EmailNote и SmsNote вообще
+INotification note = NotificationFactory.Create("sms");
+note.Show();</code></pre>
+    </div>
+    <p>Идея: <strong>создание вынесено в одно место</strong>. В реальном проекте за этим «одним местом» стоят ещё
+      настройка, время жизни объекта и пулы — об этом дальше.</p>
 
     <h2>Авария №1: HttpClient и исчерпанные сокеты</h2>
     <p>Выглядит правильно — «создал, использовал, освободил»:</p>
@@ -49,24 +76,34 @@ public async Task&lt;string&gt; GetAsync(string url, CancellationToken ct)
         раз и по имени.</p>
     </div>
     <div class="codewrap">
-      <pre><code class="language-csharp">// Регистрация: конфигурация и надёжность — в одном месте
+      <pre><code class="language-csharp">// ── Шаг 1. Регистрация: один раз при старте приложения ─────────────────────
 builder.Services.AddHttpClient("payments", c =&gt;
 {
-    c.BaseAddress = new Uri("https://payments.example.com");
-    c.Timeout = TimeSpan.FromSeconds(5);
+    c.BaseAddress = new Uri("https://payments.example.com");   // 1) куда ходим
+    c.Timeout = TimeSpan.FromSeconds(5);                       // 2) сколько ждём
 })
-.AddStandardResilienceHandler();        // ретраи, circuit breaker, таймаут
+.AddStandardResilienceHandler();                               // 3) ретраи + circuit breaker
 
-// Использование: HttpClient создаём фабрикой, НЕ через new
-public sealed class PaymentClient(IHttpClientFactory factory)
+// ── Шаг 2. Использование: клиент приходит от фабрики, а не от new ──────────
+public sealed class PaymentClient(IHttpClientFactory factory)  // 4) фабрику внедрили
 {
     public async Task&lt;PaymentStatus&gt; GetAsync(Guid id, CancellationToken ct)
     {
-        using var client = factory.CreateClient("payments");   // handler из пула
-        var response = await client.GetFromJsonAsync&lt;PaymentStatus&gt;($"/payments/{id}", ct);
-        return response!;
+        using var client = factory.CreateClient("payments");   // 5) клиент на этот вызов
+
+        return await client.GetFromJsonAsync&lt;PaymentStatus&gt;($"/payments/{id}", ct)!;  // 6) запрос
     }
 }</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Что происходит по шагам</span>
+      <ul>
+        <li><strong>5)</strong> <code>CreateClient</code> не создаёт новый сокет: он берёт общий
+          <em>handler</em> из пула и оборачивает его в лёгкий <code>HttpClient</code>.</li>
+        <li><strong>После вызова</strong> <code>using</code> освобождает именно <code>HttpClient</code>, а
+          соединение возвращается в пул — <code>TIME_WAIT</code> больше не накапливается.</li>
+        <li><strong>Настройки</strong> (адрес, таймаут, ретраи) заданы в одном месте — в шаге 1.</li>
+      </ul>
     </div>
 
     <h2>Авария №2: scoped-объект в singleton</h2>
@@ -80,18 +117,27 @@ public sealed class OutboxWorker(AppDbContext db) : BackgroundService { … }</c
     <p>Правильный ответ — фабрика контекста: она создаёт <strong>новый</strong> контекст на одну операцию и
       освобождает его после.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">builder.Services.AddDbContextFactory&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));
+      <pre><code class="language-csharp">// 1) регистрируем ФАБРИКУ контекста, а не сам контекст
+builder.Services.AddDbContextFactory&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));
 
+// 2) воркер живёт всё время процесса (singleton) — поэтому получает фабрику
 public sealed class OutboxWorker(IDbContextFactory&lt;AppDbContext&gt; factory) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            await using var db = await factory.CreateDbContextAsync(ct);   // свежий контекст
-            var batch = await db.Outbox.Where(x =&gt; x.Status == "new").Take(100).ToListAsync(ct);
+            // 3) на каждую итерацию — свежий контекст: свой ChangeTracker, свежие данные
+            await using var db = await factory.CreateDbContextAsync(ct);
+
+            var batch = await db.Outbox
+                .Where(x =&gt; x.Status == "new")
+                .Take(100)
+                .ToListAsync(ct);
             …
+
             await db.SaveChangesAsync(ct);
+            // 4) await using освободит контекст: соединение вернётся в пул
             await Task.Delay(TimeSpan.FromSeconds(1), ct);
         }
     }
@@ -171,8 +217,8 @@ public sealed class NotificationFactory(IEnumerable&lt;INotificationSender&gt; s
     </div>
 
     <div class="pager">
-      <a href="pt02-strategy.html">← <span class="sp">Глава 2. Стратегия: if/switch, который захотел стать интерфейсом</span></a>
-      <a href="pt04-decorator.html"><span class="sp">Глава 4. Декоратор: добавить поведение, не меняя класс</span> →</a>
+      <a href="pt03-strategy.html">← <span class="sp">Глава 3. Стратегия: if/switch, который захотел стать интерфейсом</span></a>
+      <a href="pt05-decorator.html"><span class="sp">Глава 5. Декоратор: добавить поведение, не меняя класс</span> →</a>
     </div>
   </div>
 </div>

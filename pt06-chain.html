@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 5 · Цепочка обязанностей: как устроен конвейер ASP.NET Core</title>
+<title>Глава 6 · Цепочка обязанностей: как устроен конвейер ASP.NET Core</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,15 +13,47 @@
 <div class="topbar"><div class="in">
   <a href="patterns.html">← Оглавление</a>
   <span class="booktitle">Паттерны в .NET</span>
-  <a href="pt06-repository.html">Далее →</a>
+  <a href="pt07-repository.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">Паттерны · Часть II · Пять паттернов на каждый день</div>
-    <h1>Глава 5. Цепочка обязанностей: как устроен конвейер ASP.NET Core</h1>
+    <h1>Глава 6. Цепочка обязанностей: как устроен конвейер ASP.NET Core</h1>
     <p class="sublead">Последовательность обработчиков, где каждый решает: обработать самому, прервать или
       передать дальше. Именно так работает каждый запрос в ASP.NET Core.</p>
     <p><span class="tag core">основная глава</span></p>
+
+    <h2>Разминка: идея на десяти строках</h2>
+    <p>Проверки идут по очереди, и каждая может остановить следующие. Цепочка — это «следующий» внутри каждого
+      звена.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">abstract class Check
+{
+    private Check? _next;
+    public Check Next(Check next) { _next = next; return next; }   // связали звенья
+
+    public string? Run(int amount)
+    {
+        var error = Validate(amount);
+        if (error is not null) return error;        // остановились
+        return _next?.Run(amount);                  // передали дальше
+    }
+
+    protected abstract string? Validate(int amount);
+}
+
+sealed class Positive : Check { protected override string? Validate(int a) =&gt; a &lt;= 0 ? "сумма ≤ 0" : null; }
+sealed class Limit    : Check { protected override string? Validate(int a) =&gt; a &gt; 1000 ? "больше лимита" : null; }
+
+var chain = new Positive();
+chain.Next(new Limit());
+
+Console.WriteLine(chain.Run(-5));      // «сумма ≤ 0» — дальше не пошли
+Console.WriteLine(chain.Run(5000));    // «больше лимита»
+Console.WriteLine(chain.Run(100));     // пусто — все проверки пройдены</code></pre>
+    </div>
+    <p>Дальше — конвейер middleware в ASP.NET Core: там ровно эта идея, только звено называется
+      <code>RequestDelegate</code>.</p>
 
     <h2>Проблема: один обработчик знает слишком много</h2>
     <p>Типичный «толстый» обработчик запроса собирает в себе всё сразу:</p>
@@ -192,8 +224,8 @@ app.MapGet("/orders/{id:int}", …);</code></pre>
     </div>
 
     <div class="pager">
-      <a href="pt04-decorator.html">← <span class="sp">Глава 4. Декоратор: добавить поведение, не меняя класс</span></a>
-      <a href="pt06-repository.html"><span class="sp">Глава 6. Репозиторий и Unit of Work: когда они нужны, а когда мешают</span> →</a>
+      <a href="pt05-decorator.html">← <span class="sp">Глава 5. Декоратор: добавить поведение, не меняя класс</span></a>
+      <a href="pt07-repository.html"><span class="sp">Глава 7. Репозиторий и Unit of Work: когда они нужны, а когда мешают</span> →</a>
     </div>
   </div>
 </div>

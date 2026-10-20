@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 6 · Репозиторий и Unit of Work: когда нужны, а когда мешают</title>
+<title>Глава 7 · Репозиторий и Unit of Work: когда нужны, а когда мешают</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -18,10 +18,41 @@
 <div class="container">
   <div class="chapter">
     <div class="part">Паттерны · Часть II · Пять паттернов на каждый день</div>
-    <h1>Глава 6. Репозиторий и Unit of Work: когда нужны, а когда мешают</h1>
+    <h1>Глава 7. Репозиторий и Unit of Work: когда нужны, а когда мешают</h1>
     <p class="sublead">Самый спорный паттерн в .NET-сообществе: без него не обходится ни один «энтерпрайз»-шаблон,
       но поверх EF Core он часто не даёт ничего, кроме лишнего слоя.</p>
     <p><span class="tag core">основная глава</span></p>
+
+    <h2>Разминка: идея на десяти строках</h2>
+    <p>Бизнес-логике нужно «достать заказ по id», не зная, откуда он берётся: из базы, кэша или тестового списка.
+      Репозиторий — это «коллекция» с таким интерфейсом.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record Order(int Id, decimal Total);   // просто данные
+
+public interface IOrderRepository
+{
+    Order? Find(int id);              // «найди по id»
+    void Save(Order order);           // «сохрани»
+}
+
+// Реализация для тестов: словарь в памяти, никакой базы
+public sealed class InMemoryOrders : IOrderRepository
+{
+    private readonly Dictionary&lt;int, Order&gt; _items = new();
+
+    public Order? Find(int id) =&gt; _items.GetValueOrDefault(id);
+    public void Save(Order order) =&gt; _items[order.Id] = order;
+}
+
+// Бизнес-логика не знает ни про базу, ни про EF Core
+static decimal Total(IOrderRepository repo, int id) =&gt; repo.Find(id)?.Total ?? 0m;
+
+var repo = new InMemoryOrders();
+repo.Save(new Order(1, 500m));
+Console.WriteLine(Total(repo, 1));    // 500</code></pre>
+    </div>
+    <p>Ровно так же выглядит работа с базой — только внутри реализации будет SQL или EF Core. Дальше разберём,
+      зачем это нужно и где репозиторий превращается в лишний слой.</p>
 
     <h2>Идея: «коллекция» вместо SQL и одна транзакция на работу</h2>
     <ul>
@@ -189,7 +220,7 @@ public sealed class OrderService(IServiceProvider sp)
     </div>
 
     <div class="pager">
-      <a href="pt05-chain.html">← <span class="sp">Глава 5. Цепочка обязанностей: как устроен конвейер ASP.NET Core</span></a>
+      <a href="pt06-chain.html">← <span class="sp">Глава 6. Цепочка обязанностей: как устроен конвейер ASP.NET Core</span></a>
       <a href="patterns.html"><span class="sp">Оглавление</span> →</a>
     </div>
   </div>

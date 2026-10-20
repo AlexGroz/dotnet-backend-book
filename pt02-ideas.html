@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 2 · Четыре идеи, из которых сделаны все паттерны</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="patterns.html">← Оглавление</a>
+  <span class="booktitle">Паттерны в .NET</span>
+  <a href="pt03-strategy.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Паттерны · Часть I · Подготовка</div>
+    <h1>Глава 2. Четыре идеи, из которых сделаны все паттерны</h1>
+    <p class="sublead">Прежде чем разбирать паттерны по одному, посмотрим на четыре приёма, из которых они
+      собраны. Примеры здесь короткие и без фреймворков — только суть.</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Идея 1. Контракт: интерфейс вместо конкретного класса</h2>
+    <p><strong>Контракт</strong> (интерфейс) — это «договор»: «я умею вот это», без указания, <em>как</em> именно.
+      Код, который пользуется контрактом, не знает и не должен знать, кто его реализует.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Контракт: «умею отправить сообщение»
+public interface IMessageSender
+{
+    void Send(string to, string text);
+}
+
+// Две разные реализации одного контракта
+public sealed class EmailSender : IMessageSender
+{
+    public void Send(string to, string text) =&gt; Console.WriteLine($"Email → {to}: {text}");
+}
+
+public sealed class SmsSender : IMessageSender
+{
+    public void Send(string to, string text) =&gt; Console.WriteLine($"SMS → {to}: {text}");
+}
+
+// Потребитель зависит от КОНТРАКТА, а не от конкретного класса
+static void Notify(IMessageSender sender) =&gt; sender.Send("+7 900 000-00-00", "Заказ готов");
+
+Notify(new EmailSender());   // письмо
+Notify(new SmsSender());     // смс — метод Notify при этом не менялся</code></pre>
+    </div>
+    <ul>
+      <li><strong>Замена реализации без правки потребителя</strong>: <code>Notify</code> не знает, кто там внутри.</li>
+      <li><strong>Тесты</strong>: вместо настоящей отправки подставляется «заглушка», которая ничего не отправляет.</li>
+      <li>Из этой идеи растут <strong>стратегия</strong> и <strong>репозиторий</strong>.</li>
+    </ul>
+
+    <h2>Идея 2. Делегирование: не делать самому, а попросить другого</h2>
+    <p><strong>Делегирование</strong> — объект получает работу, делает <em>свою</em> часть, а остальное
+      <strong>передаёт другому объекту</strong>. Тот, другой, хранится в поле.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class LoggingSender : IMessageSender
+{
+    private readonly IMessageSender _inner;          // тот, кому делегируем
+
+    public LoggingSender(IMessageSender inner) =&gt; _inner = inner;
+
+    public void Send(string to, string text)
+    {
+        Console.WriteLine($"отправляю на {to}");     // 1) своя работа
+        _inner.Send(to, text);                      // 2) отдали работу дальше
+        Console.WriteLine("готово");                // 3) своя работа после
+    }
+}
+
+// Собираем: «отправка с логированием поверх обычной отправки»
+IMessageSender sender = new LoggingSender(new EmailSender());
+sender.Send("+7 900 000-00-00", "Заказ готов");</code></pre>
+    </div>
+    <ul>
+      <li><code>LoggingSender</code> <strong>не отправляет сам</strong> — он только оборачивает вызов.</li>
+      <li>Обёртки можно <strong>вкладывать</strong>: лог поверх retry поверх email.</li>
+      <li>Из этой идеи растут <strong>декоратор</strong> и <strong>цепочка обязанностей</strong>.</li>
+    </ul>
+    <h2>Идея 3. Композиция вместо наследования</h2>
+    <p>Наследование отвечает на вопрос «<em>является</em>» (<code>EmailSender</code> — это
+      <code>IMessageSender</code>). Композиция — на вопрос «<em>использует</em>» (обёртка использует другую
+      отправку). Для добавления поведения почти всегда лучше второе.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">✘ наследование: под каждый вариант — свой класс
+
+EmailSenderWithLog
+SmsSenderWithLog
+EmailSenderWithLogAndRetry
+SmsSenderWithLogAndRetry
+…                     ← число классов = произведение вариантов
+
+✔ композиция: собираем из кусочков, как конструктор
+
+new LoggingSender(new EmailSender())                     // логи + email
+new RetrySender(new LoggingSender(new SmsSender()))      // retry + логи + смс</code></pre>
+    </div>
+    <ul>
+      <li>Новый вариант — новый «кубик», а не правка всех классов.</li>
+      <li>Порядок кубиков виден прямо в коде сборки.</li>
+      <li>Из этой идеи растёт <strong>декоратор</strong> в его практическом виде.</li>
+    </ul>
+
+    <h2>Идея 4. Создание отдельно от использования</h2>
+    <p>Код, который <em>работает</em> с объектом, не должен знать, как этот объект создавать и настраивать.
+      Иначе настройка расползается по проекту, а в тестах её невозможно заменить.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ потребитель сам знает, как создать и настроить
+public Task PayAsync()
+{
+    var client = new HttpClient();                       // создаём вручную
+    client.BaseAddress = new Uri("https://payments…");   // и настраиваем
+    client.Timeout = TimeSpan.FromSeconds(5);
+    return client.PostAsync("/pay", null);
+}
+
+// ✔ кто-то другой подготовил готовый объект — мы только пользуемся
+public sealed class PaymentService(HttpClient client)    // зависимость пришла снаружи
+{
+    public Task PayAsync() =&gt; client.PostAsync("/pay", null);
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>Настройка в одном месте</strong> — а не в каждом методе.</li>
+      <li><strong>В тестах</strong> подставляется поддельный клиент.</li>
+      <li>Из этой идеи растут <strong>фабрика</strong> и <strong>внедрение зависимостей</strong> (DI).</li>
+    </ul>
+
+    <h2>Как из этого получаются паттерны</h2>
+    <table>
+      <thead><tr><th>Идея</th><th>Что даёт</th><th>Какие паттерны вырастают</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Контракт</strong></td><td>Подмена реализации без правки потребителя</td><td>Стратегия, Репозиторий</td></tr>
+        <tr><td><strong>Делегирование</strong></td><td>Добавить поведение, не меняя класс</td><td>Декоратор, Цепочка обязанностей</td></tr>
+        <tr><td><strong>Композиция</strong></td><td>Гибкие комбинации вместо взрыва наследников</td><td>Декоратор, Цепочка</td></tr>
+        <tr><td><strong>Создание отдельно</strong></td><td>Настройка в одном месте, тестируемость</td><td>Фабрика, DI</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Как этим пользоваться при чтении</span>
+      <p>В каждой следующей главе ищите эти четыре идеи. «Стратегия» — это идея контракта, применённая к
+        <em>алгоритму</em>. «Декоратор» — идея делегирования, применённая к <em>обёртке</em>. Когда видишь паттерн
+        как «контракт + делегирование», он перестаёт быть набором магических классов.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Контракт</strong> — интерфейс: потребитель зависит от «умею», а не от «кто именно».</li>
+        <li><strong>Делегирование</strong> — сделать своё и передать вызов дальше (основа декоратора и цепочки).</li>
+        <li><strong>Композиция</strong> — собирать из кубиков: поведение добавляется обёрткой, а не наследником.</li>
+        <li><strong>Создание отдельно</strong> — потребитель получает готовый объект, а не создаёт его сам.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="pt01-intro.html">← <span class="sp">Глава 1. Паттерны и статистика: как считать честно</span></a>
+      <a href="pt03-strategy.html"><span class="sp">Глава 3. Стратегия: if/switch, который захотел стать интерфейсом</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
