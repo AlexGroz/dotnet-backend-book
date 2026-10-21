@@ -52,6 +52,16 @@ Console.WriteLine(chain.Run(-5));      // «сумма ≤ 0» — дальше 
 Console.WriteLine(chain.Run(5000));    // «больше лимита»
 Console.WriteLine(chain.Run(100));     // пусто — все проверки пройдены</code></pre>
     </div>
+    <div class="codewrap">
+      <p class="cap">Кто кого останавливает</p>
+      <pre><code class="language-text">Run(-5)     Positive: «сумма ≤ 0»   → вернули ошибку, Limit НЕ вызывался
+Run(5000)   Positive: null (ок)      → Limit: «больше лимита»
+Run(100)    Positive: null (ок)      → Limit: null (ок) → _next == null → вернули null</code></pre>
+    </div>
+    <p>Правило простое: звено вернуло <strong>ошибку</strong> — цепочка останавливается; вернуло
+      <strong><code>null</code></strong> — управление уходит следующему звену. Последнее звено возвращает
+      <code>null</code>, потому что <code>_next</code> у него нет.</p>
+
     <p>Дальше — конвейер middleware в ASP.NET Core: там ровно эта идея, только звено называется
       <code>RequestDelegate</code>.</p>
 
@@ -122,11 +132,35 @@ public sealed class FraudCheck(IFraudService fraud) : OrderCheck
 }</code></pre>
     </div>
     <div class="codewrap">
-      <pre><code class="language-csharp">// Сборка цепочки — один раз, в композиционном корне
-var chain = new LimitCheck(1_000_000m);
-chain.SetNext(new FraudCheck(fraud)).SetNext(new DuplicateCheck(db));
+      <p class="cap">Program.cs — отдельное место сборки («композиционный корень»)</p>
+      <pre><code class="language-csharp">// 1) создаём звенья — по одному на проверку
+var limit     = new LimitCheck(1_000_000m);    // сумма ≤ 1 млн
+var fraud     = new FraudCheck(fraudService);  // нет ли признаков мошенничества
+var duplicate = new DuplicateCheck(db);        // не было ли такого заказа раньше
 
-var result = await chain.HandleAsync(request, ct);</code></pre>
+// 2) связываем в цепочку: limit → fraud → duplicate → конец
+limit.SetNext(fraud).SetNext(duplicate);
+
+// 3) запускаем с первого звена
+var result = await limit.HandleAsync(request, ct);</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Почему сборка — отдельный блок</span>
+      <p>Классы-звенья (<code>LimitCheck</code>, <code>FraudCheck</code>) — это <strong>определения</strong>, каждое в
+        своём файле. А строки выше — <strong>сборка</strong>: место, где приложение решает, из каких звеньев и в каком
+        порядке составить цепочку. Такое место называют <em>композиционным корнем</em> — обычно это
+        <code>Program.cs</code> или фабрика обработчика. Так же устроен и DI: классы отдельно, регистрации отдельно
+        («Backend на .NET», глава 15).</p>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что происходит при вызове <code>HandleAsync</code></p>
+      <pre><code class="language-text">limit.HandleAsync(request)
+ └─ LimitCheck: сумма &gt; 1 000 000?   ── да ──► «Сумма превышает лимит», дальше НЕ идём
+                                    └─ нет ─► идём дальше
+      └─ FraudCheck: подозрительно?  ── да ──► «Подозрительная операция»
+                                    └─ нет ─► идём дальше
+           └─ DuplicateCheck: уже есть? ──► вернули результат
+                └─ _next == null ──► цепочка закончилась</code></pre>
     </div>
     <p>Теперь новый шаг — это новый класс и одна строка сборки. Порядок проверок виден явно, каждую можно
       протестировать отдельно.</p>

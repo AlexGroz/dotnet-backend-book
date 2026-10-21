@@ -137,6 +137,50 @@ await tx2.CommitAsync(ct);</code></pre>
         работа должна прекратиться, а соединение — вернуться в пул (глава 12).</li>
     </ul>
 
+    <h2>Dapper: между ADO.NET и EF Core</h2>
+    <p><strong>Dapper</strong> — «микро-ORM»: набор extension-методов над ADO.NET. Он <strong>не пишет SQL за
+      вас</strong> — вы даёте готовый запрос, а Dapper выполняет его и раскладывает строки в объекты.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await using var conn = new NpgsqlConnection(cs);
+
+// SQL пишем сами; @userId — параметр (Dapper подставит безопасно)
+var rows = await conn.QueryAsync&lt;OrderRow&gt;(
+    """
+    SELECT id, total, created_at
+    FROM orders
+    WHERE user_id = @userId
+    ORDER BY created_at DESC
+    LIMIT 20
+    """,
+    new { userId });
+
+// один объект
+var one = await conn.QuerySingleOrDefaultAsync&lt;OrderRow&gt;(
+    "SELECT id, total FROM orders WHERE id = @id", new { id });
+
+// команда без результата
+await conn.ExecuteAsync("UPDATE orders SET status = @status WHERE id = @id",
+    new { status = "paid", id });</code></pre>
+    </div>
+    <table>
+      <thead><tr><th></th><th>ADO.NET</th><th>Dapper</th><th>EF Core</th></tr></thead>
+      <tbody>
+        <tr><td>SQL</td><td>Пишете вы</td><td>Пишете вы</td><td>Генерирует провайдер из LINQ</td></tr>
+        <tr><td>Маппинг строк → объект</td><td>Вручную (<code>reader.GetInt64(0)</code>)</td><td>Автоматически по именам колонок</td><td>Автоматически</td></tr>
+        <tr><td>Change tracker, миграции</td><td>Нет</td><td>Нет</td><td>Есть</td></tr>
+        <tr><td>Когда брать</td><td>Максимальный контроль, минимум зависимостей</td><td>Сложный SQL, горячий путь, отчёты</td><td>CRUD со связями, доменная модель</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Две вещи, которые надо помнить</span>
+      <ul>
+        <li><strong>Параметры обязательны.</strong> Склейка значений в строку SQL — это и инъекция, и поломанный план
+          (глава 22).</li>
+        <li><strong>Схему Dapper не знает.</strong> Опечатка в имени колонки всплывёт только в рантайме — в отличие от
+          EF Core, где модель проверяется при старте.</li>
+      </ul>
+    </div>
+
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
       <ul>

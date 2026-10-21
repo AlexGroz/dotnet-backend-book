@@ -109,6 +109,30 @@ public sealed class EfUnitOfWork(AppDbContext db) : IUnitOfWork
     }
 }</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">В интерфейсе нет кода — откуда берётся работа?</span>
+      <p><code>IOrderRepository</code> — только <em>обещание</em> («есть метод <code>GetAsync</code>»). Тело метода
+        живёт в реализации <code>EfOrderRepository</code>, где написан запрос через EF Core. Обработчик об этом
+        классе не знает — он видит только интерфейс.</p>
+      <p>Связывает их <strong>контейнер</strong> при старте приложения:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">builder.Services.AddScoped&lt;IOrderRepository, EfOrderRepository&gt;();  // «на интерфейс — вот эта реализация»
+builder.Services.AddScoped&lt;IUnitOfWork, EfUnitOfWork&gt;();
+builder.Services.AddScoped&lt;PayOrderHandler&gt;();</code></pre>
+      </div>
+      <p>Когда приходит запрос, контейнер создаёт <code>PayOrderHandler</code> и подставляет в него
+        <em>настоящий</em> <code>EfOrderRepository</code>. Поэтому строка <code>await orders.GetAsync(id, ct)</code>
+        в итоге выполняет SQL — просто обработчик об этом не знает. Механика — «Backend на .NET», глава 15.</p>
+    </div>
+    <div class="box tip">
+      <span class="t">Что значит «работает с доменом, а не с SQL»</span>
+      <p>Раньше в сервисе было бы <code>db.Orders.Where(o =&gt; o.Id == id)</code> — сервис знал бы про EF Core,
+        таблицу и колонки. Теперь он знает только про <strong>домен</strong>: «есть заказы, у них есть
+        <code>MarkAsPaid()</code>, изменения сохраняются одним <code>SaveChangesAsync</code>». Как это уйдёт в
+        базу — вопрос реализации репозитория.</p>
+      <p>Кстати, <code>?? throw new NotFoundException(id)</code> — идиома «получить или упасть»: если репозиторий
+        вернул <code>null</code>, бросаем исключение (подробно — C#-книга, глава 9).</p>
+    </div>
 
     <h2>Неприятная правда про EF Core</h2>
     <p><code>DbContext</code> <strong>уже</strong> реализует оба паттерна:</p>
@@ -128,6 +152,18 @@ public interface IRepository&lt;T&gt;
     Task RemoveAsync(T entity);
     … ещё 15 методов «на всякий случай»
 }</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что может сделать вызывающий — и почему ломается план</p>
+      <pre><code class="language-csharp">var bad = repo.Query()
+    .Where(o =&gt; o.CreatedAt.Year == 2026)   // ← функция по колонке
+    .OrderBy(o =&gt; o.Total)
+    .Take(20)
+    .ToList();
+
+// в SQL уйдёт: date_part('year', created_at) = 2026
+// → индекс по created_at не применим → Seq Scan по всей таблице
+// и репозиторий об этом не узнает: запрос собрал вызывающий</code></pre>
     </div>
     <div class="box warn">
       <span class="t">Почему это плохо</span>

@@ -50,6 +50,11 @@ public sealed class TimedGreeter : IGreeter             // обёртка: то�
 IGreeter greeter = new TimedGreeter(new Greeter());
 Console.WriteLine(greeter.Greet("Алексей"));</code></pre>
     </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">заняло 00:00:00.0001234     ← печатает обёртка (время, конечно, будет своё)
+Привет, Алексей!            ← печатает внешний Console.WriteLine</code></pre>
+    </div>
     <p>Снаружи ничего не изменилось: тип тот же (<code>IGreeter</code>), а поведение дополнилось. Дальше — кэш
       поверх репозитория и HTTP-handler'ы, где этот приём работает в .NET.</p>
 
@@ -57,6 +62,7 @@ Console.WriteLine(greeter.Greet("Алексей"));</code></pre>
     <p>Есть репозиторий, и со временем к нему хочется добавить кэш, логирование и метрики. Через наследование
       получается так:</p>
     <div class="codewrap">
+      <p class="cap">Это не код и не <code>using</code> — это просто список классов, которые пришлось бы написать</p>
       <pre><code class="language-text">EfProductRepository
 CachedProductRepository
 LoggingProductRepository
@@ -64,6 +70,8 @@ CachedLoggingProductRepository
 CachedAndMetricsProductRepository
 …                        ← каждая новая «добавка» удваивает число классов</code></pre>
     </div>
+    <p>Читается так: сначала класс про EF, потом его копия с кэшем, потом копия с логами, потом копия, где и кэш,
+      и логи… Каждая новая «добавка» требует новой копии класса — вот почему наследование здесь не масштабируется.</p>
     <p>Хуже того: логика кэша дублируется в каждом таком классе, а бизнес-код начинает зависеть от конкретного
       типа, а не от интерфейса.</p>
 

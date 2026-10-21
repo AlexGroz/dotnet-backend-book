@@ -48,7 +48,7 @@ static decimal Total(IDeliveryCost cost, decimal weight) =&gt; 1000m + cost.Calc
 Console.WriteLine(Total(new PickupCost(), 2));    // 1000
 Console.WriteLine(Total(new CourierCost(), 2));   // 1400</code></pre>
     </div>
-    <p>Это и есть стратегия: <strong>алгоритм вынесен за интерфейс</strong>, а вызывающий код просто выбирает
+    <p>Это и есть <strong>стратегия</strong>: алгоритм вынесен за интерфейс, а вызывающий код просто выбирает
       реализацию. Дальше — как это выглядит в реальном проекте, где вариантов десять и они приходят из
       конфигурации.</p>
 
@@ -127,6 +127,28 @@ public sealed class OrderService([FromKeyedServices] Func&lt;CustomerType, IPric
         случаи (несколько интерфейсов у одного класса, несколько реализаций, фабричные делегаты, открытые
         дженерики, <code>TryAdd</code>) разобраны в книге «Backend на .NET», глава 15.</p>
     </div>
+    <div class="box note">
+      <span class="t">Разбираем строку <code>resolve(type).Calculate(order)</code></span>
+      <ul>
+        <li><strong><code>Func&lt;CustomerType, IPricingStrategy&gt;</code></strong> — это <strong>делегат</strong>:
+          «функция, которая принимает <code>CustomerType</code> и возвращает <code>IPricingStrategy</code>». Не
+          коллекция и не интерфейс — <em>тип-функция</em>.</li>
+        <li><strong><code>resolve</code></strong> — имя <em>параметра конструктора</em> (можно назвать иначе).
+          Контейнер подставляет сюда функцию, которая по ключу достаёт нужную стратегию.</li>
+        <li><strong><code>resolve(type)</code></strong> — вызов этой функции: «дай мне стратегию для
+          <code>type</code>». Результат — объект <code>IPricingStrategy</code>.</li>
+        <li><strong><code>.Calculate(order)</code></strong> — вызов метода уже у стратегии: «посчитай по этому
+          заказу».</li>
+      </ul>
+      <div class="codewrap">
+        <pre><code class="language-text">resolve(CustomerType.Vip) → объект VipPricing → .Calculate(order) → decimal
+         ▲                        ▲                      ▲
+    «дай стратегию»        «вот она»            «посчитай заказ»</code></pre>
+      </div>
+      <p>Без DI то же самое писали бы так: <code>var strategy = type switch { … }; strategy.Calculate(order);</code> —
+        только выбор остался бы в бизнес-коде.</p>
+    </div>
+
     <div class="box tip">
       <span class="t">Что изменилось</span>
       <ul>

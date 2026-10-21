@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 9 · null, ?. и ссылка на самого себя</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="csharp.html">Оглавление →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы и асинхронность</div>
+    <h1>Глава 9. null, <code>?.</code> и ссылка на самого себя</h1>
+    <p class="sublead">Три вещи, без которых непонятна половина кода с паттернами: что такое <code>null</code>,
+      как работает <code>?.</code> и почему класс может содержать поле своего же типа.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что такое <code>null</code></h2>
+    <p><code>null</code> — это <strong>отсутствие ссылки</strong>: переменная есть, а объекта, на который она
+      указывает, нет. У значимых типов (<code>int</code>, <code>DateTime</code>, <code>struct</code>) такого
+      состояния нет — там «пусто» это <code>default</code> (нули).</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string? name = null;      // ссылки нет
+Console.WriteLine(name.Length);            // ✘ NullReferenceException
+Console.WriteLine(name?.Length);           // ✔ null: вызова не было</code></pre>
+    </div>
+    <p><strong>Nullable reference types</strong> (<code>string?</code>, <code>Customer?</code>) — это подсказка
+      <em>компилятору</em>: «здесь может быть null». На работу в рантайме она не влияет, но заставляет обработать
+      случай.</p>
+
+    <h2>Оператор <code>?.</code>: вызвать, только если не null</h2>
+    <p>Читается буквально: «<strong>если слева не null — вызови/прочитай; иначе верни null</strong>».</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Check? _next = null;
+
+// это:
+var result = _next?.Run(amount);
+
+// означает ровно следующее:
+var result2 = _next is null ? null : _next.Run(amount);</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Запись</th><th>Что делает</th><th>Тип результата</th></tr></thead>
+      <tbody>
+        <tr><td><code>x?.Method()</code></td><td>Вызов, только если <code>x</code> не null</td><td><code>T?</code> (nullable)</td></tr>
+        <tr><td><code>x?.Property</code></td><td>Чтение свойства, только если не null</td><td><code>T?</code></td></tr>
+        <tr><td><code>x?[i]</code></td><td>Индексатор, только если не null</td><td><code>T?</code></td></tr>
+        <tr><td><code>x?.A?.B</code></td><td>Цепочка: остановится на первом null</td><td><code>T?</code></td></tr>
+        <tr><td><code>x!.Method()</code></td><td>«я уверен, что не null» — проверки нет</td><td><code>T</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Почему в цепочке пишут <code>_next?.Run(...)</code>, если тип уже <code>Check?</code></span>
+      <p>Тип <code>Check?</code> — это <strong>обещание компилятору</strong> «тут может быть null». Но чтобы
+        <em>вызвать</em> метод у nullable-ссылки, нужно сначала проверить, что она не null. <code>?.</code> — это и
+        есть встроенная проверка: «если null — не вызывай». Без него код <code>_next.Run(...)</code> не
+        скомпилируется (предупреждение), а если бы скомпилировался — упал бы.</p>
+    </div>
+
+    <h2>Родственные операторы</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string? name = null;
+
+string a = name ?? "без имени";          // ?? — «если null, взять правое»
+name ??= "значение по умолчанию";        // ??= — присвоить, если null
+
+int? count = null;
+int n = count ?? 0;                      // 0
+
+// «получить или упасть» — частая идиома в сервисах
+var order = await repo.FindAsync(id) ?? throw new NotFoundException(id);
+
+// проверки без операторов
+if (order is null) { … }
+if (order is not null) { … }</code></pre>
+    </div>
+
+    <h2>Класс, который ссылается на самого себя</h2>
+    <p>Вопрос из главы про цепочку: «как класс <code>Check</code> может содержать поле своего же типа
+      <code>private Check? _next</code>, если класса ещё нет?» Ответ: потому что поле — это <strong>ссылка</strong>,
+      а не вложенный объект.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Node
+{
+    public int Value;
+    public Node? Next;          // ✔ ссылка на тот же тип — законно
+}
+
+var first = new Node { Value = 1 };
+first.Next = new Node { Value = 2 };
+first.Next.Next = new Node { Value = 3 };
+
+// обход: идём по ссылкам, пока не дойдём до null
+for (var node = first; node is not null; node = node.Next)
+    Console.WriteLine(node.Value);      // 1, 2, 3</code></pre>
+    </div>
+    <ul>
+      <li><strong>Ссылка занимает фиксированный размер</strong> (8 байт на 64-битной системе) — компилятору не нужно
+        знать полный размер <code>Node</code>, чтобы объявить поле-ссылку.</li>
+      <li><strong>Тип «завершён» после объявления</strong>: внутри тела класса имя <code>Node</code> уже известно.</li>
+      <li>Так устроены <strong>связные списки, деревья, графы</strong> и цепочки обработчиков.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">А со <code>struct</code> так нельзя</span>
+      <p><code>struct S { public S Inner; }</code> не скомпилируется: значение хранится <strong>внутри</strong>
+        значения, и размер получился бы бесконечным. Обходной путь — ссылка (<code>S?</code>), массив или
+        <code>class</code>.</p>
+    </div>
+
+    <h2>Как это работает в цепочке</h2>
+    <p>Соберём цепочку из двух звеньев и посмотрим, что делает <code>_next?.Run(...)</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">abstract class Check
+{
+    private Check? _next;                                  // ссылка на следующее звено
+    public Check Next(Check next) { _next = next; return next; }
+
+    public string? Run(int amount)
+    {
+        var error = Validate(amount);
+        if (error is not null) return error;               // 1) нашли проблему — остановились
+        return _next?.Run(amount);                         // 2) иначе — спросили следующее звено
+    }
+
+    protected abstract string? Validate(int amount);
+}
+
+sealed class Positive : Check { protected override string? Validate(int a) =&gt; a &lt;= 0 ? "сумма ≤ 0" : null; }
+sealed class Limit    : Check { protected override string? Validate(int a) =&gt; a &gt; 1000 ? "больше лимита" : null; }
+
+var chain = new Positive();          // первое звено
+chain.Next(new Limit());             // прицепили второе
+
+Console.WriteLine(chain.Run(-5));    // «сумма ≤ 0»  ← первое звено остановило
+Console.WriteLine(chain.Run(5000));  // «больше лимита» ← первое пропустило, поймало второе
+Console.WriteLine(chain.Run(100));   // пусто          ← второе звено последнее: _next == null</code></pre>
+    </div>
+    <p>Ключ к пониманию — <strong>последнее звено</strong>: у него <code>_next == null</code>, поэтому
+      <code>_next?.Run(amount)</code> возвращает <code>null</code>. Этот <code>null</code> и означает «все проверки
+      пройдены».</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Run(-5):    Positive → «сумма ≤ 0»          (до Limit не дошли)
+Run(5000):  Positive → null (ок) → Limit → «больше лимита»
+Run(100):   Positive → null (ок) → Limit → null (ок) → _next == null → вернули null</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>null</code> — отсутствие ссылки; у значимых типов его нет, есть <code>default</code>.</li>
+        <li><code>?.</code> = «если слева не null — вызови, иначе верни null»; результат всегда nullable.</li>
+        <li><code>??</code> — значение по умолчанию, <code>??=</code> — присвоить, если null,
+          <code>?? throw …</code> — «получить или упасть».</li>
+        <li>Класс может содержать поле своего типа, потому что это <strong>ссылка</strong> фиксированного размера;
+          struct — не может.</li>
+        <li>В цепочке <code>_next?.Run(…)</code> возвращает <code>null</code> на последнем звене — это и есть
+          «дошли до конца».</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs08-task-run.html">← <span class="sp">Глава 8. Task.Run: когда нужен и когда вредит</span></a>
+      <a href="csharp.html"><span class="sp">Оглавление раздела</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
