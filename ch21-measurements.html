@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 21 · Измерения и профилирование</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -18,15 +22,262 @@
     <h1>Глава 21. Измерения и профилирование</h1>
     <p class="sublead">p95/p99, dotnet-counters, BenchmarkDotNet, нагрузочные тесты</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+    <h2>Зачем измерять (и почему «на глаз» не работает)</h2>
+    <p>Оптимизация без цифр — это гадание: правки делаются «по ощущениям», а стало ли лучше — непонятно. Причём
+      ощущения обманывают системно: узкое место почти всегда <strong>не там, где кажется</strong> — не в C#-коде, а
+      в базе, сети, пуле соединений или в лишних запросах.</p>
+    <p>Три вопроса, на которые нужен ответ <em>до</em> любых изменений:</p>
+    <ol>
+      <li><strong>Что</strong> медленно — какой сценарий, эндпоинт, запрос?</li>
+      <li><strong>Где</strong> — приложение, база, сеть, внешний сервис?</li>
+      <li><strong>Сколько</strong> — какая цифра сейчас и какая должна быть?</li>
+    </ol>
+    <div class="box tip">
+      <span class="t">Правило, которое экономит недели</span>
+      <p>Сначала <strong>измеряем</strong>, потом <strong>меняем</strong>, потом <strong>измеряем снова</strong>.
+        Правка без замера «до» и «после» — это не оптимизация, а вера.</p>
     </div>
+
+    <h2>Что мерить у сервиса</h2>
+    <table>
+      <thead><tr><th>Метрика</th><th>Что показывает</th><th>На что смотреть</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Пропускная способность</strong></td><td>Запросов в секунду (RPS)</td><td>Растёт ли она при добавлении нагрузки или упирается в потолок</td></tr>
+        <tr><td><strong>Задержка</strong></td><td>Сколько идёт запрос</td><td><strong>p95/p99</strong>, а не среднее (глава 1)</td></tr>
+        <tr><td><strong>Ошибки</strong></td><td>Доля 5xx и таймаутов</td><td>Рост ошибок — первый признак перегрузки</td></tr>
+        <tr><td><strong>Насыщение</strong></td><td>Насколько заняты ресурсы</td><td>CPU, память, пул соединений, очередь пула потоков</td></tr>
+      </tbody>
+    </table>
+    <p>Задержку удобно запомнить одной формулой (закон Литтла):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">L = λ × W      число запросов «в системе» = RPS × среднее время ответа
+
+Пример: 500 RPS × 0,2 с = 100 запросов одновременно.
+Если каждый держит поток — нужно 100 потоков; если ждёт через await — потоков нужно в разы меньше.</code></pre>
+    </div>
+
+    <h2>Инструменты .NET: <code>dotnet-counters</code></h2>
+    <p>Первый инструмент — «приборная панель»: показывает ключевые счётчики живого процесса каждую секунду. Ставится
+      как глобальный инструмент:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">dotnet tool install -g dotnet-counters
+
+# мониторинг процесса по PID: рантайм + ASP.NET Core
+dotnet-counters monitor --process-id 1234 \
+    --counters System.Runtime,Microsoft.AspNetCore.Hosting</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что видно на экране (пример)</p>
+      <pre><code class="language-text">[System.Runtime]
+    cpu-usage (%)                       42
+    gc-heap-size (MB)                   180
+    alloc-rate (B / 1 sec)              35 000 000     ← 35 МБ мусора в секунду
+    gen-0-gc-count / 1 sec              18
+    threadpool-queue-length             120            ← запросы ждут свободный поток
+
+[Microsoft.AspNetCore.Hosting]
+    requests-per-second                 480
+    current-requests                    95</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>alloc-rate</code></strong> высокий, а heap не растёт — много короткоживущего мусора: ищите
+        лишние строки, коллекции, бокс (глава 7).</li>
+      <li><strong><code>threadpool-queue-length</code></strong> растёт — потоки заняты ожиданием: смотрите
+        <code>.Result</code>/<code>.Wait()</code> и синхронные вызовы БД (глава 9).</li>
+      <li><strong><code>gen-0-gc-count</code></strong> очень высокий — GC работает почти непрерывно: это тоже про
+        аллокации.</li>
+      <li><strong><code>cpu-usage</code></strong> низкий, а задержка высокая — мы <em>ждём</em>, а не считаем.</li>
+    </ul>
+
+    <h2>Профилирование: где именно «горит»</h2>
+    <p>Счётчики отвечают «стало плохо», а профилировщик — «<strong>в каком методе</strong>». Для .NET есть
+      <code>dotnet-trace</code>: он снимает сэмплы стека и пишет файл, который открывают в Visual Studio или
+      Speedscope.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">dotnet tool install -g dotnet-trace
+
+# снять профиль CPU на 30 секунд
+dotnet-trace collect --process-id 1234 --profile cpu-sampling --duration 00:00:30
+
+# посмотреть, что происходит с GC и аллокациями
+dotnet-trace collect --process-id 1234 --profile gc-verbose --duration 00:00:30</code></pre>
+    </div>
+    <ul>
+      <li><strong>CPU-профиль</strong> показывает «горячие» методы: где процессор проводит время.</li>
+      <li><strong>GC-профиль</strong> — паузы, частоту сборок и кто создаёт больше всего мусора (глава 7).</li>
+      <li><strong><code>dotnet-gcdump</code></strong> — снимок кучи: помогает искать утечки (объекты, которые не
+        должны жить).</li>
+      <li>В IDE то же самое: Performance Profiler в Visual Studio, dotTrace в Rider, PerfView для глубокого разбора.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Порядок важен</span>
+      <p>Не начинайте с профилировщика «на всякий случай»: сначала метрики показывают <em>сценарий</em> (какой
+        эндпоинт, при какой нагрузке), и только потом профиль показывает <em>метод</em>. Иначе вы будете
+        оптимизировать код, который в проде не греется.</p>
+    </div>
+
+    <h2>Микробенчмарки: <code>BenchmarkDotNet</code></h2>
+    <p>Для «а что быстрее — конкатенация или <code>StringBuilder</code>?» нужен не <code>Stopwatch</code> в цикле,
+      а <strong>BenchmarkDotNet</strong>: он прогревает код (JIT, глава 3), делает много итераций и считает
+      статистику.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">[MemoryDiagnoser]                    // покажет ещё и аллокации
+public class ConcatBench
+{
+    private readonly string[] _parts = new[] { "a", "b", "c" /* … 100 частей */ };
+
+    [Benchmark(Baseline = true)]      // базовая линия, с ней сравнивают остальные
+    public string Concat()
+    {
+        var s = "";
+        foreach (var p in _parts) s += p;
+        return s;
+    }
+
+    [Benchmark]
+    public string Builder()
+    {
+        var sb = new StringBuilder();
+        foreach (var p in _parts) sb.Append(p);
+        return sb.ToString();
+    }
+}
+
+// в Program.cs консольного проекта:
+BenchmarkRunner.Run&lt;ConcatBench&gt;();</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что читать в отчёте</p>
+      <pre><code class="language-text">| Method  | Mean      | Ratio | Allocated |
+|---------|-----------|-------|-----------|
+| Concat  | 12.400 us | 1.00  | 45.2 KB   |   ← Baseline
+| Builder |  0.820 us | 0.07  |  2.1 KB   |   ← в 15 раз быстрее и в 20 раз меньше мусора</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>Mean</code></strong> — среднее время одной операции (после прогрева).</li>
+      <li><strong><code>Ratio</code></strong> — отношение к baseline: <code>0.07</code> = в 14 раз быстрее.</li>
+      <li><strong><code>Allocated</code></strong> — сколько памяти создаётся на операцию; часто важнее скорости
+        (глава 7).</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Почему «просто Stopwatch» обманывает</span>
+      <p>Первый вызов медленный (JIT), оптимизатор может выбросить «ненужный» результат, а сборка мусора может
+        прийтись как раз на замер. BenchmarkDotNet всё это учитывает: прогрев, итерации, статистику и аллокации
+        (подробнее о прогреве — глава 3).</p>
+    </div>
+
+
+    <h2>Свои метрики: почему гистограмма, а не среднее</h2>
+    <p>Стандартный способ в .NET — <code>System.Diagnostics.Metrics</code>: счётчики и <strong>гистограммы</strong>.
+      Гистограмма нужна потому, что из неё можно посчитать <strong>перцентили</strong>, а из среднего — нет.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">private static readonly Meter Meter = new("Orders");
+
+private static readonly Counter&lt;long&gt; OrdersCreated =
+    Meter.CreateCounter&lt;long&gt;("orders.created");
+
+private static readonly Histogram&lt;double&gt; PaymentDuration =
+    Meter.CreateHistogram&lt;double&gt;("payments.duration", unit: "ms");
+
+// в коде обработчика
+OrdersCreated.Add(1);
+
+var sw = Stopwatch.StartNew();
+try
+{
+    await _payments.ChargeAsync(order.Id, ct);
+}
+finally
+{
+    PaymentDuration.Record(sw.Elapsed.TotalMilliseconds);   // каждое измерение — в гистограмму
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>ASP.NET Core уже отдаёт</strong> гистограмму задержки запросов
+        (<code>http.server.request.duration</code>) — свои метрики нужны для того, что внутри.</li>
+      <li><strong>p95 считается в системе мониторинга</strong>: в Prometheus —
+        <code>histogram_quantile(0.95, …)</code>. Экспорт метрик — глава 20.</li>
+      <li><strong>Среднее не показывайте как цель</strong>: оно прячет «хвост» (глава 1).</li>
+    </ul>
+
+    <h2>Нагрузочный тест: как измерить сервис целиком</h2>
+    <p>Метрики говорят, что происходит; нагрузочный тест отвечает «сколько сервис держит и что будет на пике».
+      Инструменты: <strong>k6</strong>, <strong>Bombardier</strong>, <strong>wrk</strong>, JMeter.</p>
+    <div class="codewrap">
+      <pre><code class="language-javascript">// k6 run load.js
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+export const options = {
+  stages: [
+    { duration: '30s', target: 50 },   // 1) разгон до 50 виртуальных пользователей
+    { duration: '2m',  target: 50 },   // 2) плато: смотрим устойчивое поведение
+    { duration: '20s', target: 0 },    // 3) спад
+  ],
+  thresholds: {                        // тест «провален», если не выполнено
+    http_req_failed: ['rate&lt;0.01'],   // ошибок меньше 1 %
+    'http_req_duration{expected_response:true}': ['p(95)&lt;200', 'p(99)&lt;500'],
+  },
+};
+
+export default function () {
+  const res = http.get('http://localhost:5000/orders/1');
+  check(res, { 'status 200': (r) =&gt; r.status === 200 });
+  sleep(0.1);
+}</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Правила, без которых цифры бесполезны</span>
+      <ul>
+        <li><strong>Одинаковые условия для «до» и «после»:</strong> та же машина, тот же прогрев, те же данные.</li>
+        <li><strong>Прогрев</strong> перед замером: JIT, пулы, кэши (иначе первые секунды всё испортят).</li>
+        <li><strong>Профиль как в проде:</strong> разгон → плато → пик, а не «1000 RPS сразу».</li>
+        <li><strong>Смотреть p95/p99 и ошибки</strong>, а не только RPS.</li>
+        <li><strong>Не мерить с ноутбука по Wi-Fi</strong> и не на машине, где крутится база.</li>
+      </ul>
+    </div>
+
+    <h2>Ловушки измерений</h2>
+    <ul>
+      <li><strong>Холодный старт.</strong> Первые запросы после запуска медленнее: JIT (глава 3), пустые пулы,
+        холодный кэш. На «холодной» базе план запроса тоже может быть другим (глава 4 SQL-раздела).</li>
+      <li><strong>Локально ≠ прод.</strong> Другое железо, сеть, БД, соседи по хосту.</li>
+      <li><strong>Средняя задержка.</strong> 35 мс «в среднем» при p99 = 500 мс — это плохой сервис (глава 1).</li>
+      <li><strong>Оптимизация не того места.</strong> Профилировщик может показать, что 80 % времени — в
+        <code>JsonSerializer</code> или в ожидании БД, а не в «подозрительном» методе.</li>
+      <li><strong>Шум.</strong> Антивирус, индексация, соседний процесс — всё это попадает в замер.</li>
+    </ul>
+
+    <h2>Порядок диагностики: алгоритм</h2>
+    <ol>
+      <li><strong>Метрики</strong> — что медленно и при какой нагрузке (RPS, p95/p99, ошибки).</li>
+      <li><strong>Логи и трейсы</strong> — конкретный запрос и где в нём время (глава 20).</li>
+      <li><strong>Профилировщик</strong> — метод и аллокации (если проблема в коде).</li>
+      <li><strong>Гипотеза и правка</strong> — одна, а не пять сразу.</li>
+      <li><strong>Замер «до/после»</strong> — на одинаковых условиях, с прогревом.</li>
+      <li><strong>Регресс</strong> — оставить нагрузочный сценарий в CI, чтобы не сломать через месяц.</li>
+    </ol>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Без измерения нет оптимизации: <strong>что, где и сколько</strong> — до правок.</li>
+        <li>Метрики сервиса: RPS, <strong>p95/p99</strong>, ошибки, насыщение. Средняя задержка обманчива.</li>
+        <li><code>dotnet-counters</code> — быстрый взгляд: CPU, alloc-rate, GC, очередь пула потоков.</li>
+        <li><code>dotnet-trace</code>/профайлер — где именно время; <code>BenchmarkDotNet</code> — микробенчмарки
+          с прогревом и аллокациями.</li>
+        <li>Гистограммы (а не средние) дают перцентили; нагрузочный тест — ответ «сколько держим».</li>
+        <li>Сравнивать только в одинаковых условиях; иначе вы измеряете кэш, а не улучшение.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="ch20-logging.html">← <span class="sp">Глава 20. Логирование и наблюдаемость</span></a>
       <a href="ch22-sql.html"><span class="sp">Глава 22. Реляционные БД и SQL: индексы и план запроса</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
