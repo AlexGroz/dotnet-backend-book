@@ -162,7 +162,7 @@ await tx2.CommitAsync(ct);                                         // 6) сра�
     <ul>
       <li><strong>Prepared statements:</strong> сервер разбирает и планирует запрос один раз, затем выполняет по
         параметрам. В Npgsql это включается автоматически при частом повторе (<em>auto prepare</em>), а сами запросы
-        видны в <code>pg_stat_statements</code> (глава 21).</li>
+        видны в <code>pg_stat_statements</code> (глава 16 SQL-раздела).</li>
       <li><strong>Типы параметров задавайте явно</strong> (<code>NpgsqlDbType</code>) — это и защита от инъекций, и
         отсутствие неявных приведений, которые мешают использовать индексы.</li>
       <li><strong>Не собирайте SQL строками</strong> из значений: страдает и план, и безопасность.</li>
