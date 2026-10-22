@@ -47,6 +47,39 @@
       <li><code>app.Map(...)</code> — ветка по пути: часть запросов уходит в отдельный конвейер.</li>
       <li><code>app.UseMiddleware&lt;T&gt;()</code> — то же, но классом (удобно, когда есть зависимости).</li>
     </ul>
+    <div class="codewrap">
+      <p class="cap">Все четыре формы в одном Program.cs</p>
+      <pre><code class="language-csharp">// 1) Use — «пропусти дальше»: своя работа до и после next
+app.Use(async (context, next) =&gt;
+{
+    Console.WriteLine($"→ {context.Request.Path}");
+    await next();                                        // ушли в следующие компоненты
+    Console.WriteLine($"← {context.Response.StatusCode}");
+});
+
+// 2) UseMiddleware — то же, но классом (когда нужны зависимости из DI)
+app.UseMiddleware&lt;CorrelationIdMiddleware&gt;();
+
+// 3) Map — ветка по пути: только /admin уходит в отдельный конвейер
+app.Map("/admin", admin =&gt;
+{
+    admin.UseAuthentication();                           // эти компоненты — только для /admin
+    admin.Run(async context =&gt;                           // 4) Run — конец цепочки
+        await context.Response.WriteAsync("admin area"));
+});
+
+// обычные запросы
+app.MapGet("/", () =&gt; "hello");</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Форма</th><th>Кто получает управление дальше</th><th>Когда применять</th></tr></thead>
+      <tbody>
+        <tr><td><code>Use</code></td><td>Следующий компонент — если вызовете <code>next()</code></td><td>Сквозная логика: логи, метрики, обработка ошибок</td></tr>
+        <tr><td><code>Run</code></td><td>Никто — это конец конвейера</td><td>Терминальный ответ (например, внутри <code>Map</code>)</td></tr>
+        <tr><td><code>Map</code></td><td>Отдельный конвейер для части путей</td><td>Изоляция ветки: <code>/admin</code>, <code>/health</code></td></tr>
+        <tr><td><code>UseMiddleware&lt;T&gt;</code></td><td>Следующий компонент</td><td>Когда компоненту нужны зависимости из DI</td></tr>
+      </tbody>
+    </table>
     <div class="box warn">
       <span class="t">Порядок middleware — это поведение</span>
       <p>Обработка ошибок должна стоять <strong>раньше</strong> остальных, аутентификация — до авторизации,

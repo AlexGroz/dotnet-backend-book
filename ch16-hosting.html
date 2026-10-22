@@ -40,14 +40,36 @@ app.Run();                               // 4) запустить и слуша�
     </div>
 
     <h2>Что такое Generic Host</h2>
-    <p>За этим «билдером» стоит <strong>Generic Host</strong> — общий каркас приложения, который сразу даёт:</p>
-    <ul>
-      <li><strong>DI-контейнер</strong> (глава 15);</li>
-      <li><strong>конфигурацию</strong> (глава 17);</li>
-      <li><strong>логирование</strong>;</li>
-      <li><strong>управление жизненным циклом</strong> (запуск, остановка, gracefull shutdown);</li>
-      <li><strong>hosted services</strong> — фоновые задачи (<code>BackgroundService</code>, глава SQL 25 / .NET 26).</li>
-    </ul>
+    <p>Строка <code>WebApplication.CreateBuilder(args)</code> создаёт не «настройки», а <strong>хост</strong> —
+      каркас приложения. «За билдером» стоит <strong>Generic Host</strong>, и вот что он приносит:</p>
+    <table>
+      <thead><tr><th>Что даёт</th><th>Где это видно в коде</th><th>Глава</th></tr></thead>
+      <tbody>
+        <tr><td><strong>DI-контейнер</strong></td><td><code>builder.Services</code> — это и есть контейнер</td><td>15</td></tr>
+        <tr><td><strong>Конфигурация</strong></td><td><code>builder.Configuration</code> (appsettings.json, переменные окружения)</td><td>17</td></tr>
+        <tr><td><strong>Логирование</strong></td><td><code>builder.Logging</code>; <code>ILogger&lt;T&gt;</code> в конструкторах</td><td>20</td></tr>
+        <tr><td><strong>Жизненный цикл</strong></td><td><code>app.Run()</code>, корректная остановка (graceful shutdown)</td><td>эта глава</td></tr>
+        <tr><td><strong>Фоновые задачи</strong></td><td><code>IHostedService</code> / <code>BackgroundService</code></td><td>26</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var builder = WebApplication.CreateBuilder(args);
+//    ▲ builder — это WebApplicationBuilder; внутри уже создан Host
+//      builder.Services      — DI-контейнер (сюда AddScoped/AddSingleton)
+//      builder.Configuration — конфигурация
+//      builder.Logging       — настройка логов
+//      builder.Environment   — Development / Production
+
+var app = builder.Build();
+//    ▲ здесь контейнер «застывает»: после Build() новые регистрации не принимаются
+
+app.Run();
+//    ▲ запускает хост: поднимает Kestrel, стартует IHostedService,
+//      ждёт сигнала остановки и корректно завершает работу</code></pre>
+    </div>
+    <p>Увидеть это можно в отладке: поставьте точку останова на <code>builder</code> — тип
+      <code>WebApplicationBuilder</code>, у него есть свойство <code>Host</code>. А в минимальном воркере без веба
+      тот же хост создаётся строкой <code>Host.CreateApplicationBuilder()</code>.</p>
     <p>Важно: это не только веб. Консольное приложение, воркер и даже WPF поднимают тот же
       <code>Host</code> — поэтому DI и конфигурация работают одинаково везде.</p>
 

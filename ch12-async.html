@@ -39,12 +39,45 @@
     <h2>Правило №1: async до конца</h2>
     <p>Если метод асинхронный — он должен быть таким на всём пути, от эндпоинта до последнего слоя.
       Смешивание async и синхронного ожидания — причина «голодания» пула из главы 9.</p>
+    <p>«Не до конца» — это когда где-то в глубине асинхронный результат достают <strong>синхронно</strong>:</p>
+    <div class="codewrap">
+      <p class="cap">✘ async не до конца: синхронное ожидание внутри</p>
+      <pre><code class="language-csharp">public Order Get(int id)
+{
+    // .Result блокирует поток, пока не придёт ответ из базы
+    return _repo.FindAsync(id).Result;
+}
+
+// то же самое, другая запись
+public Order Get2(int id) =&gt; _repo.FindAsync(id).GetAwaiter().GetResult();</code></pre>
+    </div>
+    <p>Что происходит: поток пула <strong>стоит и ждёт</strong> базу. Под нагрузкой свободные потоки кончаются,
+      новые запросы встают в очередь — задержка растёт, начинаются таймауты.</p>
+    <div class="codewrap">
+      <p class="cap">✔ async до конца: ожидание не занимает поток</p>
+      <pre><code class="language-csharp">public async Task&lt;Order&gt; GetAsync(int id, CancellationToken ct)
+{
+    var order = await _repo.FindAsync(id, ct);   // поток освобождён на время запроса
+    return order;
+}
+
+// и выше по стеку — тоже await, до самого эндпоинта
+app.MapGet("/orders/{id:int}", async (int id, OrderService svc, CancellationToken ct) =&gt;
+    Results.Ok(await svc.GetAsync(id, ct)));</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Как проверить, что путь «до конца»</span>
+      <p>Пройдите от эндпоинта вниз: если хотя бы на одном слое есть <code>.Result</code>, <code>.Wait()</code>,
+        <code>GetAwaiter().GetResult()</code> или синхронный вызов БД — путь порван именно там. Лечится изменением
+        сигнатуры на <code>async Task&lt;T&gt;</code> по всей цепочке.</p>
+    </div>
 
     <h2>Что полезно знать</h2>
     <table>
       <thead><tr><th>Тема</th><th>Коротко</th></tr></thead>
       <tbody>
-        <tr><td><code>Task</code></td><td>«Обещание» результата. Обычный возвращаемый тип async-метода.</td></tr>
+        <tr><td><code>Task</code></td><td><strong>Задача без результата</strong>: «сделай и скажи, когда закончишь» — <code>async Task</code></td></tr>
+        <tr><td><code>Task&lt;T&gt;</code></td><td><strong>Задача с результатом</strong> типа <code>T</code>: «сделай и верни значение» — <code>async Task&lt;Order&gt;</code></td></tr>
         <tr><td><code>async void</code></td><td>Только для UI-событий. В серверном коде — нет: исключения не поймать.</td></tr>
         <tr><td><code>ValueTask</code></td><td>Экономит аллокацию, когда результат часто готов сразу (например, кэш). Обычно хватает <code>Task</code>.</td></tr>
         <tr><td><code>ConfigureAwait(false)</code></td><td>В библиотеках — чтобы не возвращаться в исходный контекст. В ASP.NET Core своего контекста нет, поэтому там менее критично.</td></tr>

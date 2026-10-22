@@ -82,6 +82,27 @@ Multiplexing=true          -- (Npgsql) несколько команд чере�
     <p>Пример: при <code>max_connections = 200</code> и трёх инстансах, каждый с пулом в 100 соединений, мы
       гарантированно упрёмся в лимит сервера — причём ошибки прилетят <em>не</em> из нашего кода, а от БД.</p>
     <div class="box note">
+      <span class="t">Что здесь что — и где смотреть</span>
+      <ul>
+        <li><strong>Инстанс</strong> — одна запущенная копия сервиса: процесс, контейнер, pod, «реплика». Считать
+          по факту: число реплик в деплойменте (<code>kubectl get pods</code>), число серверов за балансировщиком,
+          число экземпляров приложения.</li>
+        <li><strong>Max Pool Size</strong> — сколько соединений держит <strong>один инстанс</strong>. Смотреть: в
+          строке подключения (<code>Maximum Pool Size=100</code>), в коде
+          (<code>new NpgsqlConnectionStringBuilder(cs).MaxPoolSize</code>) или в конфиге приложения.</li>
+        <li><strong>max_connections</strong> — лимит сервера: <code>SHOW max_connections;</code> или
+          <code>SELECT setting FROM pg_settings WHERE name = 'max_connections';</code></li>
+        <li><strong>Запас</strong> — соединения, нужные <em>не</em> вашему сервису: админ (<code>psql</code>),
+          миграции, мониторинг, репликация, другие сервисы. Без запаса вы «съедите» весь лимит и не сможете даже
+          подключиться, чтобы починить.</li>
+      </ul>
+      <div class="codewrap">
+        <pre><code class="language-text">max_connections = 200
+запас (админ + миграции + мониторинг) = 20
+3 инстанса сервиса → 200 − 20 = 180 на всех → 180 / 3 = 60 соединений на инстанс</code></pre>
+      </div>
+    </div>
+    <div class="box note">
       <span class="t">Большой пул — не всегда хорошо</span>
       <p>Каждое соединение занимает память сервера и требует переключения контекста. Часто лучше
         <strong>меньший пул</strong> (например, 20–50): он естественным образом ограничивает параллелизм, запросы
@@ -104,26 +125,38 @@ Multiplexing=true          -- (Npgsql) несколько команд чере�
     <p>Открытая транзакция <strong>удерживает соединение до коммита</strong> (или отката). Отсюда правило:
       транзакция — только вокруг работы с БД, а подготовка и внешние вызовы — вне её.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// ✘ соединение занято всё время транзакции, включая сетевые ожидания
-await using var tx = await db.Database.BeginTransactionAsync(ct);
-db.Orders.Add(order);
-await db.SaveChangesAsync(ct);
-await _payment.ChargeAsync(order.Id, ct);      // 300 мс … 3 с по сети
-await tx.CommitAsync(ct);
+      <pre><code class="language-csharp">// ✘ ПЛОХО: транзакция открыта, пока идут сетевые вызовы
+await using var tx = await db.Database.BeginTransactionAsync(ct);  // 1) взяли соединение из пула
+db.Orders.Add(order);                                              // 2) заказ в память (в БД ещё ничего)
+await db.SaveChangesAsync(ct);                                     // 3) INSERT, транзакция ОТКРЫТА
+await _payment.ChargeAsync(order.Id, ct);                          // 4) HTTP 300 мс…3 с, соединение занято
+await tx.CommitAsync(ct);                                          // 5) только теперь освободили
 
-// ✔ подготовка — вне транзакции, запись — короткая
-var total = await _pricing.CalculateAsync(order, ct);
+// ✔ ХОРОШО: в транзакции — только работа с БД
+var total = await _pricing.CalculateAsync(order, ct);              // 1) расчёт — вне транзакции
 order.Total = total;
 
-await using var tx2 = await db.Database.BeginTransactionAsync(ct);
-db.Orders.Add(order);
-db.Outbox.Add(OutboxMessage.For(order));       // событие для соседей — в той же транзакции (глава 31)
-await db.SaveChangesAsync(ct);
-await tx2.CommitAsync(ct);</code></pre>
+await using var tx2 = await db.Database.BeginTransactionAsync(ct); // 2) открыли транзакцию
+db.Orders.Add(order);                                              // 3) заказ
+db.Outbox.Add(OutboxMessage.For(order));                           // 4) событие — в ТОЙ ЖЕ транзакции
+await db.SaveChangesAsync(ct);                                     // 5) один пакет INSERT
+await tx2.CommitAsync(ct);                                         // 6) сразу закрыли — миллисекунды
+
+// 7) событие отправит воркер из outbox (глава 31), уже без транзакции</code></pre>
     </div>
-    <p>Чем это заканчивается, если не соблюдать: пул исчерпан (<em>pool timeout</em>), в PostgreSQL висят
-      <code>idle in transaction</code>, autovacuum не может убрать мёртвые версии, блокировки строк держатся до
-      коммита. Подробнее — в SQL-разделе и в главе 31.</p>
+    <table>
+      <thead><tr><th></th><th>✘ транзакция вокруг HTTP</th><th>✔ транзакция только вокруг БД</th></tr></thead>
+      <tbody>
+        <tr><td>Сколько занято соединение</td><td>Всё время вызова платёжной системы</td><td>Миллисекунды записи</td></tr>
+        <tr><td>Блокировки строк</td><td>Держатся, пока идёт сетевой запрос</td><td>Освобождаются сразу после коммита</td></tr>
+        <tr><td>Если платёж упал</td><td>Откат, но HTTP уже ушёл — данные разошлись</td><td>Транзакция вообще не открывалась</td></tr>
+        <tr><td>Если упал коммит</td><td>Деньги списаны, заказа нет</td><td>Событие в outbox откатится вместе с заказом</td></tr>
+        <tr><td>Под нагрузкой</td><td>Пул исчерпан, <code>idle in transaction</code>, растёт bloat</td><td>Пул свободен, VACUUM не блокирован</td></tr>
+      </tbody>
+    </table>
+    <p>Главная мысль: <strong>в транзакции держим только работу с БД</strong>. Всё, что требует сети (платёж,
+      уведомление, брокер), — до или после; а событие для соседей надёжно сохраняется в <code>outbox</code> внутри
+      той же транзакции.</p>
 
     <h2>Подготовленные запросы и типы параметров</h2>
     <ul>

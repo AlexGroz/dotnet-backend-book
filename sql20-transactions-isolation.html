@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 20 · Транзакции и уровни изоляции</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -18,15 +21,177 @@
     <h1>Глава 20. Транзакции и уровни изоляции</h1>
     <p class="sublead">ACID, READ COMMITTED, REPEATABLE READ, SERIALIZABLE</p>
     <p><span class="tag lead">подводящая глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+    <h2>Что такое транзакция</h2>
+    <p><strong>Транзакция</strong> — это набор операторов, который база выполняет как <strong>одно целое</strong>:
+      либо все изменения применяются, либо ни одно. Границы задаются явно:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN;                                  -- начали транзакцию
+
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+
+COMMIT;                                 -- зафиксировали: оба изменения видны навсегда
+
+-- или
+ROLLBACK;                               -- отменили: как будто ничего не было</code></pre>
     </div>
+    <p>Без <code>BEGIN</code> каждый оператор — сам себе транзакция (авто-коммит): выполнился и зафиксировался.</p>
+    <div class="box tip">
+      <span class="t">Главная мысль</span>
+      <p>Транзакция нужна там, где <strong>несколько изменений должны примениться вместе</strong>. Один
+        <code>UPDATE</code> атомарен и без неё.</p>
+    </div>
+
+    <h2>ACID — без магии</h2>
+    <table>
+      <thead><tr><th>Буква</th><th>Что означает</th><th>Как это видно на практике</th></tr></thead>
+      <tbody>
+        <tr><td><strong>A</strong>tomicity<br>(атомарность)</td><td>Всё или ничего</td><td>Сбой посередине → <code>ROLLBACK</code>, перевод не «половинчатый»</td></tr>
+        <tr><td><strong>C</strong>onsistency<br>(согласованность)</td><td>Ограничения не нарушены</td><td><code>NOT NULL</code>, <code>UNIQUE</code>, <code>CHECK</code>, внешние ключи — база не даст сохранить мусор</td></tr>
+        <tr><td><strong>I</strong>solation<br>(изоляция)</td><td>Параллельные транзакции не видят «полуготовых» данных друг друга</td><td>Уровни изоляции — ниже и в главе 21</td></tr>
+        <tr><td><strong>D</strong>urability<br>(надёжность)</td><td>После <code>COMMIT</code> данные не потеряются</td><td>Запись в журнал (WAL) сбрасывается на диск до ответа клиенту</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Зачем это помнить на собеседовании</span>
+      <p>ACID — не «свойство базы вообще», а <strong>набор гарантий</strong>, каждая из которых имеет цену. Изоляцию
+        можно ослабить (и получить больше параллельности), надёжность — ускорить (<code>synchronous_commit = off</code>,
+        теряя последние коммиты при сбое). Выбор всегда компромисс.</p>
+    </div>
+
+
+    <h2>Долгая транзакция — это дорого</h2>
+    <p>Пока транзакция открыта, база держит для неё:</p>
+    <ul>
+      <li><strong>снимок</strong> → <code>VACUUM</code> не может удалить версии, которые ещё «видны» → растёт bloat
+        (глава 23);</li>
+      <li><strong>блокировки</strong> изменённых строк → другие транзакции ждут (глава 22);</li>
+      <li>в приложении — <strong>соединение из пула</strong> → оно недоступно другим запросам (глава 23 .NET-раздела).</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- кто держит транзакции дольше всего
+SELECT pid,
+       state,
+       now() - xact_start AS xact_age,
+       left(query, 50)    AS last_query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_age DESC
+LIMIT 10;</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Особый случай: <code>idle in transaction</code></span>
+      <p>Транзакция открыта, но запросов нет — приложение «забыло» её закрыть (например, ждёт ответа внешнего
+        сервиса или пользователя). Лечится короткими транзакциями и настройкой сервера:
+        <code>idle_in_transaction_session_timeout</code> прибьёт такую сессию.</p>
+    </div>
+
+    <h2>Правила работы с транзакциями</h2>
+    <ol>
+      <li><strong>Транзакция — только вокруг работы с БД.</strong> Сеть, расчёты, ожидание ответа — до или после.</li>
+      <li><strong>Короткая.</strong> Ориентир — миллисекунды, а не секунды.</li>
+      <li><strong>Защитные таймауты</strong> — чтобы «залипшая» транзакция не держала ресурсы вечно.</li>
+      <li><strong>Retry на <code>40001</code>/<code>40P01</code></strong> — это штатная ситуация.</li>
+      <li><strong>Уровень изоляции — по сценарию</strong>, а не «чем выше, тем лучше».</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN;
+SET LOCAL lock_timeout      = '2s';   -- не ждать блокировку дольше 2 секунд
+SET LOCAL statement_timeout = '5s';   -- не выполнять запрос дольше 5 секунд
+
+-- … работа с БД …
+
+COMMIT;</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Транзакция</strong> — «всё или ничего»: <code>BEGIN</code>, изменения, <code>COMMIT</code> или
+          <code>ROLLBACK</code>.</li>
+        <li><strong>ACID</strong> — четыре гарантии: атомарность, согласованность, изоляция, надёжность; у каждой есть
+          цена.</li>
+        <li><strong>Уровень изоляции</strong> определяет, что видно из чужих изменений: RC (по умолчанию), RR
+          (снимок на транзакцию), Serializable (конфликты → <code>40001</code>).</li>
+        <li><strong><code>SAVEPOINT</code></strong> — откат части транзакции; ошибка внутри транзакции «отравляет»
+          её до <code>ROLLBACK</code>.</li>
+        <li><strong>Retry</strong> — часть контракта, а не костыль.</li>
+        <li><strong>Долгая транзакция</strong> держит снимок, блокировки и соединение — это причина bloat, deadlock’ов
+          и таймаутов.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="sql19-case-endpoint.html">← <span class="sp">Глава 19. Кейс: тормозит критический REST-эндпоинт</span></a>
       <a href="sql21-mvcc.html"><span class="sp">Глава 21. MVCC в PostgreSQL: версии строк и снимки</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
+
+    <h2>Уровни изоляции</h2>
+    <p>Уровень изоляции отвечает на вопрос: <strong>что транзакция видит из изменений других транзакций</strong>.
+      По умолчанию в PostgreSQL — <code>read committed</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SHOW default_transaction_isolation;          -- read committed
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;       -- на одну транзакцию
+-- или внутри транзакции, до первого запроса:
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Уровень</th><th>Что видит транзакция</th><th>Аномалии</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Read Uncommitted</strong></td><td>В PostgreSQL работает как Read Committed</td><td>Грязного чтения нет никогда</td></tr>
+        <tr><td><strong>Read Committed</strong><br><small>по умолчанию</small></td><td>Только зафиксированные данные; снимок берётся на <strong>каждый оператор</strong></td><td>Неповторяющееся чтение, фантомы</td></tr>
+        <tr><td><strong>Repeatable Read</strong></td><td>Снимок на <strong>всю транзакцию</strong>: данные не «меняются» под ногами</td><td>Возможны аномалии сериализации; потерянное обновление даёт ошибку <code>40001</code></td></tr>
+        <tr><td><strong>Serializable</strong></td><td>Как RR + отслеживание конфликтов (SSI)</td><td>Только откат с <code>40001</code> — это нормально, транзакцию повторяют</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Что выбирать</span>
+      <ul>
+        <li><strong>Read Committed</strong> — для обычных CRUD-операций: дёшево и достаточно.</li>
+        <li><strong>Repeatable Read</strong> — для отчёта из нескольких запросов: все чтения из одного снимка.</li>
+        <li><strong>Serializable</strong> — для правил «проверить и записать» (лимиты, остатки), обязательно с retry.</li>
+      </ul>
+      <p>Подробно про снимки и аномалии — глава 21.</p>
+    </div>
+
+    <h2><code>SAVEPOINT</code>: откатить часть транзакции</h2>
+    <p>Иногда нужно отменить не всё, а только последний шаг:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN;
+
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;   -- списали
+
+SAVEPOINT after_debit;                                      -- точка сохранения
+
+UPDATE payments SET status = 'sent' WHERE id = 42;          -- шаг, который может не получиться
+ROLLBACK TO SAVEPOINT after_debit;                          -- откатили ТОЛЬКО его
+
+UPDATE payments SET status = 'retry' WHERE id = 42;         -- пробуем иначе
+COMMIT;                                                     -- списание осталось</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Ошибка внутри транзакции «отравляет» её</span>
+      <p>После любой ошибки PostgreSQL помечает транзакцию как прерванную: следующие команды падают с
+        <code>current transaction is aborted</code>. Помогает либо <code>ROLLBACK</code> целиком, либо откат к
+        <code>SAVEPOINT</code>, если он был поставлен заранее.</p>
+    </div>
+
+    <h2>Ошибки, которые надо повторять</h2>
+    <table>
+      <thead><tr><th>Код</th><th>Имя</th><th>Когда возникает</th><th>Что делать</th></tr></thead>
+      <tbody>
+        <tr><td><code>40001</code></td><td><code>serialization_failure</code></td><td>Конфликт при <code>Repeatable Read</code>/<code>Serializable</code></td><td>Повторить транзакцию целиком</td></tr>
+        <tr><td><code>40P01</code></td><td><code>deadlock_detected</code></td><td>Две транзакции ждут друг друга (глава 22)</td><td>Повторить, порядок захвата — исправить</td></tr>
+        <tr><td><code>55P03</code></td><td><code>lock_not_available</code></td><td><code>lock_timeout</code> истёк</td><td>Повторить позже</td></tr>
+      </tbody>
+    </table>
+    <p>Поэтому <strong>retry — часть контракта</strong> транзакции, а не «костыль». Пример на C# — глава 21 и
+      глава 23 .NET-раздела.</p>
+

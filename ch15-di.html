@@ -48,8 +48,8 @@
       <p class="cap">Program.cs — регистрация. Делается ОДИН раз при старте приложения</p>
       <pre><code class="language-csharp">var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddScoped&lt;IOrderRepository, OrderRepository&gt;();
-builder.Services.AddScoped&lt;OrderService&gt;();
+builder.Services.AddScoped&lt;IOrderRepository, OrderRepository&gt;();  // просят интерфейс → создаём реализацию
+builder.Services.AddScoped&lt;OrderService&gt;();                        // просят сам класс → его и создаём
 
 var app = builder.Build();
 app.Run();</code></pre>
