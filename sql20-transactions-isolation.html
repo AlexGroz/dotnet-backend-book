@@ -104,34 +104,6 @@ SET LOCAL statement_timeout = '5s';   -- не выполнять запрос д
 COMMIT;</code></pre>
     </div>
 
-    <div class="box gold">
-      <span class="t">★ Что запомнить из главы</span>
-      <ul>
-        <li><strong>Транзакция</strong> — «всё или ничего»: <code>BEGIN</code>, изменения, <code>COMMIT</code> или
-          <code>ROLLBACK</code>.</li>
-        <li><strong>ACID</strong> — четыре гарантии: атомарность, согласованность, изоляция, надёжность; у каждой есть
-          цена.</li>
-        <li><strong>Уровень изоляции</strong> определяет, что видно из чужих изменений: RC (по умолчанию), RR
-          (снимок на транзакцию), Serializable (конфликты → <code>40001</code>).</li>
-        <li><strong><code>SAVEPOINT</code></strong> — откат части транзакции; ошибка внутри транзакции «отравляет»
-          её до <code>ROLLBACK</code>.</li>
-        <li><strong>Retry</strong> — часть контракта, а не костыль.</li>
-        <li><strong>Долгая транзакция</strong> держит снимок, блокировки и соединение — это причина bloat, deadlock’ов
-          и таймаутов.</li>
-      </ul>
-    </div>
-
-    <div class="pager">
-      <a href="sql19-case-endpoint.html">← <span class="sp">Глава 19. Кейс: тормозит критический REST-эндпоинт</span></a>
-      <a href="sql21-mvcc.html"><span class="sp">Глава 21. MVCC в PostgreSQL: версии строк и снимки</span> →</a>
-    </div>
-  </div>
-</div>
-<script>if (window.hljs) hljs.highlightAll();</script>
-</body>
-</html>
-
-
     <h2>Уровни изоляции</h2>
     <p>Уровень изоляции отвечает на вопрос: <strong>что транзакция видит из изменений других транзакций</strong>.
       По умолчанию в PostgreSQL — <code>read committed</code>:</p>
@@ -195,3 +167,29 @@ COMMIT;                                                     -- списание 
     <p>Поэтому <strong>retry — часть контракта</strong> транзакции, а не «костыль». Пример на C# — глава 21 и
       глава 23 .NET-раздела.</p>
 
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Транзакция</strong> — «всё или ничего»: <code>BEGIN</code>, изменения, <code>COMMIT</code> или
+          <code>ROLLBACK</code>.</li>
+        <li><strong>ACID</strong> — четыре гарантии: атомарность, согласованность, изоляция, надёжность; у каждой есть
+          цена.</li>
+        <li><strong>Уровень изоляции</strong> определяет, что видно из чужих изменений: RC (по умолчанию), RR
+          (снимок на транзакцию), Serializable (конфликты → <code>40001</code>).</li>
+        <li><strong><code>SAVEPOINT</code></strong> — откат части транзакции; ошибка внутри транзакции «отравляет»
+          её до <code>ROLLBACK</code>.</li>
+        <li><strong>Retry</strong> — часть контракта, а не костыль.</li>
+        <li><strong>Долгая транзакция</strong> держит снимок, блокировки и соединение — это причина bloat, deadlock’ов
+          и таймаутов.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="sql19-case-endpoint.html">← <span class="sp">Глава 19. Кейс: тормозит критический REST-эндпоинт</span></a>
+      <a href="sql21-mvcc.html"><span class="sp">Глава 21. MVCC в PostgreSQL: версии строк и снимки</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
