@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 15 · Поставка: CI/CD, теги и граница с Kubernetes</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk16-diagnostics.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть IV · Поставка и практика</div>
+    <h1>Глава 15. Поставка: CI/CD, теги и граница с Kubernetes</h1>
+    <p class="sublead">Сборка в пайплайне, <code>latest</code> и digest, и что Docker уже не делает</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li>Пайплайн: <code>dotnet test</code> → <code>docker build</code> → <code>docker push</code>
+          с тегом по git SHA; кэш сборки в CI (registry cache, inline cache).</li>
+        <li>Схема тегов: semver, SHA, <code>latest</code>; почему в проде фиксируют digest и как
+          откатываться.</li>
+        <li><code>dotnet publish /t:PublishContainer</code> — сборка образа без Dockerfile и без
+          Docker-демона (кратко).</li>
+        <li>Что дальше: Kubernetes Deployment/Service/Ingress, probes, HPA; Helm; где живут секреты.</li>
+        <li>Docker Compose против Kubernetes: таблица — одна машина против кластера, нет rolling
+          update против есть.</li>
+        <li>GitOps и откат: «предыдущий тег» как самый быстрый способ вернуть рабочую версию.</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk14-image-size-security.html">← <span class="sp">Глава 14. Размер и безопасность образа</span></a>
+      <a href="dk16-diagnostics.html"><span class="sp">Глава 16. Диагностика: OOMKilled, коды выхода, inspect</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

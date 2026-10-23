@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 6 · Кэш слоёв и .dockerignore</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk07-dotnet-multistage.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть II · Каждый день</div>
+    <h1>Глава 6. Кэш слоёв и .dockerignore</h1>
+    <p class="sublead">Почему сборка идёт четыре минуты вместо двадцати секунд и как это исправить</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li>Как Docker решает, что слой можно взять из кэша: контрольная сумма содержимого, а не время
+          изменения файла.</li>
+        <li>Что инвалидирует кэш: <code>COPY</code>/<code>ADD</code>, <code>RUN</code>, смена базового
+          образа, <code>--no-cache</code>.</li>
+        <li>Порядок инструкций: сначала то, что меняется редко (файлы проектов → <code>restore</code> →
+          остальной код).</li>
+        <li><code>.dockerignore</code>: <code>bin</code>, <code>obj</code>, <code>.git</code>,
+          <code>.vs</code>, тесты — и как он влияет на контекст и на кэш.</li>
+        <li>Кэш NuGet между сборками: <code>RUN --mount=type=cache,target=/root/.nuget/packages</code>.</li>
+        <li>Замер «до/после» на реальном проекте и кэш в CI (registry cache, inline cache).</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk05-dockerfile.html">← <span class="sp">Глава 5. Dockerfile: инструкции и их смысл</span></a>
+      <a href="dk07-dotnet-multistage.html"><span class="sp">Глава 7. Multi-stage: сборка .NET-образа построчно</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

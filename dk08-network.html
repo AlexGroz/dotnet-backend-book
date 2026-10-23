@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 8 · Сеть: порты, DNS и localhost</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk09-volumes.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть II · Каждый день</div>
+    <h1>Глава 8. Сеть: порты, DNS и localhost</h1>
+    <p class="sublead">Почему <code>localhost</code> внутри контейнера — это не хост, и как сервисы
+      находят друг друга по имени</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li><code>-p хост:контейнер</code>, привязка к <code>127.0.0.1</code>, случайный порт, почему
+          <code>-p 8080:80</code> «не работает» на .NET 8.</li>
+        <li>Три направления трафика: с хоста в контейнер, из контейнера в хост, из контейнера в
+          контейнер — таблица «что писать вместо localhost».</li>
+        <li>Сеть по умолчанию (bridge) без DNS и user-defined network с DNS по имени сервиса.</li>
+        <li><code>docker network create/ls/inspect</code>; контейнер в двух сетях.</li>
+        <li><code>host.docker.internal</code> и <code>--add-host</code> на Linux.</li>
+        <li>Разбор ошибки <code>Connection refused</code> к базе: как проверить имя, порт и
+          доступность изнутри.</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk07-dotnet-multistage.html">← <span class="sp">Глава 7. Multi-stage: сборка .NET-образа построчно</span></a>
+      <a href="dk09-volumes.html"><span class="sp">Глава 9. Данные: volumes и bind mounts</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

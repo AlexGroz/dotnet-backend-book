@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 11 · Compose: весь стек одной командой</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk12-dotnet-in-container.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть II · Каждый день</div>
+    <h1>Глава 11. Compose: весь стек одной командой</h1>
+    <p class="sublead">API + PostgreSQL + healthcheck и <code>depends_on</code> — и почему это не
+      «прод-оркестратор»</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li>Что такое <code>compose.yaml</code> и как он заменяет десяток <code>docker run</code> с
+          флагами.</li>
+        <li>Полный пример для .NET: сервис <code>api</code> (<code>build</code>,
+          <code>ports</code>, <code>environment</code>), сервис <code>db</code>
+          (<code>postgres:16</code>, том, healthcheck <code>pg_isready</code>).</li>
+        <li><code>depends_on</code> с <code>condition: service_healthy</code> — и почему без условия он
+          не спасает от «база ещё стартует».</li>
+        <li>Команды: <code>up -d --build</code>, <code>ps</code>, <code>logs -f api</code>,
+          <code>exec db psql</code>, <code>down</code>, <code>down -v</code>.</li>
+        <li>Профили, <code>.env</code>, переопределение файлов
+          (<code>compose.override.yaml</code>).</li>
+        <li>Границы: одна машина, нет rolling update и самовосстановления — что дальше (глава 15).</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk10-config-secrets.html">← <span class="sp">Глава 10. Конфигурация и секреты</span></a>
+      <a href="dk12-dotnet-in-container.html"><span class="sp">Глава 12. .NET в контейнере: память, CPU и GC</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

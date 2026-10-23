@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 13 · Запуск и остановка: порт, SIGTERM, healthcheck</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk14-image-size-security.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть III · .NET в контейнере</div>
+    <h1>Глава 13. Запуск и остановка: порт, SIGTERM, healthcheck</h1>
+    <p class="sublead">Почему .NET 8 слушает 8080, куда приходит <code>SIGTERM</code> и как не рвать
+      запросы при выкатке</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li>Порт: <code>ASPNETCORE_HTTP_PORTS=8080</code> в образах .NET 8, <code>ASPNETCORE_URLS</code>,
+          почему 80 не подходит non-root пользователю.</li>
+        <li><code>USER $APP_UID</code>: что меняется в правах и какие файлы становятся недоступны.</li>
+        <li><code>docker stop</code> → <code>SIGTERM</code> → <code>ApplicationStopping</code> →
+          <code>ShutdownTimeout</code> (30 с) против 10 с у Docker; <code>stop_grace_period</code> и
+          <code>-t</code>.</li>
+        <li>Как выглядит корректная остановка: перестать принимать новое, дождаться текущих запросов,
+          закрыть соединения.</li>
+        <li>Liveness и readiness: зачем два разных эндпоинта, как их проверять без <code>curl</code>
+          внутри образа.</li>
+        <li>Прогрев после старта: JIT и пулы (глава 21 книги по .NET) — почему readiness не должен быть
+          «сразу зелёным».</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk12-dotnet-in-container.html">← <span class="sp">Глава 12. .NET в контейнере: память, CPU и GC</span></a>
+      <a href="dk14-image-size-security.html"><span class="sp">Глава 14. Размер и безопасность образа</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

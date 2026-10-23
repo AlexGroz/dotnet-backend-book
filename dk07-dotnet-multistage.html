@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 7 · Multi-stage: сборка .NET-образа построчно</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk08-network.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть II · Каждый день</div>
+    <h1>Глава 7. Multi-stage: сборка .NET-образа построчно</h1>
+    <p class="sublead">SDK-стадия, publish, runtime-стадия и non-root — полный рабочий Dockerfile</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li>Зачем две стадии: SDK нужен только на сборке, в прод едет runtime.</li>
+        <li>Полный Dockerfile построчно: <code>FROM sdk AS build</code>, копирование
+          <code>sln</code>/<code>csproj</code>, <code>restore</code>, <code>COPY . .</code>,
+          <code>publish -c Release -o /app --no-restore</code>.</li>
+        <li>Вторая стадия: <code>aspnet:8.0</code>, <code>WORKDIR</code>,
+          <code>COPY --from=build</code>, <code>USER $APP_UID</code>, <code>ENTRYPOINT</code> в
+          exec-форме.</li>
+        <li>Что именно попадает в <code>/app</code> после <code>publish</code> и чем это отличается от
+          <code>build</code>.</li>
+        <li>Как проверить результат: размер образа, <code>docker history</code>, запуск и запрос к
+          <code>/health</code>.</li>
+        <li>Отдельные варианты: worker-сервис на <code>runtime</code>, несколько проектов в решении,
+          <code>--platform</code>.</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk06-build-cache.html">← <span class="sp">Глава 6. Кэш слоёв и .dockerignore</span></a>
+      <a href="dk08-network.html"><span class="sp">Глава 8. Сеть: порты, DNS и localhost</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Образ, слой и реестр</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk04-commands.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть I · Как это работает</div>
+    <h1>Глава 3. Образ, слой и реестр</h1>
+    <p class="sublead">Образ — это файлы плюс конфигурация, нарезанные на слои. Отсюда сразу объясняются
+      теги, digest, размер, кэш сборки и «почему на сервере другая версия».</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Что лежит внутри образа</h2>
+    <p>Образ — не «архив с программой». Внутри две части:</p>
+    <ul>
+      <li><strong>Слои</strong> — наборы файлов (по сути tar-архивы), наложенные друг на друга. Каждый
+        слой неизменяем.</li>
+      <li><strong>Конфигурация</strong> — JSON: переменные окружения, <code>Entrypoint</code>,
+        <code>Cmd</code>, пользователь, открытые порты, рабочая папка, healthcheck.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-bash"># конфигурация (env, entrypoint, user, ports)
+docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{json .Config}}' | head -c 400
+
+# слои: команда сборки, размер, хеш
+docker history mcr.microsoft.com/dotnet/aspnet:8.0</code></pre>
+    </div>
+    <p>Идентификатор образа — хеш, посчитанный по содержимому конфигурации и слоёв. Поэтому один и тот же
+      Dockerfile при тех же входных данных даёт один и тот же образ, а «поменяли файл вручную внутри
+      контейнера» на образ не влияет вообще — контейнер пишет только в свой записываемый слой (глава 2).</p>
+
+    <h2>Слои: почему десять контейнеров не занимают десять образов</h2>
+    <p>Слои разделяются между образами и контейнерами на диске. Схема для трёх контейнеров одного
+      приложения:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">слой N        ваш код (Api.dll, appsettings.json)          ← общий, лежит один раз
+слой N-1      aspnet runtime 8.0
+слой N-2      debian bookworm-slim (базовые библиотеки)
+...
+контейнер 1   + тонкий записываемый слой
+контейнер 2   + тонкий записываемый слой
+контейнер 3   + тонкий записываемый слой</code></pre>
+    </div>
+    <p>По этой же причине <code>docker pull</code> скачивает только то, чего у вас нет: если базовый
+      слой <code>aspnet:8.0</code> уже загружен, новый образ приложения «весит» только свои несколько
+      мегабайт.</p>
+
+    <h2>Dockerfile → образ</h2>
+    <p>Инструкции делятся на два типа:</p>
+    <table>
+      <tr><th>Тип инструкции</th><th>Что создаёт</th><th>Примеры</th></tr>
+      <tr><td>Меняет файловую систему</td><td><strong>Новый слой</strong> (и участвует в кэше)</td>
+        <td><code>RUN</code>, <code>COPY</code>, <code>ADD</code></td></tr>
+      <tr><td>Меняет только конфигурацию</td><td>Запись в конфиг образа, файлы не добавляет</td>
+        <td><code>ENV</code>, <code>ARG</code>, <code>WORKDIR</code>, <code>USER</code>,
+        <code>EXPOSE</code>, <code>ENTRYPOINT</code>, <code>CMD</code>, <code>LABEL</code>,
+        <code>HEALTHCHECK</code></td></tr>
+    </table>
+    <div class="box note">
+      <span class="t">Почему из этого следует «не удаляйте файлы в следующей инструкции»</span>
+      <p><code>RUN curl ... -o big.tar &amp;&amp; ... &amp;&amp; rm big.tar</code> — файл не попадёт в образ,
+        потому что создание и удаление произошли <em>в одном слое</em>. А если разнести на два
+        <code>RUN</code>, удаление попадёт в верхний слой, а сам файл останется в нижнем — образ будет
+        весить столько же, сколько и без удаления. Правило: «скачал и удалил» — в одной инструкции.</p>
+    </div>
+
+    <h2>Теги и digest: почему <code>latest</code> — ловушка</h2>
+    <p>Тег — это <strong>указатель</strong> на образ. Он изменяем: завтра <code>8.0</code> может означать
+      другой набор слоёв (вышел патч). Digest — хеш содержимого, он неизменяем.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># тег: удобно, но может «переехать»
+mcr.microsoft.com/dotnet/aspnet:8.0
+
+# тот же образ, зафиксированный по содержимому
+mcr.microsoft.com/dotnet/aspnet:8.0@sha256:3f1a2b...
+
+# посмотреть digest локального образа
+docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{index .RepoDigests 0}}'</code></pre>
+    </div>
+    <ul>
+      <li><code>latest</code> — это <strong>просто тег по умолчанию</strong>, а не «самая свежая
+        версия». <code>docker pull postgres</code> и <code>docker pull postgres:latest</code> — одно и
+        то же, и там может быть что угодно.</li>
+      <li>В Dockerfile приложения фиксируйте <strong>конкретную версию</strong>
+        (<code>8.0</code>, лучше — с дистрибутивом: <code>8.0-bookworm-slim</code>).</li>
+      <li>В проде полезно фиксировать <strong>digest</strong>: тогда «пересобрали и выкатили» не значит
+        «внезапно другой рантайм» (глава 15).</li>
+    </ul>
+
+    <h2>Реестр: как образ доезжает до сервера</h2>
+    <p>Реестр (registry) — хранилище образов по имени и тегу. Локально образ живёт в вашем Docker, в CI и
+      на сервере его берут из реестра.</p>
+    <table>
+      <tr><th>Реестр</th><th>Где встречается</th></tr>
+      <tr><td><code>mcr.microsoft.com</code></td><td>Официальные образы .NET и ASP.NET Core</td></tr>
+      <tr><td>Docker Hub (<code>docker.io</code>)</td><td>Публичные образы: <code>postgres</code>,
+        <code>redis</code>, <code>nginx</code>; у анонимных pull есть ограничения по частоте</td></tr>
+      <tr><td>GHCR, GitLab Registry</td><td>Образы вашего проекта рядом с репозиторием</td></tr>
+      <tr><td>ECR, ACR, Artifact Registry</td><td>Облачные реестры (AWS, Azure, GCP)</td></tr>
+      <tr><td>Harbor, Nexus, Artifactory</td><td>Свой реестр внутри компании</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker login ghcr.io                        # токен/пароль, не пароль от аккаунта
+docker build -t ghcr.io/acme/orders-api:1.4.2 .
+docker push ghcr.io/acme/orders-api:1.4.2
+docker pull ghcr.io/acme/orders-api:1.4.2</code></pre>
+    </div>
+    <p>Имя образа — это адрес: <code>реестр/владелец/имя:тег</code>. Если реестр не указан, используется
+      Docker Hub. Отсюда частая ошибка в CI: собрали как <code>orders-api</code>, а push делают в
+      <code>ghcr.io/acme/orders-api</code> — это разные имена, и «образа нет».</p>
+
+    <h2>Образы .NET: какой тег за что отвечает</h2>
+    <table>
+      <tr><th>Образ</th><th>Что внутри</th><th>Где использовать</th></tr>
+      <tr><td><code>dotnet/sdk:8.0</code></td><td>SDK: компилятор, MSBuild, NuGet</td><td>Только на
+        стадии сборки (глава 7)</td></tr>
+      <tr><td><code>dotnet/aspnet:8.0</code></td><td>ASP.NET Core runtime</td><td>Финальный образ
+        веб-приложения</td></tr>
+      <tr><td><code>dotnet/runtime:8.0</code></td><td>Только .NET runtime</td><td>Консольные сервисы,
+        воркеры</td></tr>
+      <tr><td><code>dotnet/runtime-deps:8.0</code></td><td>Зависимости без рантайма</td><td>Self-contained
+        и Native AOT приложения</td></tr>
+      <tr><td><code>*-alpine</code>, <code>*-chiseled</code></td><td>Минимальные варианты без лишнего
+        (часто без ICU и tzdata)</td><td>Когда важен размер — с оговорками из главы 14</td></tr>
+    </table>
+    <p>Версия в теге должна совпадать с целевой платформой проекта: приложение на
+      <code>net8.0</code> не запустится на <code>aspnet:6.0</code> — увидите
+      <code>You must install .NET to run this application</code>.</p>
+
+    <h2>Мультиархитектура: почему «exec format error»</h2>
+    <p>Образ собирается под архитектуру процессора. На Apple Silicon (arm64) по умолчанию получится
+      arm64-образ, который не запустится на amd64-сервере — и наоборот.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># на чём собираем и под что
+docker buildx build --platform linux/amd64 -t ghcr.io/acme/orders-api:1.4.2 --push .
+
+# сразу под две архитектуры
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/acme/orders-api:1.4.2 --push .</code></pre>
+    </div>
+    <p>Ошибка выглядит как <code>exec /usr/bin/dotnet: exec format error</code> — это не «битый образ», а
+      несовпадение архитектур.</p>
+
+    <h2>Сколько это занимает на диске</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker system df          # образы, контейнеры, тома, кэш сборки
+docker image prune        # удалить «висячие» образы без тега
+docker system prune -a    # удалить всё неиспользуемое (внимательно: образы тоже)</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Что стоит запомнить про размер</span>
+      <p>Размер образа — это сумма слоёв, а не «размер папки приложения». Поэтому образ на
+        <code>sdk</code> весит около гигабайта: там компилятор. Именно поэтому в проде используют
+        многостадийную сборку (глава 7), а не «один Dockerfile на всё».</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Образ = <strong>слои файлов</strong> + <strong>конфигурация</strong>; образ неизменяем, у
+          него есть хеш.</li>
+        <li>Слои общие для всех контейнеров и образов — поэтому десять контейнеров не занимают десять
+          копий.</li>
+        <li><code>RUN</code>/<code>COPY</code>/<code>ADD</code> создают слои; <code>ENV</code>,
+          <code>ENTRYPOINT</code>, <code>USER</code> — только конфигурацию.</li>
+        <li><strong>Тег может переехать, digest — нет</strong>; <code>latest</code> ничего не значит.</li>
+        <li>Реестр — это адрес образа; имя с реестром и без — разные образы.</li>
+        <li>Архитектура (amd64/arm64) должна совпадать, иначе <code>exec format error</code>.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="dk02-how-container-works.html">← <span class="sp">Глава 2. Контейнер — это процесс: namespaces, cgroups, слои</span></a>
+      <a href="dk04-commands.html"><span class="sp">Глава 4. Команды: run, ps, logs, exec</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

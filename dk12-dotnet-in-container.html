@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 12 · .NET в контейнере: память, CPU и GC</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk13-start-stop.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть III · .NET в контейнере</div>
+    <h1>Глава 12. .NET в контейнере: память, CPU и GC</h1>
+    <p class="sublead">Cgroup-лимиты, <code>HeapHardLimit</code>, Server GC и почему контейнер убивает
+      процесс с кодом 137</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li>Как рантайм узнаёт про лимиты: cgroup v1/v2, <code>memory.max</code>, <code>cpu.max</code>,
+          <code>Environment.ProcessorCount</code> внутри контейнера.</li>
+        <li>Куча и лимит: <code>HeapHardLimit</code> по умолчанию — 75 % лимита контейнера,
+          <code>DOTNET_GCHeapHardLimit</code>, <code>GCHeapHardLimitPercent</code>.</li>
+        <li>Server GC и число куч: когда «много ядер хоста» превращается в лишнюю память,
+          <code>DOTNET_PROCESSOR_COUNT</code>, <code>--cpus</code>.</li>
+        <li>OOMKilled: код выхода 137, <code>docker inspect</code>, как отличить OOM от
+          <code>docker kill</code> и от падения приложения.</li>
+        <li>Как смотреть реальное потребление: <code>docker stats</code>,
+          <code>dotnet-counters</code> внутри контейнера (глава 21 книги по .NET).</li>
+        <li>Практика: задать лимиты, прогнать нагрузку, найти момент роста и настроить GC.</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk11-compose.html">← <span class="sp">Глава 11. Compose: весь стек одной командой</span></a>
+      <a href="dk13-start-stop.html"><span class="sp">Глава 13. Запуск и остановка: порт, SIGTERM, healthcheck</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

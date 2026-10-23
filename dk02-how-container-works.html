@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 2 · Контейнер — это процесс: namespaces, cgroups, слои</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk03-images-layers-registry.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть I · Как это работает</div>
+    <h1>Глава 2. Контейнер — это процесс: namespaces, cgroups, слои</h1>
+    <p class="sublead">Контейнер собран из трёх механизмов ядра Linux. Поняв их, вы перестаёте угадывать,
+      почему команда «не работает», и можете объяснить это на интервью.</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Один процесс, которому выдали своё окружение</h2>
+    <p>Запустим контейнер и посмотрим на него с двух сторон — изнутри и с хоста:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># изнутри контейнера
+docker run --rm alpine ps aux
+
+PID   USER     TIME  COMMAND
+    1 root      0:00 ps aux          # ← единственный процесс, и он PID 1
+
+# с хоста, пока контейнер работает
+docker run -d --name demo alpine sleep 300
+ps aux | grep 'sleep 300'
+root  48173  ...  sleep 300          # ← тот же процесс, обычный PID на хосте</code></pre>
+    </div>
+    <p>Это главное, что нужно усвоить: <strong>контейнер — не «коробка с ОС»</strong>. На хосте это
+      обычный процесс (или несколько), которому ядро показало другую картину мира: свои процессы, свою
+      сеть, свою файловую систему. Docker — это инструмент, который готовит такую картину и запускает
+      процесс.</p>
+
+    <h2>Namespaces: что именно изолируется</h2>
+    <p>Namespace — механизм ядра «покажи этому процессу только часть мира». Docker использует несколько:</p>
+    <table>
+      <tr><th>Namespace</th><th>Что изолирует</th><th>Как заметно в работе</th></tr>
+      <tr><td><code>pid</code></td><td>Номера процессов</td><td>Внутри свой PID 1; процессы хоста не
+        видны</td></tr>
+      <tr><td><code>net</code></td><td>Сетевой стек: интерфейсы, IP, порты, таблицы
+        маршрутизации</td><td>Свой <code>eth0</code> и свой <code>localhost</code>; порт 8080 внутри —
+        не порт хоста (глава 8)</td></tr>
+      <tr><td><code>mnt</code></td><td>Точки монтирования и корень файловой системы</td><td>Внутри
+        <code>/</code> — это корень образа, а не корень хоста</td></tr>
+      <tr><td><code>uts</code></td><td>Hostname и домен</td><td><code>hostname</code> вернёт ID
+        контейнера</td></tr>
+      <tr><td><code>ipc</code></td><td>Разделяемая память и семафоры</td><td>Сервисы не «увидят»
+        очереди друг друга без явной настройки</td></tr>
+      <tr><td><code>user</code></td><td>Пользователи и их ID</td><td>Можно быть <code>root</code>
+        внутри и обычным пользователем на хосте (userns-remap)</td></tr>
+      <tr><td><code>cgroup</code></td><td>Дерево контрольных групп</td><td>Контейнер видит только свои
+        лимиты</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-bash"># внутри контейнера: чужих процессов нет
+docker run --rm alpine ps aux
+
+# внутри контейнера: свой сетевой стек
+docker run --rm alpine ip addr
+# 1: lo: ... 2: eth0: ... inet 172.17.0.2/16
+
+# а это — ядро хоста, не «ядро контейнера»
+docker run --rm alpine uname -a</code></pre>
+    </div>
+
+    <h2>cgroups: сколько можно потратить</h2>
+    <p>Namespaces отвечают на вопрос «что видно», cgroups — на вопрос «сколько разрешено».
+      Контрольные группы считают и ограничивают CPU, память, ввод-вывод, число процессов.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker run -d --name limited --memory 512m --cpus 1.5 my-api
+
+# внутри контейнера лимит видно как «свой» корень cgroup (cgroup v2)
+docker exec limited cat /sys/fs/cgroup/memory.max     # 536870912
+docker exec limited cat /sys/fs/cgroup/cpu.max        # 150000 100000  = 1.5 CPU
+
+# и с хоста
+docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' limited</code></pre>
+    </div>
+    <p>Зачем это разработчику: лимиты — не только про «чужой шумный сосед». От них зависит поведение
+      .NET: сколько памяти возьмёт GC, сколько куч создаст Server GC, сколько потоков захочет пул
+      (глава 12). Если лимит не задан, рантайм считает, что ему доступна вся память хоста.</p>
+
+    <h2>overlayfs: слои и copy-on-write</h2>
+    <p>Файловая система контейнера собрана из слоёв образа (они только для чтения) и одного тонкого
+      <strong>записываемого слоя</strong> сверху:</p>
+    <ul>
+      <li><strong>Чтение</strong> файла идёт из самого верхнего слоя, где он есть.</li>
+      <li><strong>Изменение</strong> файла из нижнего слоя сначала копирует его наверх (copy-up) — файл
+        в образе не меняется никогда.</li>
+      <li><strong>Удаление</strong> файла из нижнего слоя — это «whiteout»-метка в верхнем; файл остаётся
+        в образе, но не виден.</li>
+      <li><strong>Удаление контейнера</strong> удаляет записываемый слой. Всё, что приложение успело
+        записать в файлы, исчезает (глава 9).</li>
+    </ul>
+    <p>Отсюда два практических следствия: образ можно использовать для любого числа контейнеров без
+      копирования, а данные для хранения выносят в volume.</p>
+
+    <h2>Кто кого запускает</h2>
+    <p>Цепочка внутри Docker Engine:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker (CLI)  →  dockerd  →  containerd  →  containerd-shim  →  runc  →  ваш процесс
+                 демон      менеджер       следит за          создаёт           PID 1
+                 API        контейнеров    контейнером        namespaces/cgroups</code></pre>
+    </div>
+    <p>Формат образа и формат запуска описаны стандартами <strong>OCI</strong>. Поэтому Docker — не
+      единственный вариант: <code>podman</code> запускает те же образы без демона, а Kubernetes обычно
+      работает напрямую с <code>containerd</code> (глава 15). Если на интервью спросят «обязателен ли
+      Docker в Kubernetes» — ответ: нет, обязателен OCI-образ.</p>
+
+    <h2>Чем это не виртуальная машина</h2>
+    <table>
+      <tr><th></th><th>Виртуальная машина</th><th>Контейнер</th></tr>
+      <tr><td>Ядро</td><td>своё, гость ОС</td><td>общее с хостом</td></tr>
+      <tr><td>Запуск</td><td>минуты (загрузка ОС)</td><td>доли секунды (запуск процесса)</td></tr>
+      <tr><td>Размер</td><td>гигабайты</td><td>десятки-сотни мегабайт</td></tr>
+      <tr><td>Изоляция</td><td>сильнее: своё ядро</td><td>слабее: общее ядро, namespaces</td></tr>
+      <tr><td>ОС внутри</td><td>любая</td><td>та же, что у хоста (Linux-образ на Linux)</td></tr>
+      <tr><td>Что можно менять</td><td>всё</td><td>нельзя менять ядро, <code>sysctl</code>, модули</td></tr>
+    </table>
+    <div class="box note">
+      <span class="t">Почему нельзя «поставить в контейнер вторую ОС»</span>
+      <p>Частая ошибка новичка — тянуть в образ <code>systemd</code>, <code>sshd</code>, <code>cron</code>:
+        «как на сервере». В контейнере должен жить <strong>один процесс</strong> (и его дети). Второй
+        сервис — второй контейнер. Иначе ломаются сигналы, логи и перезапуск: контейнер считается живым,
+        пока живёт PID 1.</p>
+    </div>
+
+    <h2>PID 1 и сигналы: задел на главу 13</h2>
+    <p><code>docker stop</code> посылает процессу <code>SIGTERM</code>, ждёт 10 секунд и добивает
+      <code>SIGKILL</code>. Ядро относится к PID 1 особо: сигнал, для которого не установлен обработчик,
+      <em>по умолчанию не убивает</em> процесс. Поэтому важно, <strong>кто</strong> у вас PID 1:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># exec-форма: PID 1 = dotnet, сигнал дойдёт до приложения
+ENTRYPOINT ["dotnet", "Orders.Api.dll"]
+
+# shell-форма: PID 1 = /bin/sh, который часто не пробрасывает SIGTERM дальше
+ENTRYPOINT dotnet Orders.Api.dll</code></pre>
+    </div>
+    <p>Именно из-за этого «контейнер не останавливается, приходится ждать 10 секунд и он умирает
+      жёстко». Подробный разбор — в главе 13.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Контейнер — это <strong>процесс</strong> (PID 1) плюс <strong>namespaces</strong>
+          (что видно) плюс <strong>cgroups</strong> (сколько можно) плюс <strong>слои</strong>
+          (файловая система образа + записываемый слой).</li>
+        <li>Ядро общее с хостом: <code>uname -a</code> показывает ядро хоста, модули и
+          <code>sysctl</code> менять нельзя.</li>
+        <li>Лимиты <code>--memory</code>/<code>--cpus</code> — это cgroups; .NET читает их и под них
+          подстраивает GC (глава 12).</li>
+        <li>Записываемый слой умирает вместе с контейнером — данные выносят в volume (глава 9).</li>
+        <li>Живёт контейнер, пока живёт PID 1; форма <code>ENTRYPOINT</code> решает, дойдёт ли до
+          приложения <code>SIGTERM</code>.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="dk01-why-containers.html">← <span class="sp">Глава 1. Зачем нужны контейнеры</span></a>
+      <a href="dk03-images-layers-registry.html"><span class="sp">Глава 3. Образ, слой и реестр</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

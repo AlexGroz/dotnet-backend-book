@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 14 · Размер и безопасность образа</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk15-delivery-cicd-k8s.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть IV · Поставка и практика</div>
+    <h1>Глава 14. Размер и безопасность образа</h1>
+    <p class="sublead">Chiseled и alpine, non-root, <code>--cap-drop</code>, сканирование уязвимостей и
+      фиксация версий</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li>Сколько весят варианты: <code>sdk</code>, <code>aspnet</code>, <code>aspnet:alpine</code>,
+          <code>chiseled</code> — и что внутри каждого.</li>
+        <li>Chiseled/distroless: нет шелла и пакетного менеджера, нужен
+          <code>InvariantGlobalization</code> и <code>tzdata</code> — что ломается и как это
+          заметить.</li>
+        <li>Trimming и Native AOT: экономия размера и памяти против рефлексии, EF Core и времени
+          сборки.</li>
+        <li>Безопасность рантайма: non-root, <code>--read-only</code>, <code>--cap-drop ALL</code>,
+          <code>no-new-privileges</code>, отказ от <code>sshd</code> внутри образа.</li>
+        <li>Сканирование: <code>trivy</code>, <code>docker scout</code>, как читать отчёт и что делать
+          с уязвимостями базового образа.</li>
+        <li>Дисциплина версий: фиксированный тег и digest, регулярное обновление базовых образов.</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk13-start-stop.html">← <span class="sp">Глава 13. Запуск и остановка: порт, SIGTERM, healthcheck</span></a>
+      <a href="dk15-delivery-cicd-k8s.html"><span class="sp">Глава 15. Поставка: CI/CD, теги и граница с Kubernetes</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

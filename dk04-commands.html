@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · Команды: run, ps, logs, exec</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk05-dockerfile.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть II · Каждый день</div>
+    <h1>Глава 4. Команды: run, ps, logs, exec</h1>
+    <p class="sublead">Десять команд закрывают почти всю ежедневную работу. Важно не выучить их список,
+      а понимать жизненный цикл контейнера — тогда каждая команда встаёт на своё место.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Жизненный цикл: четыре состояния</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash">create ──start──▶ running ──stop/kill──▶ exited ──rm──▶ (удалён)
+                  │  ▲
+                  └──┘ restart</code></pre>
+    </div>
+    <ul>
+      <li><strong>created</strong> — контейнер создан, процесс ещё не запущен (бывает редко, обычно
+        сразу <code>run</code>).</li>
+      <li><strong>running</strong> — живёт PID 1. Как только он завершился, контейнер
+        <strong>останавливается</strong> — даже если это была ошибка через 0,2 секунды.</li>
+      <li><strong>exited</strong> — процесс завершился. Файловая система и логи остались, можно
+        посмотреть причину.</li>
+      <li><strong>удалён</strong> — исчезли записываемый слой и метаданные; образ и тома остались.</li>
+    </ul>
+    <p><code>docker ps</code> показывает только <strong>running</strong>, <code>docker ps -a</code> —
+      все, включая упавшие. Это первое, что стоит проверить, когда «контейнера нет».</p>
+
+    <h2>run: одна команда вместо трёх</h2>
+    <p><code>docker run</code> = <em>pull (если образа нет) + create + start</em>. Флаги, которые нужны
+      в 95 % случаев:</p>
+    <table>
+      <tr><th>Флаг</th><th>Что делает</th></tr>
+      <tr><td><code>-d</code></td><td>В фоне (detached). Без него вывод процесса идёт в терминал, а
+        <code>Ctrl+C</code> контейнер останавливает</td></tr>
+      <tr><td><code>--rm</code></td><td>Удалить контейнер после остановки — для одноразовых запусков</td></tr>
+      <tr><td><code>--name api</code></td><td>Имя вместо случайного. Нужно для <code>logs</code>,
+        <code>exec</code>, <code>stop</code></td></tr>
+      <tr><td><code>-p 8080:8080</code></td><td>Опубликовать порт: <code>хост:контейнер</code> (глава 8)</td></tr>
+      <tr><td><code>-e KEY=value</code></td><td>Переменная окружения — так передают конфигурацию
+        (глава 10)</td></tr>
+      <tr><td><code>-v pgdata:/var/lib/postgresql/data</code></td><td>Том или папка с данными (глава 9)</td></tr>
+      <tr><td><code>-it</code></td><td>Интерактивно + терминал: для <code>sh</code> и <code>psql</code></td></tr>
+      <tr><td><code>--memory 512m --cpus 1.5</code></td><td>Лимиты cgroups (глава 12)</td></tr>
+      <tr><td><code>--restart unless-stopped</code></td><td>Перезапускать после падения и перезагрузки
+        хоста</td></tr>
+      <tr><td><code>--network app</code></td><td>В какую сеть подключить (глава 8)</td></tr>
+    </table>
+
+    <h2>Практика: PostgreSQL за тридцать секунд</h2>
+    <p>Самый частый сценарий новичка — «нужна база, а ставить её на машину не хочется»:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># 1) запустить базу в фоне, с паролем, портом и томом для данных
+docker run -d \
+  --name pg \
+  -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 \
+  -v pgdata:/var/lib/postgresql/data \
+  postgres:16
+
+# 2) посмотреть, что она жива
+docker ps
+
+# 3) подключиться psql изнутри контейнера
+docker exec -it pg psql -U postgres
+
+# 4) посмотреть логи сервера
+docker logs pg
+
+# 5) остановить и удалить (данные в томе pgdata останутся)
+docker stop pg
+docker rm pg</code></pre>
+    </div>
+    <p>Что здесь важно: пароль передан <strong>переменной окружения</strong>, порт
+      <strong>опубликован</strong> на хост, данные вынесены <strong>в том</strong>. Уберите
+      <code>-v</code> — и после <code>docker rm</code> база будет пустой (глава 9).</p>
+
+    <h2>Смотреть: ps, logs, inspect, stats</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker ps                       # что работает
+docker ps -a                    # включая упавшие
+docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+
+docker logs -f --tail 100 api   # последние 100 строк и следить дальше
+docker logs --since 10m api     # за последние 10 минут
+
+docker inspect api              # вся конфигурация контейнера (JSON)
+docker inspect -f '{{.State.ExitCode}}' api
+docker inspect -f '{{.HostConfig.Memory}}' api
+
+docker stats --no-stream        # CPU, память, сеть по контейнерам</code></pre>
+    </div>
+    <p><code>inspect</code> — главный инструмент разбора: там видно итоговый образ, переменные,
+      лимиты, сеть, точку монтирования, код выхода. Формат <code>-f</code> принимает Go-шаблоны,
+      поэтому нужное поле достаётся одной командой.</p>
+
+    <h2>Залезть внутрь: exec</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec -it api sh          # шелл внутри работающего контейнера
+docker exec -it api bash        # если образ на Debian и bash есть
+docker exec -u root api bash    # от root, когда приложение работает от app
+docker exec api printenv        # переменные окружения
+docker exec api ls -la /app     # что реально лежит в папке приложения</code></pre>
+    </div>
+    <ul>
+      <li><code>exec</code> запускает <strong>новый</strong> процесс в существующем контейнере — это
+        безопасно, основной процесс не затрагивается.</li>
+      <li><code>docker attach</code> — наоборот, подключается к stdio самого PID 1. <code>Ctrl+C</code>
+        там убивает контейнер; для отладки почти всегда нужен <code>exec</code>.</li>
+      <li>В минимальных образах (chiseled, distroless) <strong>нет шелла вообще</strong> — «зайти
+        внутрь» не получится, и это осознанный выбор в пользу безопасности (глава 14).</li>
+    </ul>
+
+    <h2>Остановить и удалить</h2>
+    <table>
+      <tr><th>Команда</th><th>Что делает</th></tr>
+      <tr><td><code>docker stop api</code></td><td><code>SIGTERM</code>, ожидание 10 с,
+        <code>SIGKILL</code> (глава 13)</td></tr>
+      <tr><td><code>docker kill api</code></td><td>Сразу <code>SIGKILL</code> — без graceful shutdown</td></tr>
+      <tr><td><code>docker start api</code></td><td>Запустить остановленный контейнер снова (тот же
+        записываемый слой)</td></tr>
+      <tr><td><code>docker restart api</code></td><td>stop + start</td></tr>
+      <tr><td><code>docker rm api</code></td><td>Удалить остановленный контейнер</td></tr>
+      <tr><td><code>docker rm -f api</code></td><td>Убить и удалить</td></tr>
+      <tr><td><code>docker container prune</code></td><td>Удалить <strong>все</strong> остановленные</td></tr>
+    </table>
+
+    <h2>Что удаляет что</h2>
+    <table>
+      <tr><th>Объект</th><th>Удаляется командой</th><th>Что будет с данными</th></tr>
+      <tr><td>Контейнер</td><td><code>docker rm</code></td><td>Записываемый слой пропадёт; тома
+        останутся</td></tr>
+      <tr><td>Том</td><td><code>docker volume rm</code>, <code>volume prune</code></td><td>Данные
+        <strong>пропадут</strong></td></tr>
+      <tr><td>Образ</td><td><code>docker rmi</code>, <code>image prune</code></td><td>Работающие
+        контейнеры не пострадают</td></tr>
+      <tr><td>Всё неиспользуемое</td><td><code>docker system prune -a</code></td><td>Может удалить
+        образы и кэш сборки</td></tr>
+    </table>
+
+    <div class="box warn">
+      <span class="t">Две команды, которые лучше не запускать «на всякий случай»</span>
+      <ul>
+        <li><code>docker system prune -a --volumes</code> — удаляет в том числе тома, то есть
+          <strong>базу данных</strong> локального стенда.</li>
+        <li><code>docker kill</code> для приложения, которое пишет данные, — это как выдернуть питание:
+          без graceful shutdown можно потерять незаписанное (глава 13).</li>
+      </ul>
+    </div>
+
+    <h2>Мелочи, которые экономят время</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker cp api:/app/appsettings.json .   # вытащить файл из контейнера
+docker diff api                          # что изменилось в записываемом слое
+docker top api                           # процессы контейнера
+docker port api                          # какие порты опубликованы
+docker logs api 2&gt;&amp;1 | head              # первые строки лога (если упал сразу)</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Контейнер живёт, пока живёт PID 1; упал процесс — контейнер <strong>exited</strong>.</li>
+        <li><code>docker ps</code> — только запущенные, <code>ps -a</code> — все; начинать разбор всегда
+          с <code>ps -a</code> и <code>logs</code>.</li>
+        <li><code>run</code> = pull + create + start; <code>-d</code>, <code>--name</code>,
+          <code>-p</code>, <code>-e</code>, <code>-v</code> — обязательный минимум.</li>
+        <li><code>exec</code> — новый процесс внутри (безопасно), <code>attach</code> — к PID 1
+          (опасно).</li>
+        <li><code>rm</code> удаляет контейнер, <code>volume rm/prune</code> — данные; это разные вещи.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="dk03-images-layers-registry.html">← <span class="sp">Глава 3. Образ, слой и реестр</span></a>
+      <a href="dk05-dockerfile.html"><span class="sp">Глава 5. Dockerfile: инструкции и их смысл</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

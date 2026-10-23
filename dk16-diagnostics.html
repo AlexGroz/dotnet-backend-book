@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 16 · Диагностика: OOMKilled, коды выхода, inspect</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="dk17-interview.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть IV · Поставка и практика</div>
+    <h1>Глава 16. Диагностика: OOMKilled, коды выхода, inspect</h1>
+    <p class="sublead">Контейнер не стартует или умер — алгоритм разбора по шагам</p>
+    <p><span class="tag core">основная глава</span></p>
+    <div class="wip">
+      <span class="t">Глава в работе</span>
+      <p>План главы:</p>
+      <ul>
+        <li>Порядок действий: <code>docker ps -a</code> → <code>logs</code> → <code>inspect</code>
+          <code>.State</code> → сеть → файлы.</li>
+        <li>Коды выхода: 0, 1, 127 (команды нет), 137 (<code>SIGKILL</code>/OOM), 143
+          (<code>SIGTERM</code>) — что каждый значит.</li>
+        <li>Как отличить OOM от ручного <code>kill</code>: <code>State.OOMKilled</code>, лимит памяти,
+          <code>docker stats</code>.</li>
+        <li>Сеть: <code>getent hosts db</code>, проверка порта изнутри, <code>docker network
+          inspect</code>.</li>
+        <li>Файлы и права: <code>docker diff</code>, bind mount, UID non-root.</li>
+        <li>Образ: <code>exec format error</code>, неверный <code>ENTRYPOINT</code>, отсутствующая
+          <code>Dll</code>, порт внутри не тот.</li>
+      </ul>
+    </div>
+    <div class="pager">
+      <a href="dk15-delivery-cicd-k8s.html">← <span class="sp">Глава 15. Поставка: CI/CD, теги и граница с Kubernetes</span></a>
+      <a href="dk17-interview.html"><span class="sp">Глава 17. Как отвечать на интервью по Docker</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>
