@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 5 · Версии строк: почему UPDATE «создаёт» строку</title>
+<title>Глава 7 · Версии строк: почему UPDATE «создаёт» строку</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,23 +13,23 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql06-data-types.html">Далее →</a>
+  <a href="sql08-data-types.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть II · Как PostgreSQL хранит данные</div>
-    <h1>Глава 5. Версии строк: почему UPDATE «создаёт» строку</h1>
+    <h1>Глава 7. Версии строк: почему UPDATE «создаёт» строку</h1>
     <p class="sublead">Почему <code>UPDATE</code> в PostgreSQL не меняет строку на месте — и откуда из этого
-      берутся версии строк, MVCC (глава 21), <code>VACUUM</code> и раздувание таблиц (глава 23).</p>
+      берутся версии строк, MVCC (глава 23), <code>VACUUM</code> и раздувание таблиц (глава 25).</p>
 
     <div class="box note">
       <span class="t">Три термина, которые встретятся дальше</span>
       <table>
         <thead><tr><th>Термин</th><th>Одной фразой</th><th>Подробно</th></tr></thead>
         <tbody>
-          <tr><td><strong>MVCC</strong></td><td>База хранит несколько версий одной строки, поэтому читатели не блокируют писателей</td><td>глава 21</td></tr>
-          <tr><td><strong><code>VACUUM</code></strong></td><td>Очистка мёртвых версий, которые больше никому не видны</td><td>глава 23</td></tr>
-          <tr><td><strong>Bloat</strong> (раздувание)</td><td>Рост таблицы из-за мёртвых версий и «дырок» в страницах</td><td>глава 23</td></tr>
+          <tr><td><strong>MVCC</strong></td><td>База хранит несколько версий одной строки, поэтому читатели не блокируют писателей</td><td>глава 23</td></tr>
+          <tr><td><strong><code>VACUUM</code></strong></td><td>Очистка мёртвых версий, которые больше никому не видны</td><td>глава 25</td></tr>
+          <tr><td><strong>Bloat</strong> (раздувание)</td><td>Рост таблицы из-за мёртвых версий и «дырок» в страницах</td><td>глава 25</td></tr>
         </tbody>
       </table>
     </div>
@@ -79,20 +79,20 @@ UPDATE orders SET amount = 200 WHERE id = 5;
     <p>Если по таблице часто выполняют <code>UPDATE</code>, версии копятся быстрее, чем их успевает убирать
       <code>VACUUM</code>. Таблица занимает всё больше места, а запросы читают всё больше страниц —
       то есть <em>тормозят</em>. Именно поэтому при миграции из Oracle важно настроить
-      <code>autovacuum</code> (глава 23).</p>
+      <code>autovacuum</code> (глава 25).</p>
 
     <div class="box warn">
       <span class="t">Ещё одно следствие: ctid нестабилен</span>
-      <p>Мы помним (глава 4), что адрес строки <code>ctid</code> меняется при <code>UPDATE</code> — именно
+      <p>Мы помним (глава 6), что адрес строки <code>ctid</code> меняется при <code>UPDATE</code> — именно
         потому, что строка физически переезжает на новое место. Поэтому <code>ctid</code> <strong>нельзя
         использовать как ключ</strong>.</p>
     </div>
 
     <h2>Куда это ведёт дальше</h2>
     <ul>
-      <li><strong>Часть VI</strong> — как работает MVCC и снимки (глава 21), блокировки (глава 22),
-        <code>VACUUM</code> и bloat (глава 23).</li>
-      <li><strong>Часть VIII</strong> — сравнение с Oracle, где прошлые версии хранятся иначе (глава 26).</li>
+      <li><strong>Часть VI</strong> — как работает MVCC и снимки (глава 23), блокировки (глава 24),
+        <code>VACUUM</code> и bloat (глава 25).</li>
+      <li><strong>Часть VIII</strong> — сравнение с Oracle, где прошлые версии хранятся иначе (глава 28).</li>
     </ul>
 
     <div class="box gold">
@@ -103,8 +103,8 @@ UPDATE orders SET amount = 200 WHERE id = 5;
     </div>
 
     <div class="pager">
-      <a href="sql04-pages-heap.html">← <span class="sp">Глава 4. Страницы и heap</span></a>
-      <a href="sql06-data-types.html"><span class="sp">Глава 6. Типы данных и их особенности</span> →</a>
+      <a href="sql06-pages-heap.html">← <span class="sp">Глава 6. Страницы и heap</span></a>
+      <a href="sql08-data-types.html"><span class="sp">Глава 8. Типы данных и их особенности</span> →</a>
     </div>
   </div>
 </div>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 8 · B-tree и порядок колонок в индексе</title>
+<title>Глава 10 · B-tree и порядок колонок в индексе</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,19 +13,19 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql09-index-variants.html">Далее →</a>
+  <a href="sql11-index-variants.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть III · Индексы</div>
-    <h1>Глава 8. B-tree и порядок колонок в индексе</h1>
+    <h1>Глава 10. B-tree и порядок колонок в индексе</h1>
     <p class="sublead">B-tree — индекс по умолчанию и в 95% случаев достаточный. Разберёмся, как он устроен
       и почему порядок колонок решает, будет ли он полезен.</p>
 
     <h2>Что такое B-tree</h2>
     <p><strong>B-tree</strong> — это <strong>сбалансированное дерево</strong>: значения в нём отсортированы,
       а поиск идёт «спуском» сверху вниз (примерно <code>log N</code> шагов вместо просмотра всего). Это тот
-      самый «алфавитный указатель» из главы 7, только организованный деревом.</p>
+      самый «алфавитный указатель» из главы 9, только организованный деревом.</p>
     <div class="codewrap">
       <p class="cap">Как читать команду создания индекса</p>
       <pre><code class="language-sql">CREATE INDEX ON orders (created_at);
@@ -61,7 +61,7 @@ CREATE INDEX idx_orders_created_at ON orders (created_at);</code></pre>
         <tr><td><code>IS NULL</code></td><td>Да</td><td><code>WHERE comment IS NULL</code></td></tr>
         <tr><td>Префикс строки</td><td>Да (только слева)</td><td><code>WHERE name LIKE 'Иван%'</code></td></tr>
         <tr><td>Сортировка</td><td>Да</td><td><code>ORDER BY created_at DESC</code> — сортировка не нужна</td></tr>
-        <tr><td>Поиск по середине строки</td><td><strong>Нет</strong></td><td><code>LIKE '%Иван%'</code> не ускорит (нужен pg_trgm/GIN, глава 10)</td></tr>
+        <tr><td>Поиск по середине строки</td><td><strong>Нет</strong></td><td><code>LIKE '%Иван%'</code> не ускорит (нужен pg_trgm/GIN, глава 12)</td></tr>
       </tbody>
     </table>
 
@@ -126,12 +126,12 @@ CREATE INDEX ON orders (status, created_at DESC);</code></pre>
     <h2>Когда B-tree не поможет, даже если он есть</h2>
     <ul>
       <li><strong>Функция над колонкой:</strong> <code>WHERE lower(email) = …</code> — нужен функциональный
-        индекс (глава 9).</li>
+        индекс (глава 11).</li>
       <li><strong>Несовпадение типов:</strong> сравнение с приведением может «отключить» индекс.</li>
       <li><strong>Лидирующая колонка не в условии:</strong> индекс <code>(a, b)</code> не поможет условию
         только по <code>b</code>.</li>
       <li><strong>Слишком большая выборка:</strong> при этом планировщик честно предпочтёт <code>Seq Scan</code>
-        (глава 14).</li>
+        (глава 16).</li>
     </ul>
 
     <div class="box gold">
@@ -142,8 +142,8 @@ CREATE INDEX ON orders (status, created_at DESC);</code></pre>
     </div>
 
     <div class="pager">
-      <a href="sql07-what-is-index.html">← <span class="sp">Глава 7. Что такое индекс</span></a>
-      <a href="sql09-index-variants.html"><span class="sp">Глава 9. Составные, частичные, покрывающие индексы</span> →</a>
+      <a href="sql09-what-is-index.html">← <span class="sp">Глава 9. Что такое индекс</span></a>
+      <a href="sql11-index-variants.html"><span class="sp">Глава 11. Составные, частичные, покрывающие индексы</span> →</a>
     </div>
   </div>
 </div>

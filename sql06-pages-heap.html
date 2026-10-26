@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 4 · Страницы и heap: где физически лежат строки</title>
+<title>Глава 6 · Страницы и heap: где физически лежат строки</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,13 +13,13 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql05-row-versions.html">Далее →</a>
+  <a href="sql07-row-versions.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть II · Как PostgreSQL хранит данные</div>
-    <h1>Глава 4. Страницы и heap: где физически лежат строки</h1>
-    <p class="sublead">Чтобы понять, почему одни способы чтения быстрые, а другие медленные (глава 14),
+    <h1>Глава 6. Страницы и heap: где физически лежат строки</h1>
+    <p class="sublead">Чтобы понять, почему одни способы чтения быстрые, а другие медленные (глава 16),
       нужно увидеть, как данные лежат на диске. Здесь — только самое необходимое.</p>
 
     <h2>Таблица — это файл, разбитый на страницы</h2>
@@ -41,16 +41,16 @@
     <h2>Что такое heap (куча)</h2>
     <p>Сами таблицы в PostgreSQL называют <strong>heap</strong> — «куча». Это <strong>неупорядоченный</strong>
       набор страниц со строками: они лежат примерно в порядке вставки, но могут «расползаться» по мере
-      изменений (глава 23). То есть <strong>«физического порядка» по колонкам у таблицы нет</strong>.</p>
+      изменений (глава 25). То есть <strong>«физического порядка» по колонкам у таблицы нет</strong>.</p>
     <p>Именно поэтому, чтобы найти строки по условию, СУБД приходится либо просматривать все страницы
-      (<code>Seq Scan</code>), либо пользоваться индексом (глава 14).</p>
+      (<code>Seq Scan</code>), либо пользоваться индексом (глава 16).</p>
 
     <h2>ctid — физический адрес строки</h2>
     <p>У каждой строки есть «адрес» — <code>ctid</code>: номер страницы и номер строки внутри неё. Формат —
       <code>(страница, запись)</code>, например <code>(42,3)</code>.</p>
     <div class="box warn">
       <span class="t">ctid нестабилен</span>
-      <p>При <code>UPDATE</code> строка физически переезжает (глава 5), и <code>ctid</code> меняется. Поэтому
+      <p>При <code>UPDATE</code> строка физически переезжает (глава 7), и <code>ctid</code> меняется. Поэтому
         <strong>использовать <code>ctid</code> как ключ нельзя</strong>. Но именно им пользуются индексы:
         запись в индексе хранит ключ + <code>ctid</code> строки.</p>
     </div>
@@ -83,7 +83,7 @@
           расширение <code>pg_prewarm</code>.</li>
         <li><strong>Планировщик тоже учитывает кэш:</strong> параметр <code>effective_cache_size</code> говорит
           ему, сколько данных, по его ожиданию, лежит в памяти, — и от этого зависит выбор между индексом и
-          последовательным чтением (глава 11).</li>
+          последовательным чтением (глава 13).</li>
       </ul>
     </div>
 
@@ -96,7 +96,7 @@
       </tbody>
     </table>
     <p>Первая стратегия — это <code>Seq Scan</code>, вторая — <code>Index Scan</code>. Их подробный разбор —
-      глава 14, а сначала посмотрим, как устроены индексы (главы 7–10).</p>
+      глава 16, а сначала посмотрим, как устроены индексы (главы 9–12).</p>
 
     <div class="box gold">
       <span class="t">★ Что запомнить</span>
@@ -106,8 +106,8 @@
     </div>
 
     <div class="pager">
-      <a href="sql03-sql-basics.html">← <span class="sp">Глава 3. SQL: выборка, фильтрация и изменение данных</span></a>
-      <a href="sql05-row-versions.html"><span class="sp">Глава 5. Версии строк</span> →</a>
+      <a href="sql05-casts.html">← <span class="sp">Глава 5. Приведение типов: CAST и ::</span></a>
+      <a href="sql07-row-versions.html"><span class="sp">Глава 7. Версии строк</span> →</a>
     </div>
   </div>
 </div>

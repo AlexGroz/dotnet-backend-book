@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 19 · Кейс: тормозит критический REST-эндпоинт</title>
+<title>Глава 21 · Кейс: тормозит критический REST-эндпоинт</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,14 +13,14 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql20-transactions-isolation.html">Далее →</a>
+  <a href="sql22-transactions-isolation.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть V · Оптимизация запросов</div>
-    <h1>Глава 19. Кейс: тормозит критический REST-эндпоинт</h1>
+    <h1>Глава 21. Кейс: тормозит критический REST-эндпоинт</h1>
     <p class="sublead">Кейс ровно с собеседования: сложный запрос, перенесённый из Oracle, внезапно стал
-      медленным. Собираем вместе всё из глав 13–18.</p>
+      медленным. Собираем вместе всё из глав 15–20.</p>
 
     <h2>Ситуация</h2>
     <p>Эндпоинт <code>GET /api/orders?status=NEW&amp;page=1</code> давал p95 в несколько секунд. Запрос
@@ -53,7 +53,7 @@ LIMIT  5;</code></pre>
       <code>mean_ms</code> = 38 мс на вызов — время уходит в БД, и именно в этот запрос. Второй запрос
       «быстрый» (0.8 мс), но вызывается в десять раз чаще: если бы он начал расти, «виновником» оказался
       бы он — и это было бы видно по <code>total_ms</code>, а не по <code>mean_ms</code>. Методика целиком —
-      глава 16.</p>
+      глава 18.</p>
 
     <h2>Шаг 2. Снимаем план</h2>
     <div class="codewrap">
@@ -70,7 +70,7 @@ LIMIT  5;</code></pre>
     <ul>
       <li>По <code>status</code> и <code>created_at</code> <strong>нет подходящего индекса</strong> → Seq Scan.</li>
       <li>Планировщик <strong>недооценил</strong> число заказов (статистика устарела) → выбрал Nested Loop
-        (глава 15), который на реальных объёмах превратился в тысячи циклов.</li>
+        (глава 17), который на реальных объёмах превратился в тысячи циклов.</li>
       <li>Сортировка большого набора не влезла в <code>work_mem</code>.</li>
       <li>В <code>WHERE</code> было приведение типа/функция над колонкой (наследие Oracle) → индекс не
         применялся, даже если бы он был.</li>
@@ -89,7 +89,7 @@ LIMIT  5;</code></pre>
     <h2>Шаг 5. Проверяем</h2>
     <p>Снова <code>EXPLAIN (ANALYZE, BUFFERS)</code>: <code>Index Scan</code> вместо <code>Seq Scan</code>,
       оценка строк совпала с фактом, сортировка в памяти. Затем — замер p95/p99 эндпоинта на реальной
-      нагрузке (глава 31).</p>
+      нагрузке (глава 33).</p>
 
     <div class="box gold">
       <span class="t">★ Готовый ответ по этому вопросу (сжато)</span>
@@ -112,8 +112,8 @@ LIMIT  5;</code></pre>
     </div>
 
     <div class="pager">
-      <a href="sql18-fixes.html">← <span class="sp">Глава 18. Как чинить</span></a>
-      <a href="sql20-transactions-isolation.html"><span class="sp">Глава 20. Транзакции и уровни изоляции</span> →</a>
+      <a href="sql20-fixes.html">← <span class="sp">Глава 20. Как чинить</span></a>
+      <a href="sql22-transactions-isolation.html"><span class="sp">Глава 22. Транзакции и уровни изоляции</span> →</a>
     </div>
   </div>
 </div>

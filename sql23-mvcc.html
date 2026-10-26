@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 21 · MVCC в PostgreSQL: версии строк и снимки</title>
+<title>Глава 23 · MVCC в PostgreSQL: версии строк и снимки</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql22-locks.html">Далее →</a>
+  <a href="sql24-locks.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть VI · Транзакции и конкурентность</div>
-    <h1>Глава 21. MVCC в PostgreSQL: версии строк и снимки</h1>
+    <h1>Глава 23. MVCC в PostgreSQL: версии строк и снимки</h1>
     <p class="sublead">Как читатели и писатели не мешают друг другу</p>
     <p><span class="tag core">основная глава</span></p>
     <h2>Зачем вообще MVCC</h2>
@@ -37,7 +37,7 @@
       <span class="t">Следствие, которое надо помнить всегда</span>
       <p>В PostgreSQL <strong><code>UPDATE</code> не изменяет строку на месте</strong>: он создаёт новую версию, а
         старая остаётся в странице, пока её не уберёт <code>VACUUM</code>. Отсюда и <code>VACUUM</code>, и bloat,
-        и HOT-апдейты (глава 23), и требование к <code>fillfactor</code>.</p>
+        и HOT-апдейты (глава 25), и требование к <code>fillfactor</code>.</p>
     </div>
 
     <h2>Версия строки: <code>xmin</code>, <code>xmax</code>, <code>ctid</code></h2>
@@ -155,7 +155,7 @@ SELECT pg_current_xact_id();</code></pre>
       <li><strong>Читатель со «старым» снимком продолжает видеть старые версии</strong> — даже если писатель уже
         закоммитил новые. Именно поэтому чтение не блокирует запись.</li>
       <li><strong>Пока снимок жив, мёртвые версии убрать нельзя</strong>: они ещё кому-то видны. Поэтому долгая
-        транзакция мешает <code>VACUUM</code> и раздувает таблицу (глава 23).</li>
+        транзакция мешает <code>VACUUM</code> и раздувает таблицу (глава 25).</li>
     </ul>
 
     <h2>Уровни изоляции: разница именно в снимках</h2>
@@ -236,7 +236,7 @@ COMMIT;</code></pre>
       <span class="t">Что это значит для кода</span>
       <p>Повышение уровня изоляции <strong>не убирает конфликт</strong> — оно превращает «тихую порчу данных» в
         ошибку. Значит, транзакцию нужно <strong>повторять</strong>: код с <code>40001</code> обязан иметь retry
-        (глава 22), иначе под нагрузкой вы получите поток ошибок вместо корректных данных.</p>
+        (глава 24), иначе под нагрузкой вы получите поток ошибок вместо корректных данных.</p>
     </div>
 
     <h2>Повтор транзакции — часть работы с MVCC</h2>
@@ -296,7 +296,7 @@ LIMIT 10;</code></pre>
         растёт, хотя никто не мешает ей работать.</li>
       <li><strong>Открытый слот репликации</strong> — та же история: он тоже держит версии.</li>
       <li><strong>Следствие</strong>: <code>n_dead_tup</code> растёт, autovacuum не справляется, появляется bloat
-        и деградация (глава 23).</li>
+        и деградация (глава 25).</li>
       <li><strong>Проверка «а не я ли виноват»:</strong> посмотрите на самое старое
         <code>now() - xact_start</code> в <code>pg_stat_activity</code> — если там минуты, проблема в приложении,
         а не в базе.</li>
@@ -316,7 +316,7 @@ LIMIT 10;</code></pre>
         <tr><td>Отчёт из нескольких запросов</td><td><code>Repeatable Read</code> или один запрос</td><td>Все чтения из одного снимка — «рваной» картины нет</td></tr>
         <tr><td>«Проверить лимит и записать»</td><td><code>Serializable</code> + retry либо атомарный <code>UPDATE</code>/<code>ON CONFLICT</code></td><td>Проверка и запись должны быть согласованы</td></tr>
         <tr><td>Не перезаписать чужое изменение</td><td>Оптимистичный параллелизм: <code>xmin</code> как токен</td><td>Конфликт виден как исключение, а не как потеря данных</td></tr>
-        <tr><td>Нужно заблокировать строку</td><td><code>SELECT … FOR UPDATE</code></td><td>Пессимистичный вариант: остальные ждут (глава 22)</td></tr>
+        <tr><td>Нужно заблокировать строку</td><td><code>SELECT … FOR UPDATE</code></td><td>Пессимистичный вариант: остальные ждут (глава 24)</td></tr>
       </tbody>
     </table>
     <div class="codewrap">
@@ -357,13 +357,13 @@ modelBuilder.Entity&lt;Account&gt;()
         <li>Конфликт при высоком уровне изоляции — это ошибка <code>40001</code>, и её нужно
           <strong>повторять</strong>.</li>
         <li>Цена MVCC — <strong>мёртвые версии</strong>: <code>VACUUM</code> не может их убрать, пока их «видит»
-          чей-то снимок → горизонт, bloat (глава 23).</li>
+          чей-то снимок → горизонт, bloat (глава 25).</li>
       </ul>
     </div>
 
     <div class="pager">
-      <a href="sql20-transactions-isolation.html">← <span class="sp">Глава 20. Транзакции и уровни изоляции</span></a>
-      <a href="sql22-locks.html"><span class="sp">Глава 22. Блокировки, deadlock и retry</span> →</a>
+      <a href="sql22-transactions-isolation.html">← <span class="sp">Глава 22. Транзакции и уровни изоляции</span></a>
+      <a href="sql24-locks.html"><span class="sp">Глава 24. Блокировки, deadlock и retry</span> →</a>
     </div>
   </div>
 </div>

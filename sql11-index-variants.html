@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 9 · Составные, частичные, покрывающие и функциональные индексы</title>
+<title>Глава 11 · Составные, частичные, покрывающие и функциональные индексы</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql10-index-types-cost.html">Далее →</a>
+  <a href="sql12-index-types-cost.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть III · Индексы</div>
-    <h1>Глава 9. Составные, частичные, покрывающие и функциональные индексы</h1>
+    <h1>Глава 11. Составные, частичные, покрывающие и функциональные индексы</h1>
     <p class="sublead">Составные, частичные, покрывающие и функциональные индексы — те приёмы, которые реально
       ускоряют запросы. Каждый — с «когда применять» и примером.</p>
 
@@ -33,7 +33,7 @@ WHERE status = 'NEW'
 ORDER BY created_at DESC
 LIMIT 50;</code></pre>
     </div>
-    <p><strong>Помните правило «слева направо»</strong> (глава 8): условие должно быть на первых колонках.
+    <p><strong>Помните правило «слева направо»</strong> (глава 10): условие должно быть на первых колонках.
       Индекс <code>(status, created_at)</code> не поможет запросу только по <code>created_at</code>.</p>
 
     <h2>2. Частичный индекс (partial)</h2>
@@ -49,7 +49,7 @@ WHERE status = 'NEW';</code></pre>
 
     <h2>3. Покрывающий индекс (covering, INCLUDE)</h2>
     <p>В индекс добавляют колонки, которых <em>нет в условии</em>, но которые нужны в результате. Тогда
-      запрос обслуживается <strong>целиком индексом</strong> — это <code>Index Only Scan</code> (глава 14),
+      запрос обслуживается <strong>целиком индексом</strong> — это <code>Index Only Scan</code> (глава 16),
       в таблицу ходить не нужно.</p>
     <div class="codewrap">
       <pre><code class="language-sql">CREATE INDEX ON orders (status) INCLUDE (created_at, total);
@@ -115,9 +115,9 @@ CREATE UNIQUE INDEX ON users (email) WHERE deleted_at IS NULL;</code></pre>
 
     <div class="box warn">
       <span class="t">Не переусердствуйте</span>
-      <p>Каждый индекс — это место на диске и замедление записи (глава 10). Индексы ставят под конкретные
+      <p>Каждый индекс — это место на диске и замедление записи (глава 12). Индексы ставят под конкретные
         запросы, а не «на всякий случай». И обязательно проверяют результатом: план должен реально
-        использовать новый индекс (главы 13–14).</p>
+        использовать новый индекс (главы 15–16).</p>
     </div>
 
     <div class="box gold">
@@ -128,8 +128,8 @@ CREATE UNIQUE INDEX ON users (email) WHERE deleted_at IS NULL;</code></pre>
     </div>
 
     <div class="pager">
-      <a href="sql08-btree.html">← <span class="sp">Глава 8. B-tree и порядок колонок</span></a>
-      <a href="sql10-index-types-cost.html"><span class="sp">Глава 10. Другие типы индексов и их цена</span> →</a>
+      <a href="sql10-btree.html">← <span class="sp">Глава 10. B-tree и порядок колонок</span></a>
+      <a href="sql12-index-types-cost.html"><span class="sp">Глава 12. Другие типы индексов и их цена</span> →</a>
     </div>
   </div>
 </div>

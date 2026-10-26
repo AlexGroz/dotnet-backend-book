@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 20 · Транзакции и уровни изоляции</title>
+<title>Глава 22 · Транзакции и уровни изоляции</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql21-mvcc.html">Далее →</a>
+  <a href="sql23-mvcc.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть VI · Транзакции и конкурентность</div>
-    <h1>Глава 20. Транзакции и уровни изоляции</h1>
+    <h1>Глава 22. Транзакции и уровни изоляции</h1>
     <p class="sublead">ACID, READ COMMITTED, REPEATABLE READ, SERIALIZABLE</p>
     <p><span class="tag lead">подводящая глава</span></p>
     <h2>Что такое транзакция</h2>
@@ -50,7 +50,7 @@ ROLLBACK;                               -- отменили: как будто �
           <code>ROLLBACK</code>: либо применены <em>оба</em> изменения, либо ни одного. Не бывает, чтобы
           деньги у одного клиента списались, а другому не пришли</td></tr>
         <tr><td><strong>C</strong>onsistency<br>(согласованность)</td><td>Ограничения не нарушены</td><td><code>NOT NULL</code>, <code>UNIQUE</code>, <code>CHECK</code>, внешние ключи — база не даст сохранить мусор</td></tr>
-        <tr><td><strong>I</strong>solation<br>(изоляция)</td><td>Параллельные транзакции не видят «полуготовых» данных друг друга</td><td>Уровни изоляции — ниже и в главе 21</td></tr>
+        <tr><td><strong>I</strong>solation<br>(изоляция)</td><td>Параллельные транзакции не видят «полуготовых» данных друг друга</td><td>Уровни изоляции — ниже и в главе 23</td></tr>
         <tr><td><strong>D</strong>urability<br>(надёжность)</td><td>После <code>COMMIT</code> данные не потеряются</td><td>Запись в журнал (WAL) сбрасывается на диск до ответа клиенту</td></tr>
       </tbody>
     </table>
@@ -66,8 +66,8 @@ ROLLBACK;                               -- отменили: как будто �
     <p>Пока транзакция открыта, база держит для неё:</p>
     <ul>
       <li><strong>снимок</strong> → <code>VACUUM</code> не может удалить версии, которые ещё «видны» → растёт bloat
-        (глава 23);</li>
-      <li><strong>блокировки</strong> изменённых строк → другие транзакции ждут (глава 22);</li>
+        (глава 25);</li>
+      <li><strong>блокировки</strong> изменённых строк → другие транзакции ждут (глава 24);</li>
       <li>в приложении — <strong>соединение из пула</strong> → оно недоступно другим запросам (глава 23 .NET-раздела).</li>
     </ul>
     <div class="codewrap">
@@ -134,7 +134,7 @@ SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</code></pre>
         <li><strong>Repeatable Read</strong> — для отчёта из нескольких запросов: все чтения из одного снимка.</li>
         <li><strong>Serializable</strong> — для правил «проверить и записать» (лимиты, остатки), обязательно с retry.</li>
       </ul>
-      <p>Подробно про снимки и аномалии — глава 21.</p>
+      <p>Подробно про снимки и аномалии — глава 23.</p>
     </div>
 
     <h2><code>SAVEPOINT</code>: откатить часть транзакции</h2>
@@ -174,7 +174,7 @@ COMMIT;                                                     -- списание 
       <thead><tr><th>Код</th><th>Имя</th><th>Когда возникает</th><th>Что делать</th></tr></thead>
       <tbody>
         <tr><td><code>40001</code></td><td><code>serialization_failure</code></td><td>Конфликт при <code>Repeatable Read</code>/<code>Serializable</code></td><td>Повторить транзакцию целиком</td></tr>
-        <tr><td><code>40P01</code></td><td><code>deadlock_detected</code></td><td>Две транзакции ждут друг друга (глава 22)</td><td>Повторить, порядок захвата — исправить</td></tr>
+        <tr><td><code>40P01</code></td><td><code>deadlock_detected</code></td><td>Две транзакции ждут друг друга (глава 24)</td><td>Повторить, порядок захвата — исправить</td></tr>
         <tr><td><code>55P03</code></td><td><code>lock_not_available</code></td><td><code>lock_timeout</code> истёк</td><td>Повторить позже</td></tr>
       </tbody>
     </table>
@@ -199,8 +199,8 @@ COMMIT;                                                     -- списание 
     </div>
 
     <div class="pager">
-      <a href="sql19-case-endpoint.html">← <span class="sp">Глава 19. Кейс: тормозит критический REST-эндпоинт</span></a>
-      <a href="sql21-mvcc.html"><span class="sp">Глава 21. MVCC в PostgreSQL: версии строк и снимки</span> →</a>
+      <a href="sql21-case-endpoint.html">← <span class="sp">Глава 21. Кейс: тормозит критический REST-эндпоинт</span></a>
+      <a href="sql23-mvcc.html"><span class="sp">Глава 23. MVCC в PostgreSQL: версии строк и снимки</span> →</a>
     </div>
   </div>
 </div>

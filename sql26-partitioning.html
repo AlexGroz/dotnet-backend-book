@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 24 · Секционирование таблиц: Range, List, Hash и pruning</title>
+<title>Глава 26 · Секционирование таблиц: Range, List, Hash и pruning</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql25-oracle-pg-arch.html">Далее →</a>
+  <a href="sql27-oracle-pg-arch.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть VII · Большие данные и обслуживание</div>
-    <h1>Глава 24. Секционирование таблиц: Range, List, Hash и pruning</h1>
+    <h1>Глава 26. Секционирование таблиц: Range, List, Hash и pruning</h1>
     <p class="sublead">Что делать, когда таблица стала слишком большой: как разделить её на части так, чтобы
       запросы читали нужную часть, а старые данные уходили одним движением.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -30,7 +30,7 @@
       <li><strong>обслуживание</strong> (<code>VACUUM</code>, <code>ANALYZE</code>, <code>REINDEX</code>) занимает
         часы и добавляет нагрузку;</li>
       <li><strong>удаление старых данных</strong> превращается в миллионы <code>DELETE</code> и миллионы мёртвых
-        версий (глава 23);</li>
+        версий (глава 25);</li>
       <li><strong>архивирование и перенос</strong> части данных требуют полной копии таблицы.</li>
     </ul>
     <p>Секционирование решает это, разбивая одну логическую таблицу на много физических — <strong>секций</strong>.
@@ -200,7 +200,7 @@ ALTER TABLE orders ATTACH PARTITION orders_2026_02_old
       <li><strong><code>EXPLAIN</code></strong>: в плане виден узел <code>Append</code>, а в нём — сколько секций
         реально участвует. Строка <code>Subplans Removed</code> показывает, сколько отброшено.</li>
       <li><strong><code>EXPLAIN (ANALYZE, BUFFERS)</code></strong>: сколько страниц реально прочитано. Если
-        вернулось десять строк, а прочитаны миллионы страниц — отсечения нет (глава 17).</li>
+        вернулось десять строк, а прочитаны миллионы страниц — отсечения нет (глава 19).</li>
       <li><strong><code>pg_stat_user_tables</code> по секциям:</strong> если <code>seq_scan</code> растёт у
         <em>всех</em> секций, запросы ходят по всей таблице.</li>
       <li><strong>Каталог:</strong> сколько секций и какого они размера —
@@ -226,8 +226,8 @@ ALTER TABLE orders ATTACH PARTITION orders_2026_02_old
     </div>
 
     <div class="pager">
-      <a href="sql23-vacuum-bloat.html">← <span class="sp">Глава 23. VACUUM, autovacuum, bloat и HOT-апдейты</span></a>
-      <a href="sql25-oracle-pg-arch.html"><span class="sp">Глава 25. Архитектурные различия Oracle и PostgreSQL</span> →</a>
+      <a href="sql25-vacuum-bloat.html">← <span class="sp">Глава 25. VACUUM, autovacuum, bloat и HOT-апдейты</span></a>
+      <a href="sql27-oracle-pg-arch.html"><span class="sp">Глава 27. Архитектурные различия Oracle и PostgreSQL</span> →</a>
     </div>
   </div>
 </div>

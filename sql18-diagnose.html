@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 16 · Диагностика медленного запроса</title>
+<title>Глава 18 · Диагностика медленного запроса</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql17-explain-buffers.html">Далее →</a>
+  <a href="sql19-explain-buffers.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть V · Оптимизация запросов</div>
-    <h1>Глава 16. Диагностика медленного запроса по шагам</h1>
+    <h1>Глава 18. Диагностика медленного запроса по шагам</h1>
     <p class="sublead">Здесь начинается часть, посвящённая вопросу с собеседования. Принцип один:
       <strong>сначала измерить и локализовать, потом менять</strong>.</p>
 
@@ -35,9 +35,9 @@
       <li><strong>Найти самый дорогой узел.</strong> Идём по дереву плана и ищем, где сосредоточено время:
         <code>actual time × loops</code>. Часто один-два узла «съедают» почти всё.</li>
       <li><strong>Понять причину.</strong> Типичные корни: устаревшая статистика (плохая оценка
-        кардинальности, глава 12), отсутствие индекса (глава 7–9), <code>Seq Scan</code> на большой таблице
-        (глава 14), функция/приведение над колонкой в <code>WHERE</code>, нехватка памяти под сортировку или
-        хеш, неудачный тип соединения (глава 15), bloat (глава 23).</li>
+        кардинальности, глава 14), отсутствие индекса (глава 9–11), <code>Seq Scan</code> на большой таблице
+        (глава 16), функция/приведение над колонкой в <code>WHERE</code>, нехватка памяти под сортировку или
+        хеш, неудачный тип соединения (глава 17), bloat (глава 25).</li>
       <li><strong>Исправить и перепроверить.</strong> Индекс, статистика, переписанный запрос или настройки —
         и снова план. Сравнить «до/после» по плану <em>и</em> по реальной нагрузке.</li>
       <li><strong>Проверить эффект в приложении.</strong> Убедиться, что упала задержка эндпоинта (p95/p99),
@@ -83,7 +83,7 @@ SELECT pg_stat_statements_reset();</code></pre>
       <p>В таком запросе часто осталась «оракловская» логика: соединения через <code>(+)</code>,
         <code>ROWNUM</code>, <code>NVL</code>/<code>DECODE</code>, неявные преобразования типов, подсказки
         (hints). В PostgreSQL подсказок нет, а неявные преобразования убивают использование индексов. Это
-        первое, что стоит проверить (подробно — глава 29).</p>
+        первое, что стоит проверить (подробно — глава 31).</p>
     </div>
 
     <div class="box gold">
@@ -94,8 +94,8 @@ SELECT pg_stat_statements_reset();</code></pre>
     </div>
 
     <div class="pager">
-      <a href="sql15-join-algorithms.html">← <span class="sp">Глава 15. Алгоритмы соединений</span></a>
-      <a href="sql17-explain-buffers.html"><span class="sp">Глава 17. Что искать в EXPLAIN (ANALYZE, BUFFERS)</span> →</a>
+      <a href="sql17-join-algorithms.html">← <span class="sp">Глава 17. Алгоритмы соединений</span></a>
+      <a href="sql19-explain-buffers.html"><span class="sp">Глава 19. Что искать в EXPLAIN (ANALYZE, BUFFERS)</span> →</a>
     </div>
   </div>
 </div>

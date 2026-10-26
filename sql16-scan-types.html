@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 14 · Способы сканирования: Seq, Index, Index Only, Bitmap</title>
+<title>Глава 16 · Способы сканирования: Seq, Index, Index Only, Bitmap</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,20 +13,20 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql15-join-algorithms.html">Далее →</a>
+  <a href="sql17-join-algorithms.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
-    <h1>Глава 14. Способы сканирования: Seq, Index, Index Only, Bitmap</h1>
+    <h1>Глава 16. Способы сканирования: Seq, Index, Index Only, Bitmap</h1>
     <p class="sublead">«Scan» — это способ, которым СУБД достаёт строки таблицы. Разберём каждый способ
       с нуля: как работает, как выбирается и как его изменить.</p>
 
     <h2>Что такое «сканирование» (scan)</h2>
-    <p>Когда в плане (глава 13) появляется строка вида <code>Seq Scan on orders</code> или
+    <p>Когда в плане (глава 15) появляется строка вида <code>Seq Scan on orders</code> или
       <code>Index Scan using orders_pkey on orders</code> — это узел, который <strong>достаёт строки</strong>
       из таблицы. Способов сделать это несколько, и называется каждый <em>scan</em>.</p>
-    <p>Все способы сводятся к двум стратегиям из главы 4:</p>
+    <p>Все способы сводятся к двум стратегиям из главы 6:</p>
     <ul>
       <li><strong>читать подряд</strong> — страница за страницей (последовательно);</li>
       <li><strong>читать точечно</strong> — прыгать к нужным страницам по индексу.</li>
@@ -35,7 +35,7 @@
     <h2>Прямой ответ: когда выбирается Seq Scan</h2>
     <div class="box note">
       <span class="t">Seq Scan ≠ «нет индекса»</span>
-      <p>Это <strong>решение по стоимости</strong> (главы 11–12), а не признак отсутствия индекса. Возможны
+      <p>Это <strong>решение по стоимости</strong> (главы 13–14), а не признак отсутствия индекса. Возможны
         два случая:</p>
       <ul>
         <li><strong>Подходящего индекса нет</strong> — тогда выбора просто нет, и будет <code>Seq Scan</code>.</li>
@@ -44,7 +44,7 @@
           проигнорировав индекс.</li>
       </ul>
       <p>Поэтому если ты видишь <code>Seq Scan</code> — нельзя сразу делать вывод «нет индекса». Сначала
-        смотрим, <strong>сколько строк</strong> реально нужно (глава 13).</p>
+        смотрим, <strong>сколько строк</strong> реально нужно (глава 15).</p>
     </div>
 
     <h2>Seq Scan — последовательное чтение</h2>
@@ -66,7 +66,7 @@
     </ul>
 
     <h2>Index Scan — чтение по индексу</h2>
-    <p>Сначала ищет нужные строки <strong>в индексе</strong> (глава 7), получает их адреса (<code>ctid</code>),
+    <p>Сначала ищет нужные строки <strong>в индексе</strong> (глава 9), получает их адреса (<code>ctid</code>),
       а затем идёт в таблицу за остальными колонками.</p>
     <div class="codewrap">
       <p class="cap">Хороший случай: нужна одна строка</p>
@@ -98,7 +98,7 @@
     <div class="box note">
       <span class="t">Откуда в плане строка <code>Buffers:</code></span>
       <p>Она появляется <strong>только если снимать план с опцией <code>BUFFERS</code></strong>:
-        <code>EXPLAIN (ANALYZE, BUFFERS) …</code> (глава 13). Без неё этой строки в выводе не будет — поэтому
+        <code>EXPLAIN (ANALYZE, BUFFERS) …</code> (глава 15). Без неё этой строки в выводе не будет — поэтому
         в примерах её иногда не видно.</p>
       <ul>
         <li><strong><code>hit</code></strong> — страница уже была в памяти (быстро);</li>
@@ -110,11 +110,11 @@
       <span class="t">Почему «случайные» чтения дороже</span>
       <p>Читать страницы <strong>подряд</strong> диск умеет быстро (последовательный доступ). А прыгать
         к разбросанным страницам — медленнее, и это отражено в настройках: <code>seq_page_cost = 1</code>,
-        <code>random_page_cost = 4</code> (глава 11). Поэтому при большом числе строк индекс проигрывает.</p>
+        <code>random_page_cost = 4</code> (глава 13). Поэтому при большом числе строк индекс проигрывает.</p>
     </div>
     <h2>Index Only Scan — «всё нужное в индексе»</h2>
     <p>Если все колонки, которые нужны запросу, <strong>уже есть в индексе</strong> (это называют
-      <em>покрывающим</em> индексом, глава 9), в таблицу можно вообще не ходить.</p>
+      <em>покрывающим</em> индексом, глава 11), в таблицу можно вообще не ходить.</p>
     <div class="codewrap">
       <pre><code class="language-text">-&gt;  Index Only Scan using orders_status_idx on orders
       Index Cond: (status = 'NEW')
@@ -127,7 +127,7 @@
         СУБД всё равно пойдёт в таблицу.</li>
       <li><strong>Как получить:</strong> добавить нужные колонки в индекс
         (<code>CREATE INDEX ON orders (status) INCLUDE (created_at);</code>). Почему именно через
-        <code>INCLUDE</code>, а не «через запятую» — объяснено в главе 9.</li>
+        <code>INCLUDE</code>, а не «через запятую» — объяснено в главе 11.</li>
     </ul>
 
     <h2>Bitmap — «двухшаговое» чтение</h2>
@@ -153,7 +153,7 @@
     </ul>
 
     <h2>Как планировщик выбирает способ</h2>
-    <p>По <strong>стоимости</strong> (главы 11–12). Ключевые факторы: сколько строк вернёт запрос
+    <p>По <strong>стоимости</strong> (главы 13–14). Ключевые факторы: сколько строк вернёт запрос
       (<em>доля от таблицы</em>), сколько страниц придётся прочитать и насколько чтения «разбросаны».</p>
 
     <div class="box tip">
@@ -172,24 +172,24 @@
 
     <p>Ещё два фактора:</p>
     <ul>
-      <li><strong>Корреляция</strong> (глава 11, <code>correlation</code>): если данные физически упорядочены
+      <li><strong>Корреляция</strong> (глава 13, <code>correlation</code>): если данные физически упорядочены
         по колонке индекса, «прыжки» становятся почти последовательным чтением — и Index Scan дешевеет.</li>
       <li><strong><code>random_page_cost</code></strong>: на SSD случайные чтения дешевле, поэтому его
         снижают до ≈1.1 — и планировщик охотнее выбирает индексы.</li>
     </ul>
     <h2>Как изменить способ чтения (и можно ли «заставить»)</h2>
     <p>Прямого «приказа» использовать индекс в PostgreSQL <strong>нет</strong> (подсказок, как в Oracle, —
-      тоже, глава 18). Но на выбор можно влиять. По шагам:</p>
+      тоже, глава 20). Но на выбор можно влиять. По шагам:</p>
     <ol>
       <li><strong>Посчитать долю строк.</strong> Если запрос по факту возвращает больше ~5–10% таблицы —
         <code>Seq Scan</code> это <em>правильный</em> выбор, «чинить» нечего. Если меньше — идём дальше.</li>
       <li><strong>Проверить, есть ли подходящий индекс.</strong> Он должен совпадать с условием и порядком
-        колонок (главы 8–9). Нет — создать:
+        колонок (главы 10–11). Нет — создать:
         <code>CREATE INDEX ON orders (status, created_at DESC);</code></li>
       <li><strong>Убрать функцию/приведение над колонкой.</strong> <code>WHERE lower(email) = …</code> по
         индексу на <code>email</code> не пойдёт — либо убираем функцию, либо делаем функциональный индекс.</li>
       <li><strong>Обновить статистику.</strong> <code>ANALYZE orders;</code> Если оценка доли строк неверна
-        (глава 12), планировщик выберет план «вслепую» — например, посчитает, что строк много, и возьмёт
+        (глава 14), планировщик выберет план «вслепую» — например, посчитает, что строк много, и возьмёт
         Seq Scan.</li>
       <li><strong>Сделать индекс покрывающим</strong> — если запросу нужны ещё колонки, добавить их в
         <code>INCLUDE</code>, чтобы получить <code>Index Only Scan</code>.</li>
@@ -229,8 +229,8 @@
     </div>
 
     <div class="pager">
-      <a href="sql13-explain.html">← <span class="sp">Глава 13. EXPLAIN и EXPLAIN ANALYZE</span></a>
-      <a href="sql15-join-algorithms.html"><span class="sp">Глава 15. Алгоритмы соединений</span> →</a>
+      <a href="sql15-explain.html">← <span class="sp">Глава 15. EXPLAIN и EXPLAIN ANALYZE</span></a>
+      <a href="sql17-join-algorithms.html"><span class="sp">Глава 17. Алгоритмы соединений</span> →</a>
     </div>
   </div>
 </div>

@@ -229,7 +229,7 @@ await db.Orders.Where(o =&gt; o.CreatedAt &lt; cutoff).ExecuteDeleteAsync(ct);</
     <ul>
       <li><strong><code>ExecuteUpdate</code>/<code>ExecuteDelete</code></strong> (EF Core 7+) выполняют изменение
         одной командой. Плюс: они меняют только указанные колонки — это важно для HOT-апдейтов в PostgreSQL
-        (глава 23 SQL-раздела).</li>
+        (глава 25 SQL-раздела).</li>
       <li><strong>Массовые вставки:</strong> <code>AddRange</code> с разбивкой на батчи; для миллионов строк —
         <code>COPY</code> через <code>NpgsqlBinaryImporter</code>, а не по одной сущности.</li>
       <li><strong>Удаление старых данных</strong> лучше делать секциями (SQL-раздел про секционирование), а не

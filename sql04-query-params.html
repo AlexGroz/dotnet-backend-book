@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · Параметры в SQL: :имя, @имя и $1</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql05-casts.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть I · Фундамент</div>
+    <h1>Глава 4. Параметры в SQL: <code>:имя</code>, <code>@имя</code> и <code>$1</code></h1>
+    <p class="sublead">В книге постоянно встречается <code>created_at &gt;= :from</code>. Разберём, что это
+      такое, кто подставляет значение и почему это не «синтаксис PostgreSQL».</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Что такое параметр</h2>
+    <p><strong>Параметр</strong> — это место в тексте запроса, вместо которого подставляется значение
+      <em>отдельно</em> от самого текста. Запрос отправляется на сервер один раз в виде «шаблона», а
+      значения приходят отдельным сообщением:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- шаблон, который видит сервер
+SELECT id, created_at FROM orders
+WHERE  created_at &gt;= $1 AND created_at &lt; $2;
+
+-- значения, которые приходят вместе с ним (Bind): ['2026-01-01', '2026-02-01']</code></pre>
+    </div>
+    <p>Два следствия, ради которых это придумано:</p>
+    <ul>
+      <li><strong>Безопасность.</strong> Значение никогда не становится частью SQL-текста, поэтому
+        «кавычка в данных» не может превратиться в код (SQL-инъекция).</li>
+      <li><strong>Переиспользование плана.</strong> Один и тот же шаблон с разными значениями сервер
+        планирует один раз (prepared statement) — на частых запросах это экономит время разбора и
+        планирования.</li>
+    </ul>
+
+    <h2>Три разных «двоеточия»: не перепутать</h2>
+    <p>Синтаксис зависит от того, <strong>кто</strong> подставляет значение. Одно и то же место в книге
+      может выглядеть по-разному:</p>
+    <table>
+      <tr><th>Где пишете</th><th>Как выглядит</th><th>Кто подставляет</th></tr>
+      <tr><td><strong>Протокол PostgreSQL</strong></td><td><code>$1</code>, <code>$2</code></td>
+        <td>Сервер: значения приходят отдельным сообщением <code>Bind</code></td></tr>
+      <tr><td><strong>Драйвер .NET (Npgsql, Dapper)</strong></td><td><code>@from</code></td>
+        <td>Драйвер: превращает <code>@from</code> в <code>$1</code> и отправляет значения</td></tr>
+      <tr><td><strong>EF Core</strong></td><td><code>@__from_0</code> (генерируется само)</td>
+        <td>EF: строит SQL с параметрами, вы их обычно не пишете</td></tr>
+      <tr><td><strong>psql (консоль)</strong></td><td><code>:from</code></td>
+        <td><strong>psql</strong>: подставляет текст <em>до</em> отправки на сервер</td></tr>
+    </table>
+    <div class="box warn">
+      <span class="t">Главное различие</span>
+      <p><code>$1</code> и <code>@from</code> — <strong>настоящие параметры протокола</strong>: запрос
+        приходит на сервер с «дырками», значения отдельно. <code>:from</code> в <code>psql</code> — это
+        <strong>подстановка на клиенте</strong>: psql склеивает текст сам, и на сервер уходит уже готовый
+        запрос с литералом. По смыслу похоже, но защита от инъекций и кэш планов работают только в первом
+        случае.</p>
+    </div>
+
+    <h2>Примеры для каждого инструмента</h2>
+
+    <h3>1. psql: переменные <code>:имя</code></h3>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- \set задаёт переменную psql (это команда самого psql, а не SQL)
+\set from '2026-01-01'
+
+-- :'from' — подставить как строковый литерал: psql сам поставит кавычки
+SELECT count(*) FROM orders WHERE created_at &gt;= :'from';
+
+-- :"from" — подставить как ИДЕНТИФИКАТОР (имя таблицы или колонки)
+SELECT 1 AS :"column_name";
+
+-- без кавычек :from подставляется «как есть» — легко получить ошибку синтаксиса</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- удобный приём: взять значение из запроса и использовать дальше
+SELECT min(created_at) AS from_date FROM orders \gset
+-- теперь :from_date — это значение из предыдущего запроса
+SELECT count(*) FROM orders WHERE created_at &gt;= :'from_date';</code></pre>
+    </div>
+
+    <h3>2. Npgsql / Dapper: <code>@имя</code></h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Npgsql: параметры добавляются в команду, а не склеиваются в строке
+await using var cmd = new NpgsqlCommand(
+    "SELECT id, created_at FROM orders WHERE created_at >= @from AND created_at < @to", conn);
+cmd.Parameters.AddWithValue("from", from);   // @from → $1 на проводе
+cmd.Parameters.AddWithValue("to",   to);     // @to   → $2
+await using var reader = await cmd.ExecuteReaderAsync();</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Dapper: имена параметров берутся из свойств объекта
+var rows = await conn.QueryAsync&lt;Order&gt;(
+    "SELECT * FROM orders WHERE created_at >= @from AND created_at < @to",
+    new { from, to });
+
+// список значений: Dapper сам развернёт @ids в набор параметров
+var byIds = await conn.QueryAsync&lt;Order&gt;(
+    "SELECT * FROM orders WHERE id = ANY(@ids)", new { ids });</code></pre>
+    </div>
+
+    <h3>3. EF Core: параметры создаются сами</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// вы пишете LINQ — EF строит SQL с параметрами
+var list = await db.Orders
+    .Where(o =&gt; o.CreatedAt &gt;= from &amp;&amp; o.CreatedAt &lt; to)
+    .ToListAsync();
+
+// в логе это выглядит так:
+//   WHERE o.created_at >= @__from_0 AND o.created_at < @__to_1
+//   @__from_0='2026-01-01T00:00:00'</code></pre>
+    </div>
+
+    <h3>4. PL/pgSQL: <code>$1</code> в теле функции</h3>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE FUNCTION orders_between(p_from timestamptz, p_to timestamptz)
+RETURNS bigint LANGUAGE sql AS $$
+    SELECT count(*) FROM orders
+    WHERE created_at &gt;= $1 AND created_at &lt; $2   -- $1 = p_from, $2 = p_to
+$$;</code></pre>
+    </div>
+
+    <h2>Почему в книге встречается <code>:from</code></h2>
+    <p>В примерах я пишу <code>created_at &gt;= :from AND created_at &lt; :to</code> как
+      <strong>общепринятую запись «здесь будет параметр»</strong>: так запрос читается без привязки к
+      конкретному драйверу. Читать это надо как «значение подставит приложение». В реальном коде на .NET
+      это будет <code>@from</code>, в <code>psql</code> — <code>:'from'</code>, в PL/pgSQL —
+      <code>$1</code>.</p>
+
+    <h2>Почему нельзя «просто склеить строку»</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ так делать нельзя: значение становится частью SQL
+var sql = $"SELECT * FROM orders WHERE status = '{status}'";
+// status = "NEW' OR '1'='1"  →  вернутся ВСЕ строки (SQL-инъекция)
+// status = "O'Brien"         →  синтаксическая ошибка</code></pre>
+    </div>
+    <ul>
+      <li><strong>Инъекция.</strong> Любое значение извне (query-параметр, заголовок, поле формы) при
+        склейке может изменить смысл запроса. С параметрами — не может: значение остаётся значением.</li>
+      <li><strong>Кэш планов.</strong> При склейке каждый новый текст — новый запрос: сервер каждый раз
+        разбирает и планирует. С параметрами — один подготовленный запрос.</li>
+      <li><strong>Типы.</strong> Драйвер знает тип параметра и передаёт дату как дату, а не как строку.</li>
+      <li><strong>Логи и статистика.</strong> В <code>pg_stat_statements</code> запросы с параметрами
+        группируются в одну строку (<code>… WHERE status = $1</code>), а не распадаются на тысячи
+        вариантов.</li>
+    </ul>
+
+    <h2>Ловушки</h2>
+    <table>
+      <tr><th>Что хочется</th><th>Что не работает</th><th>Как правильно</th></tr>
+      <tr><td>Сортировка по выбору пользователя</td><td><code>ORDER BY @col</code></td><td>Выбрать имя
+        колонки из «белого списка» в коде (или <code>format()</code> в PL/pgSQL)</td></tr>
+      <tr><td>Имя таблицы как параметр</td><td><code>FROM @table</code></td><td>Только подстановка
+        идентификатора с проверкой по списку</td></tr>
+      <tr><td>Список в <code>IN</code></td><td><code>IN (@ids)</code> для массива</td>
+        <td><code>= ANY(@ids)</code> — Npgsql передаёт массив одним параметром</td></tr>
+      <tr><td>Ограничение строк</td><td>—</td><td><code>LIMIT @n</code> работает: это обычное
+        значение</td></tr>
+      <tr><td>Точный тип</td><td>Строка вместо даты</td><td>Передавать нужный .NET-тип
+        (<code>DateTime</code>) или указать <code>NpgsqlDbType</code></td></tr>
+      <tr><td>Индекс при фильтре</td><td><code>WHERE created_at::date = @d</code></td><td>Диапазон:
+        <code>created_at &gt;= @d AND created_at &lt; @d + interval '1 day'</code> (глава 5)</td></tr>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li>Параметр — <strong>место</strong> в запросе; значение приходит отдельно от текста.</li>
+        <li><code>$1</code> — протокол PostgreSQL, <code>@имя</code> — синтаксис драйвера,
+          <code>:имя</code> — переменная <code>psql</code> (подстановка на клиенте).</li>
+        <li>Настоящие параметры защищают от инъекций и позволяют переиспользовать план; склейка строк —
+          нет.</li>
+        <li>Имена таблиц и колонок параметрами не передаются — только значения.</li>
+        <li>Параметр не должен прятаться внутри функции над колонкой, иначе индекс не применится.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="sql03-sql-basics.html">← <span class="sp">Глава 3. SQL: выборка, фильтрация и изменение данных</span></a>
+      <a href="sql05-casts.html"><span class="sp">Глава 5. Приведение типов: CAST и ::</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 23 · VACUUM, autovacuum, bloat и HOT-апдейты</title>
+<title>Глава 25 · VACUUM, autovacuum, bloat и HOT-апдейты</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,18 +13,18 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql24-partitioning.html">Далее →</a>
+  <a href="sql26-partitioning.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть VI · Транзакции и конкурентность</div>
-    <h1>Глава 23. VACUUM, autovacuum, bloat и HOT-апдейты</h1>
+    <h1>Глава 25. VACUUM, autovacuum, bloat и HOT-апдейты</h1>
     <p class="sublead">Цена MVCC: очистка версий, раздувание таблиц и <em>место</em> под новые версии строк</p>
     <p><span class="tag core">основная глава</span></p>
 
     <h2>Почему появляется bloat</h2>
     <p>Мы уже знаем: <code>UPDATE</code> в PostgreSQL не меняет строку на месте, а создаёт <em>новую версию</em>
-      (глава 5). Старая версия становится мёртвой и ждёт, пока её уберёт <code>VACUUM</code>. То же самое
+      (глава 7). Старая версия становится мёртвой и ждёт, пока её уберёт <code>VACUUM</code>. То же самое
       с <code>DELETE</code>: строка не исчезает, а помечается мёртвой.</p>
     <p>Если версии не успевают убираться, файлы таблиц и индексов растут <strong>быстрее самих данных</strong>.
       Это и есть <strong>bloat</strong> — «раздувание»:</p>
@@ -112,7 +112,7 @@ LIMIT 20;</code></pre>
         новую версию.</li>
       <li><strong>Схема, дружелюбная к HOT:</strong> не индексировать колонки, которые меняются на каждом шаге;
         убрать лишние индексы; историю изменений выносить в отдельную журнальную таблицу.</li>
-      <li><strong>Удалять данные секциями, а не строками</strong> (глава 24): <code>DETACH</code> и
+      <li><strong>Удалять данные секциями, а не строками</strong> (глава 26): <code>DETACH</code> и
         <code>DROP</code> не создают мёртвых версий вообще.</li>
       <li><strong>Убрать уже существующий bloat:</strong> <code>VACUUM FULL</code> возвращает место ОС, но берёт
         блокировку <code>ACCESS EXCLUSIVE</code> — только в окно обслуживания; <code>pg_repack</code> делает то же
@@ -134,7 +134,7 @@ UPDATE orders SET status = 'expired' WHERE status = 'new' AND created_at &lt; :c
         неиндексируемые поля, HOT продолжает работать.</li>
       <li><strong>Не индексируйте <code>updated_at</code></strong>, если он обновляется постоянно и сам по себе не
         используется в условиях поиска.</li>
-      <li><strong>Не держите длинных транзакций и «висящих» соединений</strong> (глава 20): они не дают чистить
+      <li><strong>Не держите длинных транзакций и «висящих» соединений</strong> (глава 22): они не дают чистить
         мёртвые версии.</li>
       <li><strong>Массовые операции — батчами</strong>, чтобы autovacuum успевал между ними.</li>
     </ul>
@@ -156,8 +156,8 @@ UPDATE orders SET status = 'expired' WHERE status = 'new' AND created_at &lt; :c
     </div>
 
     <div class="pager">
-      <a href="sql22-locks.html">← <span class="sp">Глава 22. Блокировки, deadlock и retry</span></a>
-      <a href="sql24-partitioning.html"><span class="sp">Глава 24. Секционирование таблиц: Range, List, Hash и pruning</span> →</a>
+      <a href="sql24-locks.html">← <span class="sp">Глава 24. Блокировки, deadlock и retry</span></a>
+      <a href="sql26-partitioning.html"><span class="sp">Глава 26. Секционирование таблиц: Range, List, Hash и pruning</span> →</a>
     </div>
   </div>
 </div>

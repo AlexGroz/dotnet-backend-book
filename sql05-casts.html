@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · Приведение типов: CAST и ::</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql06-pages-heap.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть I · Фундамент</div>
+    <h1>Глава 5. Приведение типов: <code>CAST</code> и <code>::</code></h1>
+    <p class="sublead"><code>'2026-01-01'::date</code>, <code>count(*)::int</code>,
+      <code>data-&gt;&gt;'age'::int</code> — двоеточие с двоеточием встречается в каждом втором примере.
+      Разберём, что оно делает, где применяется и когда из-за него перестаёт работать индекс.</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Что делает <code>::</code></h2>
+    <p><code>::</code> — это <strong>оператор приведения типа</strong> (type cast): «возьми значение слева
+      и преобразуй его к типу справа». Полная форма — <code>CAST(выражение AS тип)</code>, короткая —
+      <code>выражение::тип</code>. Это <strong>одно и то же</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT CAST('2026-01-01' AS date);   -- полная форма
+SELECT '2026-01-01'::date;           -- короткая форма, то же самое
+
+-- проверка: оба вернут одинаковый тип
+SELECT pg_typeof(CAST('2026-01-01' AS date)),
+       pg_typeof('2026-01-01'::date);        -- date | date</code></pre>
+    </div>
+    <p>Зачем вообще нужно: PostgreSQL строго относится к типам. <code>'2026-01-01'</code> — это
+      <em>строка</em> неизвестного типа, и чтобы сравнивать её с колонкой <code>date</code>, вычитать из
+      неё дни или сортировать как дату, типы надо согласовать явно.</p>
+
+    <h2>Синтаксис: три вещи, которые надо знать</h2>
+    <ul>
+      <li><strong>Тип с параметрами.</strong> После <code>::</code> можно писать
+        <code>numeric(18,2)</code>, <code>varchar(50)</code>, <code>timestamptz</code>,
+        <code>interval</code> — всё, что допустимо в <code>CREATE TABLE</code>:
+        <code>round(avg(total)::numeric, 2)</code>.</li>
+      <li><strong>Массивы и цепочки.</strong> <code>::int[]</code> — массив,
+        <code>'{"a":1}'::jsonb</code> — jsonb. Приведения можно соединять:
+        <code>data-&gt;&gt;'age'::int</code> — сначала <code>::int</code>, потом уже результат
+        используется (осторожно с приоритетом, см. ниже).</li>
+      <li><strong>Приоритет.</strong> <code>::</code> «прилипает» к ближайшему выражению очень крепко:
+        <code>-1::int</code> — это <code>-(1::int)</code>, а не <code>(-1)::int</code>. Если сомневаетесь —
+        ставьте скобки: <code>(x + y)::numeric</code>.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- разница видна на делении: 7/2 в целых числах = 3, а не 3.5
+SELECT 7 / 2;                   -- 3        (целочисленное деление)
+SELECT 7 / 2::numeric;          -- 3.5      (числитель стал numeric)
+SELECT 7::numeric / 2;          -- 3.5
+SELECT round(7 / 2::numeric, 2);-- 3.50
+
+-- приоритет: :: связывает крепче арифметики
+SELECT 2 + 3::text;             -- '23'? нет: здесь будет ошибка типа text + integer
+SELECT (2 + 3)::text;           -- '5'</code></pre>
+    </div>
+
+    <h2>Все случаи, где вы это увидите</h2>
+    <table>
+      <tr><th>Где</th><th>Как выглядит</th><th>Зачем</th></tr>
+      <tr><td><strong>Литералы</strong></td><td><code>'2026-01-01'::date</code>,
+        <code>'{"a":1}'::jsonb</code></td><td>Сказать серверу тип значения ещё до выполнения</td></tr>
+      <tr><td><strong>Деление и деньги</strong></td><td><code>7::numeric / 2</code></td><td>Уйти от
+        целочисленного деления; для точности — <code>numeric</code>, не <code>float</code></td></tr>
+      <tr><td><strong>Агрегаты</strong></td><td><code>count(*)::int</code>,
+        <code>avg(total)::numeric(10,2)</code></td><td><code>count</code> возвращает <code>bigint</code>,
+        <code>avg</code> — «широкий» тип; приводим к нужному для API</td></tr>
+      <tr><td><strong>JSON</strong></td><td><code>data-&gt;&gt;'age'::int</code></td>
+        <td><code>-&gt;&gt;</code> всегда отдаёт <code>text</code>; чтобы сравнивать как число — cast</td></tr>
+      <tr><td><strong>Даты и время</strong></td><td><code>now()::date</code>,
+        <code>'2026-01-01'::timestamptz</code></td><td>Отбросить время; задать зону</td></tr>
+      <tr><td><strong>Склейка текста</strong></td><td><code>'order-' || id::text</code></td>
+        <td><code>||</code> требует текст с обеих сторон</td></tr>
+      <tr><td><strong>Enum</strong></td><td><code>'new'::order_status</code></td><td>Литерал сам не станет
+        enum-значением</td></tr>
+      <tr><td><strong>Массивы</strong></td><td><code>string_to_array('1,2', ',')::int[]</code></td>
+        <td>Разбор строки в массив нужного типа</td></tr>
+      <tr><td><strong>DDL</strong></td><td><code>ALTER COLUMN total TYPE numeric(18,2) USING
+        total::numeric(18,2)</code></td><td><code>USING</code> — как преобразовать существующие
+        значения</td></tr>
+      <tr><td><strong>Служебные</strong></td><td><code>'orders'::regclass</code></td><td>Имя таблицы как
+        объект: <code>pg_relation_size('orders'::regclass)</code></td></tr>
+      <tr><td><strong>PL/pgSQL</strong></td><td><code>$1::date</code>, <code>p_id::bigint</code></td>
+        <td>Параметры приходят «как есть» — тип задаём явно</td></tr>
+    </table>
+
+    <h2>Главная ловушка: приведение над колонкой убивает индекс</h2>
+    <p>Индекс строится по <strong>колонке</strong>. Если в условии колонка спрятана внутри выражения
+      (<code>created_at::text</code>, <code>date(created_at)</code>), индекс по <code>created_at</code>
+      перестаёт подходить: сервер должен вычислить выражение для <em>каждой</em> строки.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- ✘ приведение над колонкой: обычный индекс не используется
+SELECT * FROM orders WHERE created_at::text LIKE '2026-01%';
+
+-- EXPLAIN покажет:
+--   Seq Scan on orders
+--     Filter: ((created_at)::text ~~ '2026-01%'::text)     ← функция над колонкой
+
+-- ✔ сравнение колонки с границами того же типа: btree-индекс работает
+SELECT * FROM orders
+WHERE  created_at &gt;= '2026-01-01' AND created_at &lt; '2026-02-01';</code></pre>
+    </div>
+    <ul>
+      <li><strong>Почему так.</strong> Индекс хранит значения <code>created_at</code> (timestamptz), а
+        запрос спрашивает про текстовое представление — это другое множество значений, и порядок индекса к
+        нему не применим.</li>
+      <li><strong>Тот же эффект</strong> у <code>WHERE date(created_at) = '2026-01-01'</code>,
+        <code>WHERE id::text = '42'</code>, <code>WHERE to_char(created_at,'YYYY') = '2026'</code>.</li>
+      <li><strong>Что делать:</strong> переписать диапазоном (лучший вариант) или построить
+        <em>функциональный</em> индекс по тому же выражению:
+        <code>CREATE INDEX ON orders ((created_at::date));</code></li>
+      <li><strong>С секциями</strong> это важнее вдвойне: диапазон по дате позволяет отбросить целые
+        секции (<em>pruning</em>), а <code>::text LIKE</code> заставит читать все (глава 26).</li>
+    </ul>
+
+    <h2>Неявные приведения: что сервер делает сам</h2>
+    <p>Явный <code>::</code> — не единственный путь. Литерал <em>неизвестного</em> типа сервер приводит к
+      типу колонки сам:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- литерал неизвестного типа приводится к timestamptz: индекс работает
+SELECT * FROM orders WHERE created_at &gt;= '2026-01-01';
+
+-- а здесь к тексту приводится КОЛОНКА → индекс уже не применим
+SELECT * FROM orders WHERE created_at::text &gt;= '2026-01-01';</code></pre>
+    </div>
+    <p>Правило: <strong>приведение слева (над колонкой) — почти всегда плохо</strong>, приведение справа
+      (над литералом или параметром) — нормально.</p>
+
+    <h2><code>::</code> — это не форматирование</h2>
+    <table>
+      <tr><th>Что нужно</th><th>Инструмент</th><th>Пример</th></tr>
+      <tr><td>Изменить <em>тип</em> значения</td><td><code>::</code> / <code>CAST</code></td>
+        <td><code>'2026-01-01'::date</code></td></tr>
+      <tr><td>Получить строку в нужном формате</td><td><code>to_char</code></td>
+        <td><code>to_char(created_at, 'DD.MM.YYYY')</code></td></tr>
+      <tr><td>Разобрать строку по формату</td><td><code>to_date</code>, <code>to_timestamp</code></td>
+        <td><code>to_date('26.10.2026','DD.MM.YYYY')</code></td></tr>
+      <tr><td>Обрезать время</td><td><code>::date</code>, <code>date_trunc</code></td>
+        <td><code>created_at::date</code>, <code>date_trunc('month', created_at)</code></td></tr>
+    </table>
+    <p>Если нужен текст «для человека» — <code>to_char</code>; если нужно значение другого <em>типа</em>
+      для вычислений — <code>::</code>.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li><code>::</code> = <code>CAST(... AS ...)</code>: меняет тип значения, а не формат вывода.</li>
+        <li>Приоритет высокий: сомневаетесь — ставьте скобки.</li>
+        <li>Частые места: литералы, деление, агрегаты, JSON (<code>-&gt;&gt;</code> даёт text), даты,
+          склейка, enum, массивы, <code>USING</code> в DDL, параметры в PL/pgSQL.</li>
+        <li><strong>Приведение над колонкой</strong> в <code>WHERE</code> отключает обычный индекс →
+          переписывайте диапазоном или стройте функциональный индекс.</li>
+        <li>Приведение литерала или параметра к типу колонки — нормально и индексу не мешает.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="sql04-query-params.html">← <span class="sp">Глава 4. Параметры в SQL: :имя, @имя и $1</span></a>
+      <a href="sql06-pages-heap.html"><span class="sp">Глава 6. Страницы и heap: где физически лежат строки</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

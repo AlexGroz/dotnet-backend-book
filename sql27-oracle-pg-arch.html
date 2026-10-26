@@ -3,19 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 25 · Архитектурные различия Oracle и PostgreSQL</title>
+<title>Глава 27 · Архитектурные различия Oracle и PostgreSQL</title>
 <link rel="stylesheet" href="book.css">
 </head>
 <body>
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql26-mvcc-oracle-vs-pg.html">Далее →</a>
+  <a href="sql28-mvcc-oracle-vs-pg.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть VIII · Миграция из Oracle</div>
-    <h1>Глава 25. Архитектурные различия Oracle и PostgreSQL</h1>
+    <h1>Глава 27. Архитектурные различия Oracle и PostgreSQL</h1>
     <p class="sublead">Прежде чем говорить о MVCC, блокировках и конвертации кода, полезно увидеть, что это
       вообще за две разные системы. Эта глава — подводка ко всей части.</p>
 
@@ -44,7 +44,7 @@
     <ul>
       <li>В Oracle <strong>DDL фиксируется автоматически</strong> — его нельзя откатить.</li>
       <li>В PostgreSQL <strong>DDL транзакционный</strong> — <code>CREATE</code>/<code>ALTER</code> можно
-        откатить, но DDL берёт сильные блокировки (глава 27).</li>
+        откатить, но DDL берёт сильные блокировки (глава 29).</li>
     </ul>
 
     <h2>Оптимизатор и статистика</h2>
@@ -58,11 +58,11 @@
 
     <h2>Куда идём дальше</h2>
     <ul>
-      <li><strong>MVCC</strong> — как хранятся версии данных и что это меняет (глава 26).</li>
-      <li><strong>Блокировки</strong> — как ведут себя чтение и запись (глава 27).</li>
-      <li><strong>Конвертация кода</strong> — пакеты, автономные транзакции, NULL (глава 28).</li>
+      <li><strong>MVCC</strong> — как хранятся версии данных и что это меняет (глава 28).</li>
+      <li><strong>Блокировки</strong> — как ведут себя чтение и запись (глава 29).</li>
+      <li><strong>Конвертация кода</strong> — пакеты, автономные транзакции, NULL (глава 30).</li>
       <li><strong>Типы и синтаксис</strong> — <code>DATE</code>, <code>NUMBER</code>, <code>ROWNUM</code>,
-        <code>(+)</code> и план миграции (глава 29).</li>
+        <code>(+)</code> и план миграции (глава 31).</li>
     </ul>
 
     <div class="box gold">
@@ -73,8 +73,8 @@
     </div>
 
     <div class="pager">
-      <a href="sql24-partitioning.html">← <span class="sp">Глава 24. Секционирование таблиц: Range, List, Hash и pruning</span></a>
-      <a href="sql26-mvcc-oracle-vs-pg.html"><span class="sp">Глава 26. MVCC: Oracle vs PostgreSQL</span> →</a>
+      <a href="sql26-partitioning.html">← <span class="sp">Глава 26. Секционирование таблиц: Range, List, Hash и pruning</span></a>
+      <a href="sql28-mvcc-oracle-vs-pg.html"><span class="sp">Глава 28. MVCC: Oracle vs PostgreSQL</span> →</a>
     </div>
   </div>
 </div>

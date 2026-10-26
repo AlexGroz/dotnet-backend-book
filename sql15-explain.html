@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 13 · EXPLAIN и EXPLAIN ANALYZE: читаем план</title>
+<title>Глава 15 · EXPLAIN и EXPLAIN ANALYZE: читаем план</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,19 +13,19 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql14-scan-types.html">Далее →</a>
+  <a href="sql16-scan-types.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
-    <h1>Глава 13. EXPLAIN и EXPLAIN ANALYZE: читаем план</h1>
+    <h1>Глава 15. EXPLAIN и EXPLAIN ANALYZE: читаем план</h1>
     <p class="sublead">Разбираем главный инструмент оптимизации — по шагам и на конкретных числах.
       К концу главы ты сможешь прочитать план и назвать, что именно в нём не так.</p>
 
     <h2>Сначала — зачем это нужно</h2>
     <p>Планировщик перед выполнением запроса <strong>прикидывает</strong>, как его выполнить: с чего начать,
       какие таблицы читать целиком, какие — по индексу, как соединить. Этот «план» и есть <code>EXPLAIN</code>.
-      Проблема в том, что планировщик часто <strong>ошибается в оценках</strong> (глава 12) — и тогда план
+      Проблема в том, что планировщик часто <strong>ошибается в оценках</strong> (глава 14) — и тогда план
       получается плохим. Наша задача — увидеть это расхождение.</p>
 
     <h2>EXPLAIN и EXPLAIN ANALYZE — в чём разница</h2>
@@ -188,7 +188,7 @@ rows=480000   ← ФАКТ:  реально подошло 480 000 строк
 
 Расхождение ≈ в 96 раз (недооценка)</code></pre>
     </div>
-    <p>Это <strong>и есть «неверная оценка кардинальности»</strong> (глава 12): планировщик считал, что строк
+    <p>Это <strong>и есть «неверная оценка кардинальности»</strong> (глава 14): планировщик считал, что строк
       мало, и выбрал план, подходящий для маленького набора.</p>
 
     <h3>Шаг 4. Что ещё видно</h3>
@@ -220,19 +220,19 @@ Rows Removed by Filter: 4520000</code></pre>
       <li><strong>Находим горячий узел:</strong> для каждого узла считаем <code>actual time</code> ×
         <code>loops</code>; вычитаем время детей, чтобы получить «свою работу». Самый большой — проблема.</li>
       <li><strong>Сравниваем</strong> оценку <code>rows</code> и факт <code>rows</code> (внутри
-        <code>actual</code>). Расхождение в разы → плохая статистика (глава 12).</li>
-      <li><strong>Смотрим тип узла:</strong> <code>Seq Scan</code> на большой таблице — плохо (глава 14).</li>
+        <code>actual</code>). Расхождение в разы → плохая статистика (глава 14).</li>
+      <li><strong>Смотрим тип узла:</strong> <code>Seq Scan</code> на большой таблице — плохо (глава 16).</li>
       <li><strong>Смотрим соединения:</strong> <code>loops</code> у Nested Loop, <code>Batches</code> у Hash
-        (глава 15).</li>
+        (глава 17).</li>
       <li><strong>Смотрим память:</strong> <code>Sort Method: external merge Disk</code> и
-        <code>Batches &gt; 1</code> — мало <code>work_mem</code> (глава 17).</li>
+        <code>Batches &gt; 1</code> — мало <code>work_mem</code> (глава 19).</li>
     </ol>
 
     <div class="box note">
       <span class="t">Что дальше</span>
-      <p>Здесь мы учились <em>читать</em> план. Полный список полей и «красных флагов» — в главе 17;
-        как чинить найденное — в главе 18; типы соединений — в главе 15; способы сканирования — в главе 14.
-        А почему оценки вообще ошибаются — в главе 12.</p>
+      <p>Здесь мы учились <em>читать</em> план. Полный список полей и «красных флагов» — в главе 19;
+        как чинить найденное — в главе 20; типы соединений — в главе 17; способы сканирования — в главе 16.
+        А почему оценки вообще ошибаются — в главе 14.</p>
     </div>
 
     <div class="box gold">
@@ -244,8 +244,8 @@ Rows Removed by Filter: 4520000</code></pre>
     </div>
 
     <div class="pager">
-      <a href="sql12-cardinality.html">← <span class="sp">Глава 12. Оценка кардинальности</span></a>
-      <a href="sql14-scan-types.html"><span class="sp">Глава 14. Способы сканирования</span> →</a>
+      <a href="sql14-cardinality.html">← <span class="sp">Глава 14. Оценка кардинальности</span></a>
+      <a href="sql16-scan-types.html"><span class="sp">Глава 16. Способы сканирования</span> →</a>
     </div>
   </div>
 </div>

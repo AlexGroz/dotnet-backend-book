@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 26 · MVCC: Oracle vs PostgreSQL</title>
+<title>Глава 28 · MVCC: Oracle vs PostgreSQL</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,13 +13,13 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql27-locks-oracle-vs-pg.html">Далее →</a>
+  <a href="sql29-locks-oracle-vs-pg.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть VIII · Миграция из Oracle</div>
-    <h1>Глава 26. MVCC: Oracle vs PostgreSQL</h1>
-    <p class="sublead">Мы уже разобрали MVCC в PostgreSQL (глава 21). Теперь сравним с Oracle — именно об этом
+    <h1>Глава 28. MVCC: Oracle vs PostgreSQL</h1>
+    <p class="sublead">Мы уже разобрали MVCC в PostgreSQL (глава 23). Теперь сравним с Oracle — именно об этом
       спрашивали в интервью.</p>
 
     <h2>Общее</h2>
@@ -39,12 +39,12 @@
     <h2>PostgreSQL</h2>
     <ul>
       <li>MVCC — <strong>в самих страницах таблицы</strong>: у каждой версии строки есть метки видимости
-        (<code>xmin</code>/<code>xmax</code>) — глава 5.</li>
+        (<code>xmin</code>/<code>xmax</code>) — глава 7.</li>
       <li>При <code>UPDATE</code> создаётся <strong>новая версия строки</strong>; старая остаётся, пока её не
         уберёт <code>VACUUM</code>.</li>
       <li>Читатели не блокируют писателей; писатели не блокируют читателей.</li>
       <li>Обратная сторона — <strong>bloat</strong> (раздувание) и важность <code>autovacuum</code>; долгие
-        транзакции <strong>мешают очистке</strong> (глава 23).</li>
+        транзакции <strong>мешают очистке</strong> (глава 25).</li>
     </ul>
 
     <table>
@@ -76,8 +76,8 @@
     </div>
 
     <div class="pager">
-      <a href="sql25-oracle-pg-arch.html">← <span class="sp">Глава 25. Архитектурные различия</span></a>
-      <a href="sql27-locks-oracle-vs-pg.html"><span class="sp">Глава 27. Блокировки: Oracle vs PostgreSQL</span> →</a>
+      <a href="sql27-oracle-pg-arch.html">← <span class="sp">Глава 27. Архитектурные различия</span></a>
+      <a href="sql29-locks-oracle-vs-pg.html"><span class="sp">Глава 29. Блокировки: Oracle vs PostgreSQL</span> →</a>
     </div>
   </div>
 </div>

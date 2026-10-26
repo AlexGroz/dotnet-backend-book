@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 10 · Другие типы индексов и их цена</title>
+<title>Глава 12 · Другие типы индексов и их цена</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql11-planner-stats.html">Далее →</a>
+  <a href="sql13-planner-stats.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть III · Индексы</div>
-    <h1>Глава 10. Другие типы индексов и их цена</h1>
+    <h1>Глава 12. Другие типы индексов и их цена</h1>
     <p class="sublead">B-tree покрывает почти всё, но бывают задачи и для других типов. И у любого индекса
       есть цена — поговорим и о ней.</p>
 
@@ -37,7 +37,7 @@
     <h3>GIN — когда значение «составное»</h3>
     <p><strong>«Составное» значение</strong> — это когда <em>внутри одного значения лежит много элементов</em>,
       и мы ищем не «равно целиком», а «<strong>содержит</strong> такой-то элемент». B-tree так не умеет: он
-      сравнивает значение как единое целое (глава 8).</p>
+      сравнивает значение как единое целое (глава 10).</p>
     <p>Примеры «составных» значений и что значит «содержит»:</p>
     <ul>
       <li><strong>массив</strong> <code>{'новый','срочный'}</code> → «есть ли элемент <code>'срочный'</code>»;</li>
@@ -72,7 +72,7 @@ CREATE INDEX ON articles USING gin (to_tsvector('russian', body));</code></pre>
       <p>Именно по такой «карте» GIN-индекс и умеет быстро отвечать на вопрос «встречается ли слово».</p>
     </div>
     <p>Ещё GIN (через расширение <code>pg_trgm</code>) — единственный способ ускорить
-      <code>LIKE '%фрагмент%'</code>, который B-tree не тянет (глава 8).</p>
+      <code>LIKE '%фрагмент%'</code>, который B-tree не тянет (глава 10).</p>
 
     <h3>BRIN — «мини-индекс» для огромных таблиц</h3>
     <p>BRIN хранит не значения строк, а <strong>краткие диапазоны по блокам страниц</strong>. Занимает
@@ -86,8 +86,8 @@ CREATE INDEX ON articles USING gin (to_tsvector('russian', body));</code></pre>
       <tbody>
         <tr><td><strong>Место на диске и в памяти</strong></td><td>Индекс хранится отдельно и тоже кэшируется; иногда он сравним по размеру с таблицей</td></tr>
         <tr><td><strong>Скорость записи</strong></td><td>Каждый <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code> обновляет <strong>все</strong> индексы таблицы</td></tr>
-        <tr><td><strong>Обслуживание</strong></td><td>Индексы «раздуваются» вместе с таблицей и требуют <code>VACUUM</code> / <code>REINDEX</code> (глава 23)</td></tr>
-        <tr><td><strong>Время планирования</strong></td><td>Чем больше индексов, тем дольше планировщик перебирает варианты (глава 11)</td></tr>
+        <tr><td><strong>Обслуживание</strong></td><td>Индексы «раздуваются» вместе с таблицей и требуют <code>VACUUM</code> / <code>REINDEX</code> (глава 25)</td></tr>
+        <tr><td><strong>Время планирования</strong></td><td>Чем больше индексов, тем дольше планировщик перебирает варианты (глава 13)</td></tr>
       </tbody>
     </table>
 
@@ -171,8 +171,8 @@ LIMIT  10;</code></pre>
     </div>
 
     <div class="pager">
-      <a href="sql09-index-variants.html">← <span class="sp">Глава 9. Составные, частичные, покрывающие индексы</span></a>
-      <a href="sql11-planner-stats.html"><span class="sp">Глава 11. Как планировщик выбирает план</span> →</a>
+      <a href="sql11-index-variants.html">← <span class="sp">Глава 11. Составные, частичные, покрывающие индексы</span></a>
+      <a href="sql13-planner-stats.html"><span class="sp">Глава 13. Как планировщик выбирает план</span> →</a>
     </div>
   </div>
 </div>

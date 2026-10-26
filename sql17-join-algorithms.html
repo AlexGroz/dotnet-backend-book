@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 15 · Алгоритмы соединений</title>
+<title>Глава 17 · Алгоритмы соединений</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,25 +13,25 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql16-diagnose.html">Далее →</a>
+  <a href="sql18-diagnose.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть IV · Планировщик и планы</div>
-    <h1>Глава 15. Алгоритмы соединений: Nested Loop, Hash, Merge</h1>
+    <h1>Глава 17. Алгоритмы соединений: Nested Loop, Hash, Merge</h1>
     <p class="sublead">Когда запрос соединяет несколько таблиц, СУБД выбирает способ соединения. Именно здесь
       часто кроется причина «тормозов» — и именно это спрашивают на интервью.</p>
 
     <h2>Что значит «соединить таблицы»</h2>
     <p><code>JOIN</code> сопоставляет строки двух наборов по условию (обычно по равенству ключей: «заказы и их
       клиенты»). Способов это сделать несколько, и у каждого — своя цена в зависимости от объёмов данных.
-      Планировщик выбирает способ по <strong>оценке числа строк</strong> (глава 12).</p>
+      Планировщик выбирает способ по <strong>оценке числа строк</strong> (глава 14).</p>
 
     <h2>Nested Loop (вложенный цикл)</h2>
     <p>Для каждой строки внешнего набора делается поиск во внутреннем.</p>
     <ul>
       <li><strong>Хорош, когда:</strong> внешних строк мало, а внутренний поиск идёт <em>по индексу</em>
-        (глава 8) — тогда он отзывчив и быстр, особенно при <code>LIMIT</code>.</li>
+        (глава 10) — тогда он отзывчив и быстр, особенно при <code>LIMIT</code>.</li>
       <li><strong>Узкое место, когда:</strong> внешних строк <strong>много</strong> — получаем тысячи циклов
         и сложность порядка N×M. Частая причина — недооценка числа строк или отсутствие индекса на
         внутренней стороне.</li>
@@ -75,18 +75,18 @@
       <p>«Плохой» — не тип соединения, а <strong>неверная оценка кардинальности</strong>. Если планировщик
         думает, что строк 10, он выберет Nested Loop; если на деле их 500 000 — это катастрофа. Поэтому
         <strong>сначала</strong> сравнивают <code>rows</code> и <code>actual rows</code>, и только потом смотрят
-        на сам способ соединения (глава 17).</p>
+        на сам способ соединения (глава 19).</p>
     </div>
 
     <div class="box note">
       <span class="t">Как это связано с дальнейшим</span>
-      <p>Мы научились читать план (глава 13–14) и понимать, как соединяются таблицы. Теперь соберём из этого
-        <strong>порядок диагностики</strong> медленного запроса (глава 16).</p>
+      <p>Мы научились читать план (глава 15–16) и понимать, как соединяются таблицы. Теперь соберём из этого
+        <strong>порядок диагностики</strong> медленного запроса (глава 18).</p>
     </div>
 
     <div class="pager">
-      <a href="sql14-scan-types.html">← <span class="sp">Глава 14. Способы сканирования</span></a>
-      <a href="sql16-diagnose.html"><span class="sp">Глава 16. Диагностика медленного запроса</span> →</a>
+      <a href="sql16-scan-types.html">← <span class="sp">Глава 16. Способы сканирования</span></a>
+      <a href="sql18-diagnose.html"><span class="sp">Глава 18. Диагностика медленного запроса</span> →</a>
     </div>
   </div>
 </div>

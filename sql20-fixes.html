@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 18 · Как чинить</title>
+<title>Глава 20 · Как чинить</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="sql.html">← Оглавление</a>
   <span class="booktitle">SQL и PostgreSQL</span>
-  <a href="sql19-case-endpoint.html">Далее →</a>
+  <a href="sql21-case-endpoint.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть V · Оптимизация запросов</div>
-    <h1>Глава 18. Как чинить: статистика, индексы, переписывание, work_mem</h1>
+    <h1>Глава 20. Как чинить: статистика, индексы, переписывание, work_mem</h1>
     <p class="sublead">Мы нашли причину в плане. Теперь — соответствие «причина → решение», от самого
       частого к более редкому.</p>
 
@@ -26,7 +26,7 @@
       <thead><tr><th>Что нашли</th><th>Что делаем</th></tr></thead>
       <tbody>
         <tr><td>Плохая оценка строк</td><td><code>ANALYZE</code>; поднять <code>default_statistics_target</code>; <code>CREATE STATISTICS</code> для коррелированных колонок</td></tr>
-        <tr><td><code>Seq Scan</code> на большой таблице</td><td>Индекс под условие фильтра/соединения: составной, частичный, покрывающий (<code>INCLUDE</code>) — глава 9</td></tr>
+        <tr><td><code>Seq Scan</code> на большой таблице</td><td>Индекс под условие фильтра/соединения: составной, частичный, покрывающий (<code>INCLUDE</code>) — глава 11</td></tr>
         <tr><td>Функция/приведение над колонкой в <code>WHERE</code></td><td>Убрать (или сделать <em>функциональный</em> индекс), чтобы индекс стал применим</td></tr>
         <tr><td>Sort / Hash на диск</td><td>Поднять <code>work_mem</code> (аккуратно: память на операцию); упростить сортировку</td></tr>
         <tr><td>Прочитано много строк, оставлено мало</td><td>Частичный/покрывающий индекс, переписать фильтр</td></tr>
@@ -89,7 +89,7 @@ LIMIT  20;</code></pre>
         выгрузки</td></tr>
     </table>
     <p>В примерах книги это встречалось в кейсе эндпоинта (<code>GET /api/orders?page=1</code>,
-      глава 19): «страница» там — как раз <code>OFFSET</code>.</p>
+      глава 21): «страница» там — как раз <code>OFFSET</code>.</p>
 
     <h2>Огромная таблица: партиционирование и материализованные представления</h2>
     <p>Две техники из таблицы выше решают разные задачи: первая уменьшает <em>объём читаемых данных</em>,
@@ -105,7 +105,7 @@ LIMIT  20;</code></pre>
         целиком (<code>DROP TABLE orders_2025_01</code> вместо <code>DELETE</code> миллионов строк).</li>
       <li><strong>Когда:</strong> таблица в сотни миллионов строк, данные «по времени», старые периоды
         можно выбрасывать.</li>
-      <li><strong>Подробно:</strong> глава 24 — <code>PARTITION BY RANGE</code>, границы секций, pruning
+      <li><strong>Подробно:</strong> глава 26 — <code>PARTITION BY RANGE</code>, границы секций, pruning
         в плане.</li>
     </ul>
 
@@ -152,12 +152,12 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY orders_daily;</code></pre>
     <div class="box gold">
       <span class="t">★ Правило оптимизации</span>
       <p>Меняем <strong>одно</strong> и заново снимаем план. Иначе невозможно понять, что помогло.
-        И обязательно измеряем на реальной нагрузке (глава 31), а не только «в консоли».</p>
+        И обязательно измеряем на реальной нагрузке (глава 33), а не только «в консоли».</p>
     </div>
 
     <div class="pager">
-      <a href="sql17-explain-buffers.html">← <span class="sp">Глава 17. Что искать в EXPLAIN (ANALYZE, BUFFERS)</span></a>
-      <a href="sql19-case-endpoint.html"><span class="sp">Глава 19. Кейс: тормозит эндпоинт</span> →</a>
+      <a href="sql19-explain-buffers.html">← <span class="sp">Глава 19. Что искать в EXPLAIN (ANALYZE, BUFFERS)</span></a>
+      <a href="sql21-case-endpoint.html"><span class="sp">Глава 21. Кейс: тормозит эндпоинт</span> →</a>
     </div>
   </div>
 </div>
