@@ -144,6 +144,28 @@ public sealed class OutboxWorker(IDbContextFactory&lt;AppDbContext&gt; factory) 
 }</code></pre>
     </div>
 
+    <div class="box note">
+      <span class="t">Почему это не «scoped внутри singleton»</span>
+      <p>Резонный вопрос: воркер — singleton, а <code>AppDbContext</code> — scoped. Не то же ли это самое
+        нарушение? Нет: разница в том, <strong>что именно</strong> попало в singleton.</p>
+      <ul>
+        <li><strong>Плохо — в singleton попадает <em>сам</em> scoped-объект.</strong> Тогда он живёт всё
+          время процесса: <code>DbContext</code> не освобождается, его ChangeTracker копит отслеживаемые
+          сущности, соединение держится. Плюс при проверке scope контейнер бросает «Cannot consume scoped
+          service from singleton».</li>
+        <li><strong>Хорошо — в singleton попадает <em>фабрика</em>.</strong>
+          <code>IDbContextFactory&lt;AppDbContext&gt;</code> регистрируется как singleton и
+          <strong>не хранит контекст</strong>: каждый <code>CreateDbContextAsync()</code> создаёт новый
+          экземпляр, а <code>await using</code> его освобождает (шаги 3–4 в коде). В поле воркера лежит
+          только фабрика — ни одного scoped-объекта.</li>
+      </ul>
+      <p>То же для любого другого scoped-сервиса в фоне — общий способ через scope:</p>
+      <pre><code class="language-csharp">// на одну единицу работы — свой scope, внутри — scoped-сервисы
+using var scope = _scopeFactory.CreateScope();               // IServiceScopeFactory — singleton
+var repo = scope.ServiceProvider.GetRequiredService&lt;IOrdersRepository&gt;();
+await repo.DoWorkAsync(ct);                                  // scope закроется на выходе из using</code></pre>
+    </div>
+
     <h2>Три вида фабрик — и в чём разница</h2>
     <table>
       <thead><tr><th>Вид</th><th>Суть</th><th>Пример в .NET</th></tr></thead>

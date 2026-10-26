@@ -104,8 +104,39 @@ FROM   pg_stat_user_indexes
 WHERE  idx_scan = 0          -- ни разу не использовался
 ORDER  BY pg_relation_size(indexrelid) DESC;</code></pre>
     </div>
-    <p>Осторожно: «0 использований» может значить и «статистика недавно сброшена». Удаляйте только то, в чём
-      уверены.</p>
+    <div class="box warn">
+      <span class="t">Прежде чем удалять: «0 использований» бывает обманчивым</span>
+      <ul>
+        <li><strong>Статистика могла быть сброшена.</strong> Тогда все счётчики начинаются с нуля, хотя
+          индекс прекрасно работает. Сбрасывается она при: <code>pg_stat_reset()</code>,
+          <code>pg_stat_reset_single_table_counters()</code>, восстановлении из бэкапа и
+          <em>аварийном</em> завершении сервера (при чистой остановке счётчики сохраняются).</li>
+        <li><strong>Индекс редкий.</strong> Он нужен раз в месяц для отчёта — в момент проверки
+          <code>idx_scan = 0</code> это нормально.</li>
+        <li><strong>Индекс новый.</strong> Его добавили вчера, и запросы просто ещё не приходили.</li>
+      </ul>
+      <p>Когда статистика сбрасывалась, видно прямо в системном представлении:</p>
+      <pre><code class="language-sql">-- когда сбрасывалась статистика текущей базы (NULL — ни разу)
+SELECT datname, stats_reset, now() - stats_reset AS ago
+FROM   pg_stat_database
+WHERE  datname = current_database();
+
+-- то же для pg_stat_statements (данные самого расширения)
+SELECT stats_reset FROM pg_stat_statements_info;</code></pre>
+      <p>В PostgreSQL 16 и новее у индексов есть ещё <code>last_idx_scan</code> — <strong>время
+        последнего использования</strong>. Это точнее счётчика: «ни разу с момента сброса» и «последний
+        раз три месяца назад» — разные вещи. Если у вас версия старше, колонки нет — проверьте
+        <code>\d pg_stat_user_indexes</code>.</p>
+      <pre><code class="language-sql">-- PostgreSQL 16+: когда индекс реально использовали в последний раз
+SELECT indexrelname, idx_scan, last_idx_scan
+FROM   pg_stat_user_indexes
+ORDER  BY last_idx_scan NULLS FIRST;   -- сначала те, что не использовали ни разу</code></pre>
+      <p>Практическое правило: удаляем, если <code>idx_scan = 0</code> <strong>и</strong>
+        <code>stats_reset</code> был давно (недели или месяцы) <strong>и</strong> вы понимаете, какие
+        запросы индекс обслуживал. Удалять безопаснее через <code>DROP INDEX CONCURRENTLY</code>
+        (не блокирует запись), а план отката — это сохранённый <code>CREATE INDEX</code> из
+        <code>pg_get_indexdef()</code>.</p>
+    </div>
 
     <div class="box note">
       <span class="t">Как проверить размер индексов</span>
@@ -114,6 +145,21 @@ ORDER  BY pg_relation_size(indexrelid) DESC;</code></pre>
 FROM   pg_stat_user_indexes
 ORDER  BY pg_relation_size(indexrelid) DESC
 LIMIT  10;</code></pre>
+      <p><strong>Зачем это смотреть на практике:</strong></p>
+      <ul>
+        <li><strong>Место и бэкапы.</strong> Индекс легко оказывается больше самой таблицы: суммарный
+          размер — <code>pg_size_pretty(pg_indexes_size('orders'))</code>, вся таблица с индексами —
+          <code>pg_total_relation_size('orders')</code>. От этого зависят диск, скорость бэкапа и
+          восстановления.</li>
+        <li><strong>Цена записи.</strong> Каждый индекс обновляется на каждом
+          <code>INSERT</code>/<code>UPDATE</code>: чем больше «ненужных» индексов, тем медленнее запись и
+          больше WAL.</li>
+        <li><strong>Дубли и раздутие.</strong> Два индекса по одним и тем же колонкам — лишняя работа;
+          индекс, раздутый после массовых удалений (bloat), лечится <code>REINDEX</code> — и это видно
+          именно по размеру (<code>pg_relation_size</code> против числа строк).</li>
+        <li><strong>Решение «добавить ещё один».</strong> Прежде чем строить новый индекс, полезно
+          увидеть, сколько уже занимают существующие и какой из них реально используется.</li>
+      </ul>
     </div>
 
     <div class="box gold">

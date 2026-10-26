@@ -46,7 +46,9 @@ ROLLBACK;                               -- отменили: как будто �
     <table>
       <thead><tr><th>Буква</th><th>Что означает</th><th>Как это видно на практике</th></tr></thead>
       <tbody>
-        <tr><td><strong>A</strong>tomicity<br>(атомарность)</td><td>Всё или ничего</td><td>Сбой посередине → <code>ROLLBACK</code>, перевод не «половинчатый»</td></tr>
+        <tr><td><strong>A</strong>tomicity<br>(атомарность)</td><td>Всё или ничего</td><td>Сбой посередине →
+          <code>ROLLBACK</code>: либо применены <em>оба</em> изменения, либо ни одного. Не бывает, чтобы
+          деньги у одного клиента списались, а другому не пришли</td></tr>
         <tr><td><strong>C</strong>onsistency<br>(согласованность)</td><td>Ограничения не нарушены</td><td><code>NOT NULL</code>, <code>UNIQUE</code>, <code>CHECK</code>, внешние ключи — база не даст сохранить мусор</td></tr>
         <tr><td><strong>I</strong>solation<br>(изоляция)</td><td>Параллельные транзакции не видят «полуготовых» данных друг друга</td><td>Уровни изоляции — ниже и в главе 21</td></tr>
         <tr><td><strong>D</strong>urability<br>(надёжность)</td><td>После <code>COMMIT</code> данные не потеряются</td><td>Запись в журнал (WAL) сбрасывается на диск до ответа клиенту</td></tr>
@@ -91,7 +93,9 @@ LIMIT 10;</code></pre>
       <li><strong>Транзакция — только вокруг работы с БД.</strong> Сеть, расчёты, ожидание ответа — до или после.</li>
       <li><strong>Короткая.</strong> Ориентир — миллисекунды, а не секунды.</li>
       <li><strong>Защитные таймауты</strong> — чтобы «залипшая» транзакция не держала ресурсы вечно.</li>
-      <li><strong>Retry на <code>40001</code>/<code>40P01</code></strong> — это штатная ситуация.</li>
+      <li><strong>Retry на <code>40001</code>/<code>40P01</code></strong> — это штатная ситуация
+        (<code>40001</code> — конфликт сериализации, <code>40P01</code> — дедлок; что это за коды —
+        ниже).</li>
       <li><strong>Уровень изоляции — по сценарию</strong>, а не «чем выше, тем лучше».</li>
     </ol>
     <div class="codewrap">
@@ -156,6 +160,16 @@ COMMIT;                                                     -- списание 
     </div>
 
     <h2>Ошибки, которые надо повторять</h2>
+    <p>Что такое <code>40001</code> и <code>40P01</code>: это <strong><code>SQLSTATE</code></strong> —
+      пятисимвольный код ошибки по стандарту SQL, который сервер возвращает вместе с сообщением. Первые
+      два символа — класс ошибки: <code>40</code> = «откат транзакции из-за конкуренции». Дальше идёт
+      конкретный код: <code>40001</code> — <code>serialization_failure</code> (конфликт при
+      <code>Repeatable Read</code>/<code>Serializable</code>), <code>40P01</code> —
+      <code>deadlock_detected</code> (две транзакции ждали друг друга), <code>55P03</code> —
+      <code>lock_not_available</code> (истёк <code>lock_timeout</code>).</p>
+    <p>Где их видно: в <code>psql</code> — <code>\errverbose</code> после ошибки; в .NET —
+      <code>PostgresException.SqlState</code>; в PL/pgSQL — <code>EXCEPTION WHEN SQLSTATE '40001'</code>.
+      Именно по коду, а не по тексту сообщения, строят логику повтора: текст зависит от локали и версии.</p>
     <table>
       <thead><tr><th>Код</th><th>Имя</th><th>Когда возникает</th><th>Что делать</th></tr></thead>
       <tbody>

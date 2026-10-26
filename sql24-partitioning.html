@@ -59,6 +59,23 @@ CREATE TABLE orders_2026_02 PARTITION OF orders
 -- «страховка»: строки, не попавшие ни в одну секцию
 CREATE TABLE orders_default PARTITION OF orders DEFAULT;</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">Границы: <code>FROM</code> включается, <code>TO</code> — нет</span>
+      <p>Диапазон секции <strong>полуоткрытый</strong>: <code>[FROM, TO)</code>. Поэтому строка с
+        <code>created_at = '2026-02-01 00:00:00'</code> попадёт <em>только</em> во вторую секцию
+        (<code>orders_2026_02</code>), а не в обе. Отвечая на вопрос «могут ли одни и те же строки
+        оказаться в двух секциях»: <strong>нет</strong> — правая граница исключается, поэтому секции
+        стыкуются без дыр и без пересечений.</p>
+      <ul>
+        <li>Соседние секции должны начинаться ровно с того значения, на котором закончилась предыдущая:
+          <code>TO ('2026-02-01')</code> и следующая <code>FROM ('2026-02-01')</code>.</li>
+        <li>Если значение вышло за границы всех секций, вставка падает с
+          «<code>no partition of relation "orders" found for row</code>». Лечится новой секцией или
+          <code>DEFAULT</code>-секцией (в примере она как раз «страховка»).</li>
+        <li>Для <code>timestamptz</code> границы трактуются в таймзоне сессии — проверьте
+          <code>SHOW TimeZone</code>, если пишете локальное время, а не UTC.</li>
+      </ul>
+    </div>
     <table>
       <thead><tr><th>Стратегия</th><th>Чем разделяет</th><th>Когда выбирают</th></tr></thead>
       <tbody>

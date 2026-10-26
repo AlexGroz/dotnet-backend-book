@@ -36,18 +36,23 @@ WHERE  o.status = 'NEW'
 ORDER  BY o.created_at DESC
 LIMIT  50;
 
-Hash Join  (cost=1120.5..9430.1 rows=50 width=40)
-           (actual time=8.311..402.774 rows=50 loops=1)
-  Hash Cond: (c.id = o.customer_id)
-  Buffers: shared hit=20114 read=5832
-  -&gt;  Seq Scan on orders o  (cost=0.00..8000.0 rows=5000 width=24)
-                             (actual time=0.02..380.9 rows=480000 loops=1)
-        Filter: (status = 'NEW'::text)
-        Rows Removed by Filter: 4520000
-        Buffers: shared hit=19500 read=5800
-  -&gt;  Hash  (actual time=8.1..8.1 rows=200 loops=1)
-        Buckets: 1024  Batches: 4  Memory Usage: 1024kB
-Sort Method: external merge  Disk: 25120kB
+Sort  (cost=9430.1..9430.3 rows=50 width=40)
+      (actual time=402.1..402.2 rows=50 loops=1)
+  Sort Key: o.created_at DESC
+  Sort Method: external merge  Disk: 25120kB
+  Buffers: shared hit=20114 read=5832, temp read=3140 written=3144
+  -&gt;  Hash Join  (cost=1120.5..9430.1 rows=50 width=40)
+                 (actual time=8.311..380.9 rows=50 loops=1)
+        Hash Cond: (c.id = o.customer_id)
+        Buffers: shared hit=20114 read=5832
+        -&gt;  Seq Scan on orders o  (cost=0.00..8000.0 rows=5000 width=24)
+                                   (actual time=0.02..380.9 rows=480000 loops=1)
+              Filter: (status = 'NEW'::text)
+              Rows Removed by Filter: 4520000
+              Buffers: shared hit=19500 read=5800
+        -&gt;  Hash  (actual time=8.1..8.1 rows=200 loops=1)
+              Buckets: 1024  Batches: 4  Memory Usage: 1024kB
+              Buffers: shared hit=614 read=32
 Planning Time: 1.204 ms
 Execution Time: 405.771 ms</code></pre>
     </div>
@@ -55,6 +60,60 @@ Execution Time: 405.771 ms</code></pre>
     <p>Здесь сразу три «красных флага»: <code>Seq Scan</code> с огромным <code>Rows Removed by Filter</code>
       (читаем миллионы строк, чтобы оставить часть), <code>Batches: 4</code> у Hash (не хватило памяти) и
       сортировка на диск (<code>external merge Disk</code>).</p>
+
+    <h2><code>temp read/written</code>: где это в нашем плане</h2>
+    <p>Это поле — часть строки <code>Buffers</code>, и появляется оно <strong>только у того узла, который
+      использовал временные файлы</strong>. В примере выше оно есть ровно в одном месте — на верхнем узле
+      <code>Sort</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">Sort  (cost=9430.1..9430.3 rows=50 width=40)
+      (actual time=402.1..402.2 rows=50 loops=1)
+  Sort Key: o.created_at DESC
+  Sort Method: external merge  Disk: 25120kB
+  Buffers: shared hit=20114 read=5832, temp read=3140 written=3144   ← вот оно
+                           └─ обычные буферы ─┘  └─ temp: временные файлы ─┘</code></pre>
+    </div>
+    <ul>
+      <li><code>temp read=3140</code> — сколько 8-килобайтных блоков прочитано из временных файлов
+        (≈25 МБ); <code>written=3144</code> — сколько записано.</li>
+      <li>Причина — сортировка не влезла в <code>work_mem</code>, PostgreSQL слил её на диск
+        (<code>external merge</code>). Именно поэтому на этом узле есть и <code>Sort Method: external merge
+        Disk</code>, и <code>temp</code>.</li>
+      <li><strong>Если бы временных файлов не было</strong>, в строке <code>Buffers</code> не было бы части
+        <code>temp …</code> вообще: <code>Buffers: shared hit=… read=…</code> и всё. Поле не печатается
+        нулём — оно просто отсутствует. Поэтому «ищу temp и не нахожу» чаще всего значит «сортировки и
+        хеши поместились в память» (это хорошо), а не «что-то потерялось».</li>
+      <li>Где ещё бывает <code>temp</code>: у <code>Hash</code> с <code>Batches &gt; 1</code>, у
+        <code>Materialize</code>, у <code>GroupAggregate</code> с сортировкой, у CTE
+        <code>MATERIALIZED</code>. Правило чтения: <em>temp есть → узел работал через диск → смотреть
+        <code>work_mem</code></em>.</li>
+    </ul>
+
+    <h2><code>Heap Fetches</code>: почему его нет в нашем плане</h2>
+    <p><code>Heap Fetches</code> печатается <strong>только у узла <code>Index Only Scan</code></strong>.
+      В плане выше такого узла нет (там <code>Seq Scan</code> и <code>Hash Join</code>), поэтому строки
+      <code>Heap Fetches</code> тоже нет — это не ошибка плана и не «потерянное поле».</p>
+    <p>Смысл поля: index-only scan обещает «прочитать всё из индекса, не заглядывая в таблицу». Но
+      PostgreSQL может так поступить, только если уверен, что версия строки видна всем (это хранится в
+      <em>visibility map</em>, её обновляет <code>VACUUM</code>). Когда уверенности нет — он идёт в
+      таблицу; каждый такой поход и считается в <code>Heap Fetches</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, created_at FROM orders WHERE created_at &gt;= now() - interval '1 day';
+
+Index Only Scan using orders_created_at_idx on orders
+  (cost=0.43..180.2 rows=1200 width=16)
+  (actual time=0.031..0.940 rows=1200 loops=1)
+  Heap Fetches: 1200                  ← пришлось проверить в таблице ВСЕ строки
+  Buffers: shared hit=40</code></pre>
+    </div>
+    <ul>
+      <li><code>Heap Fetches ≈ rows</code> → выигрыша от index-only scan почти нет: таблица всё равно
+        читается. Лечится <code>VACUUM</code> (или автоочисткой), после чего счётчик падает к нулю.</li>
+      <li><code>Heap Fetches = 0</code> → идеальный случай: всё прочитано из индекса.</li>
+      <li>Для сравнения: у обычного <code>Index Scan</code> этого поля нет вовсе — он <em>всегда</em>
+        идёт в таблицу, там нечего считать.</li>
+    </ul>
 
     <h2>Поля, по которым читаем план</h2>
     <table>

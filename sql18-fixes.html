@@ -44,8 +44,94 @@
       <li><strong><code>IN</code> → <code>EXISTS</code></strong> для больших подзапросов.</li>
       <li><strong>Убрать лишние <code>JOIN</code></strong>, если таблицу не используем в результате.</li>
       <li><strong>Ограничить выборку</strong> (<code>LIMIT</code>) и не тянуть лишние колонки.</li>
-      <li><strong>CTE</strong>: в PostgreSQL 12+ обычный <code>WITH</code> «инлайнится»; принудительный
-        <code>MATERIALIZED</code> может как помочь, так и навредить — проверяйте планом.</li>
+      <li><strong>CTE</strong> (<code>WITH …</code>): в PostgreSQL 12+ обычный CTE
+        <strong>«инлайнится»</strong> — его текст как бы подставляется в основной запрос, как обычный
+        подзапрос. Планировщик видит всю картину целиком: может применить индекс и «протолкнуть» условие
+        внутрь CTE. <code>WITH … AS MATERIALIZED</code> инлайн <em>запрещает</em>: CTE вычисляется один
+        раз и сохраняется во временном наборе. Это полезно, если он тяжёлый и используется несколько раз,
+        и вредно, если после инлайна план был лучше. Проверять — планом, а не догадками.</li>
+    </ul>
+
+    <h2>Пагинация: почему <code>OFFSET</code> дорогой и что такое keyset</h2>
+    <p>Сначала — что означает <code>OFFSET</code>: это «<strong>пропусти первые N строк</strong>».
+      Классическая пагинация «по номеру страницы» выглядит так:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- страница 1
+SELECT id, created_at, total FROM orders ORDER BY created_at DESC LIMIT 20 OFFSET 0;
+-- страница 1000
+SELECT id, created_at, total FROM orders ORDER BY created_at DESC LIMIT 20 OFFSET 19980;</code></pre>
+    </div>
+    <p>Проблема: <code>OFFSET 19980</code> <strong>никуда не «прыгает»</strong>. База честно читает и
+      сортирует первые 20000 строк, 19980 выбрасывает и отдаёт 20. Чем глубже страница, тем дороже
+      запрос — время растёт линейно. Индекс здесь не спасает: он помогает найти <em>начало</em> диапазона,
+      а не «двадцатитысячную» строку.</p>
+    <p><strong>Keyset-пагинация</strong> («пагинация по ключу», seek method) — вместо номера страницы
+      клиент присылает <em>значения последней увиденной строки</em>, и запрос продолжает с этого места:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- клиент передал курсор: created_at и id последней строки предыдущей страницы
+SELECT id, created_at, total
+FROM   orders
+WHERE  (created_at, id) &lt; (:'last_created_at', :'last_id')   -- «после неё»
+ORDER  BY created_at DESC, id DESC
+LIMIT  20;</code></pre>
+    </div>
+    <p>Здесь работает индекс по <code>(created_at DESC, id DESC)</code>: база делает seek сразу к нужному
+      месту и читает ровно 20 строк — стоимость страницы не зависит от её номера. Пара
+      <code>(created_at, id)</code> сравнивается целиком, и <code>ORDER BY</code> должен идти по тем же
+      колонкам: иначе порядок неоднозначен (у двух заказов может совпасть <code>created_at</code>).</p>
+    <table>
+      <tr><th></th><th><code>LIMIT/OFFSET</code></th><th>Keyset</th></tr>
+      <tr><td>Глубина страницы</td><td>дорожает линейно</td><td>не влияет</td></tr>
+      <tr><td>Переход на страницу N</td><td>можно</td><td>нельзя — только «дальше/назад»</td></tr>
+      <tr><td>Вставки между запросами</td><td>строки «съезжают»: возможны дубли и пропуски</td>
+        <td>стабильно: продолжаем от конкретной строки</td></tr>
+      <tr><td>Когда выбирать</td><td>админки, небольшие таблицы</td><td>ленты, «подгрузить ещё»,
+        выгрузки</td></tr>
+    </table>
+    <p>В примерах книги это встречалось в кейсе эндпоинта (<code>GET /api/orders?page=1</code>,
+      глава 19): «страница» там — как раз <code>OFFSET</code>.</p>
+
+    <h2>Огромная таблица: партиционирование и материализованные представления</h2>
+    <p>Две техники из таблицы выше решают разные задачи: первая уменьшает <em>объём читаемых данных</em>,
+      вторая избавляет от <em>повторного вычисления</em>.</p>
+
+    <h3>Партиционирование</h3>
+    <p>Это <strong>разбиение одной логической таблицы на физические куски</strong> (секции) по правилу —
+      чаще всего по дате. Приложение по-прежнему пишет <code>INSERT INTO orders …</code> и читает
+      <code>FROM orders</code>: PostgreSQL сам выбирает нужную секцию.</p>
+    <ul>
+      <li><strong>Зачем:</strong> запрос с условием по дате читает только подходящие секции
+        (<em>pruning</em>) — меньше страниц; <code>VACUUM</code> и удаление старых данных идут по секции
+        целиком (<code>DROP TABLE orders_2025_01</code> вместо <code>DELETE</code> миллионов строк).</li>
+      <li><strong>Когда:</strong> таблица в сотни миллионов строк, данные «по времени», старые периоды
+        можно выбрасывать.</li>
+      <li><strong>Подробно:</strong> глава 24 — <code>PARTITION BY RANGE</code>, границы секций, pruning
+        в плане.</li>
+    </ul>
+
+    <h3>Материализованные представления под агрегаты</h3>
+    <p><strong>Агрегат</strong> — свёртка многих строк в несколько значений: <code>SUM(total)</code>,
+      <code>COUNT(*)</code>, <code>GROUP BY день</code>. Считать их на каждый запрос по большой таблице
+      дорого. <strong>Материализованное представление</strong> (materialized view) — это
+      <em>сохранённый на диске результат запроса</em>: читается как обычная таблица, без пересчёта.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE MATERIALIZED VIEW orders_daily AS
+SELECT date_trunc('day', created_at) AS day,
+       status,
+       count(*)   AS orders,
+       sum(total) AS revenue
+FROM   orders
+GROUP  BY 1, 2;
+
+-- данные устарели → пересчитать (для CONCURRENTLY нужен UNIQUE-индекс)
+REFRESH MATERIALIZED VIEW CONCURRENTLY orders_daily;</code></pre>
+    </div>
+    <ul>
+      <li><strong>Выигрыш:</strong> отчёт читает готовые строки вместо сканирования миллионов.</li>
+      <li><strong>Цена:</strong> данные <em>несвежие</em> — между <code>REFRESH</code> есть отставание;
+        само обновление дорогое. Нужна политика: раз в минуту/час или по событию.</li>
+      <li><strong>Альтернативы:</strong> таблица-кэш, заполняемая заданием; или обычный индекс под
+        конкретный запрос, если агрегат простой.</li>
     </ul>
 
     <h2>Настройки, которые реально влияют</h2>

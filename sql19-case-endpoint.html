@@ -28,8 +28,32 @@
       Он был перенесён из Oracle почти «как есть».</p>
 
     <h2>Шаг 1. Локализуем</h2>
-    <p>По <code>pg_stat_statements</code> видно: этот запрос лидирует по <code>total_exec_time</code>. Значит,
-      время уходит в БД, а не в приложение (методика — глава 16).</p>
+    <p>По <code>pg_stat_statements</code> видно, что этот запрос лидирует по <code>total_exec_time</code>.
+      «Видно» — это буквально такой запрос к представлению (цифры условные, структура — настоящая):</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT left(query, 55)                AS query,
+       calls,
+       round(total_exec_time::numeric, 1) AS total_ms,   -- суммарно по всем вызовам
+       round(mean_exec_time::numeric, 2)  AS mean_ms     -- в среднем на вызов
+FROM   pg_stat_statements
+ORDER  BY total_exec_time DESC
+LIMIT  5;</code></pre>
+    </div>
+    <p>Результат в нашем случае:</p>
+    <table>
+      <tr><th>query (обрезано)</th><th>calls</th><th>total_ms</th><th>mean_ms</th></tr>
+      <tr><td><code>SELECT o.id, c.name FROM orders o JOIN …</code></td><td>48 213</td>
+        <td><strong>1 842 500</strong></td><td>38.2</td></tr>
+      <tr><td><code>UPDATE orders SET status = $1 WHERE id = $2</code></td><td>512 004</td>
+        <td>410 100</td><td>0.8</td></tr>
+      <tr><td><code>SELECT count(*) FROM order_items WHERE …</code></td><td>48 213</td><td>96 400</td>
+        <td>2.0</td></tr>
+    </table>
+    <p>Читаем: у первой строки <code>total_ms</code> почти всё время базы (1842 секунды суммарно) при
+      <code>mean_ms</code> = 38 мс на вызов — время уходит в БД, и именно в этот запрос. Второй запрос
+      «быстрый» (0.8 мс), но вызывается в десять раз чаще: если бы он начал расти, «виновником» оказался
+      бы он — и это было бы видно по <code>total_ms</code>, а не по <code>mean_ms</code>. Методика целиком —
+      глава 16.</p>
 
     <h2>Шаг 2. Снимаем план</h2>
     <div class="codewrap">

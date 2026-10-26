@@ -51,6 +51,31 @@ SELECT query, calls, mean_exec_time, total_exec_time
 FROM   pg_stat_statements
 ORDER  BY total_exec_time DESC
 LIMIT  20;</code></pre>
+      <p><strong>Что такое <code>pg_stat_statements</code> и почему это бесплатно.</strong> Это
+        расширение из <em>contrib</em> — стандартного набора дополнений PostgreSQL. У PostgreSQL одна
+        редакция, без деления на «free» и «enterprise»: contrib ставится пакетом
+        (<code>postgresql-contrib</code> в Debian/Ubuntu, <code>postgresql16-contrib</code> в RPM) и уже
+        входит в официальный Docker-образ <code>postgres</code>. Ничего покупать не нужно.</p>
+      <p>Включается в два шага:</p>
+      <pre><code class="language-sql">-- 1) в postgresql.conf + перезапуск сервера (расширение грузится при старте)
+--    shared_preload_libraries = 'pg_stat_statements'
+
+-- 2) в нужной базе
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- проверить, что данные собираются
+SELECT count(*) FROM pg_stat_statements;
+
+-- сбросить накопленное (например, после выкатки)
+SELECT pg_stat_statements_reset();</code></pre>
+      <p><strong>Как читать колонки:</strong> <code>calls</code> — сколько раз запрос выполнялся;
+        <code>total_exec_time</code> — суммарное время выполнения по всем вызовам, мс;
+        <code>mean_exec_time</code> — среднее на один вызов, мс. Сортировка по
+        <code>total_exec_time</code> отвечает на вопрос «что съедает больше всего времени в сумме», а по
+        <code>mean_exec_time</code> — «что медленное само по себе». Это разные вопросы: запрос с
+        миллионом вызовов по 3 мс даст 3000 секунд суммарно и окажется первым, хотя каждый вызов быстрый.
+        В версиях до PostgreSQL 13 те же колонки назывались <code>total_time</code> и
+        <code>mean_time</code>.</p>
     </div>
 
     <div class="box warn">
