@@ -168,7 +168,8 @@ docker pull ghcr.io/acme/orders-api:1.4.2</code></pre>
     <p>Образ собирается под архитектуру процессора. На Apple Silicon (arm64) по умолчанию получится
       arm64-образ, который не запустится на amd64-сервере — и наоборот.</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># docker buildx build        сборка через BuildKit; единственный способ собрать под другую архитектуру
+      <pre><code class="language-bash"># docker buildx build        сборка под другую архитектуру. buildx — расширение сборки,
+#                            работающее на BuildKit (движок сборки Docker)
 #   --platform linux/amd64   под какое железо собирать: amd64 — обычные серверы Intel/AMD,
 #                            linux/arm64 — Apple Silicon и ARM-серверы
 #   -t ghcr.io/...:1.4.2     имя и тег результата
