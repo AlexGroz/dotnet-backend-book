@@ -25,21 +25,41 @@
 
     <h2>Жизненный цикл: четыре состояния</h2>
     <div class="codewrap">
-      <pre><code class="language-bash">create ──start──▶ running ──stop/kill──▶ exited ──rm──▶ (удалён)
-                  │  ▲
-                  └──┘ restart</code></pre>
+      <p class="cap">Состояния контейнера</p>
+      <pre><code class="language-text">создан ──запуск──▶ работает ──остановка──▶ остановлен ──удаление──▶ (удалён)
+created            running     stop/kill      exited          rm
+
+                   работает ◀── перезапуск ── остановлен
+                             (restart)</code></pre>
     </div>
     <ul>
-      <li><strong>created</strong> — контейнер создан, процесс ещё не запущен (бывает редко, обычно
-        сразу <code>run</code>).</li>
-      <li><strong>running</strong> — живёт PID 1. Как только он завершился, контейнер
-        <strong>останавливается</strong> — даже если это была ошибка через 0,2 секунды.</li>
-      <li><strong>exited</strong> — процесс завершился. Файловая система и логи остались, можно
-        посмотреть причину.</li>
-      <li><strong>удалён</strong> — исчезли записываемый слой и метаданные; образ и тома остались.</li>
+      <li><strong>Создан</strong> (<code>created</code>) — объект есть, процесс ещё не запущен. Бывает
+        редко: <code>docker run</code> делает создание и запуск сразу.</li>
+      <li><strong>Работает</strong> (<code>running</code>) — живёт процесс (PID 1). Как только он
+        завершился, контейнер <strong>останавливается</strong> — даже если это была ошибка через
+        0,2 секунды.</li>
+      <li><strong>Остановлен</strong> (<code>exited</code>) — процесс завершился. Файловая система и
+        логи остались, можно посмотреть причину. Контейнер можно запустить снова
+        (<code>docker start</code>).</li>
+      <li><strong>Удалён</strong> — исчезли записываемый слой и метаданные; образ и тома остались.
+        Вернуть такой контейнер нельзя, но можно создать новый из образа.</li>
     </ul>
-    <p><code>docker ps</code> показывает только <strong>running</strong>, <code>docker ps -a</code> —
-      все, включая упавшие. Это первое, что стоит проверить, когда «контейнера нет».</p>
+    <p><code>docker ps</code> показывает только <strong>работающие</strong>, <code>docker ps -a</code> —
+      все, включая остановленные и упавшие. Это первое, что стоит проверить, когда «контейнера нет».</p>
+    <div class="codewrap">
+      <p class="cap">Как это выглядит</p>
+      <pre><code class="language-bash">$ docker ps
+CONTAINER ID   IMAGE        COMMAND                  STATUS        PORTS                    NAMES
+8c1f0a9b2c31   orders-api   "dotnet Orders.Api.dll"  Up 2 hours    0.0.0.0:8080-&gt;8080/tcp   api
+
+$ docker ps -a
+CONTAINER ID   IMAGE        COMMAND                  STATUS                       NAMES
+8c1f0a9b2c31   orders-api   "dotnet Orders.Api.dll"  Up 2 hours                   api
+9a77e1c4d002   orders-api   "dotnet Orders.Api.dll"  Exited (1) 3 minutes ago     api-old
+7f31b0e9aa10   postgres     "docker-entrypoint.s…"   Exited (0) 2 days ago        pg</code></pre>
+    </div>
+    <p>Вторая команда показывает то, чего не видно в первой: <code>Exited (1)</code> — контейнер упал с
+      кодом 1, <code>Exited (0)</code> — завершился нормально, <code>Up 2 hours</code> — работает.</p>
 
     <h2>Зачем удалять контейнеры (и когда)</h2>
     <p>Из жизненного цикла следует неочевидная для новичка вещь: <strong>остановка и удаление — разные
@@ -55,17 +75,20 @@
       <tr><td><code>docker rm</code></td><td>Ничего: удалены записываемый слой и метаданные; образ и тома
         целы</td><td>Контейнер больше не нужен</td></tr>
     </table>
-    <p>Три бытовых сценария — и в каждом своё действие:</p>
-    <ul>
-      <li><strong>Одноразовая команда</strong> (<code>docker run --rm alpine ps aux</code>) — с
-        <code>--rm</code>: вывод посмотрели, объект не нужен.</li>
-      <li><strong>Свой сервис</strong> (API, база) — <em>без</em> <code>--rm</code>: упал — смотрим логи
-        и код выхода, а не теряем следы. Удаляют его, когда он больше не нужен, — обычно заменяя
-        новым.</li>
-      <li><strong>Уборка</strong> — <code>docker rm &lt;имя&gt;</code> для конкретного,
-        <code>docker container prune</code> для всех остановленных,
-        <code>docker system prune -a</code> — «всё неиспользуемое» (осторожно: образы и кэш тоже).</li>
-    </ul>
+    <p>Три бытовых сценария — и что мы делаем в каждом:</p>
+    <table>
+      <tr><th>Сценарий</th><th>Команда</th><th>Зачем</th></tr>
+      <tr><td>Посмотреть что-то одноразово (<code>ps aux</code>, миграция, <code>curl</code>)</td>
+        <td><code>docker run --rm …</code></td><td>Вывод нужен, а объект — нет: <code>--rm</code> уберёт
+        его автоматически, чтобы не копить мусор</td></tr>
+      <tr><td>Свой сервис (API, база)</td><td><code>docker run …</code> <em>без</em>
+        <code>--rm</code></td><td>Если упадёт — нужны логи и код выхода, чтобы понять причину. Удаляют
+        его, когда он больше не нужен, обычно заменяя новым</td></tr>
+      <tr><td>Уборка накопившегося</td><td><code>docker rm &lt;имя&gt;</code>,
+        <code>docker container prune</code>, <code>docker system prune -a</code></td>
+        <td>Освободить место: <code>rm</code> — один конкретный, <code>prune</code> — все остановленные,
+        <code>system prune</code> — всё неиспользуемое (осторожно: образы и кэш тоже)</td></tr>
+    </table>
     <div class="box note">
       <span class="t">Почему это нормально: контейнер — расходуемый</span>
       <p>В Docker не «лечат» контейнер, а заменяют его новым из того же образа: образ неизменяем, поэтому
@@ -185,28 +208,40 @@ docker stats --no-stream</code></pre>
 
     <h2>Залезть внутрь: exec</h2>
     <div class="codewrap">
-      <pre><code class="language-bash"># docker exec                 выполнить команду в работающем контейнере
-#   -i                        оставить stdin открытым (ввод с клавиатуры)
-#   -t                        псевдо-TTY: получим нормальное приглашение шелла
-#   api                       имя контейнера
-#   sh                        интерпретатор: sh есть почти везде (alpine, debian, chiseled-extra)
+      <pre><code class="language-bash"># попасть в консоль контейнера
 docker exec -it api sh
 
-# bash                        если образ на Debian/Ubuntu — там полноценный bash
+# если в образе есть полноценный bash (Debian/Ubuntu)
 docker exec -it api bash
 
-#   -u root                   выполнить от root: приложение работает от пользователя app,
-#                             а для чтения защищённых файлов нужны права
+# если приложение работает от непривилегированного пользователя, а нужны права
 docker exec -u root api bash
 
-# printenv                    переменные окружения контейнера — так проверяют, что -e дошло
+# без шелла: выполнить одну программу и выйти
 docker exec api printenv
-
-# ls -la /app                 что реально лежит в папке приложения
-#   -l                        длинный формат (права, владелец, размер)
-#   -a                        показывать и скрытые файлы
 docker exec api ls -la /app</code></pre>
     </div>
+    <p>Три слова, без которых эти команды выглядят магией:</p>
+    <ul>
+      <li><strong><code>stdin</code></strong> (стандартный ввод) — канал, из которого программа читает
+        ввод: обычно это ваша клавиатура. У каждой программы есть три канала:
+        <code>stdin</code> (ввод), <code>stdout</code> (обычный вывод), <code>stderr</code> (ошибки).
+        Флаг <code>-i</code> (interactive) говорит Docker: <em>не закрывай stdin</em>. Без него Docker
+        закрывает ввод, и программа, которая ждёт ответа (шелл, <code>psql</code>), сразу получает
+        «конец ввода» и завершается.</li>
+      <li><strong><code>TTY</code></strong> — терминал: устройство ввода-вывода, как окно консоли.
+        Флаг <code>-t</code> выделяет программе <strong>псевдотерминал</strong> — «сделай вид, что тебя
+        запустили в настоящем терминале». Тогда шелл печатает приглашение (<code>/app #</code>), работают
+        стрелки истории, автодополнение и <code>Ctrl+C</code>. Без <code>-t</code> вывод идёт «в трубу»:
+        команды выполняются, но приглашения и интерактивности нет — <em>это и есть «ненормальное»
+        приглашение</em>.</li>
+      <li><strong>Шелл / интерпретатор</strong> — программа, которая читает текстовые команды и выполняет
+        их (<code>sh</code>, <code>bash</code>, <code>zsh</code> — все они интерпретаторы). <code>sh</code>
+        есть почти в любом Linux-образе, <code>bash</code> — не всегда. Если шелл <strong>не
+        указать</strong> (<code>docker exec -it api</code> без команды), Docker попытается выполнить
+        <code>ENTRYPOINT</code> образа — то есть запустит второй экземпляр приложения, а не даст вам
+        консоль.</li>
+    </ul>
     <ul>
       <li><code>exec</code> запускает <strong>новый</strong> процесс в существующем контейнере — это
         безопасно, основной процесс не затрагивается.</li>
@@ -230,7 +265,25 @@ docker exec api ls -la /app</code></pre>
       <tr><td><code>docker container prune</code></td><td>Удалить <strong>все</strong> остановленные</td></tr>
     </table>
 
-    <h2>Что удаляет что</h2>
+    <h2><code>rm</code> и <code>rmi</code> против <code>prune</code>: в чём разница</h2>
+    <p>Правило простое: <strong><code>rm</code>/<code>rmi</code> — точечно, по имени</strong>;
+      <strong><code>prune</code> — пачкой, по критерию «не используется»</strong>.</p>
+    <table>
+      <tr><th>Команда</th><th>Что удаляет</th><th>Как выбирает</th></tr>
+      <tr><td><code>docker rm api</code></td><td>один конкретный контейнер</td><td>по имени или ID</td></tr>
+      <tr><td><code>docker container prune</code></td><td>все <em>остановленные</em> контейнеры</td>
+        <td>по состоянию (работающие не трогает)</td></tr>
+      <tr><td><code>docker volume rm pgdata</code></td><td>один конкретный том (данные!)</td>
+        <td>по имени</td></tr>
+      <tr><td><code>docker volume prune</code></td><td>все тома, не подключённые ни к одному
+        контейнеру</td><td>по факту использования</td></tr>
+      <tr><td><code>docker rmi orders-api:1.4.2</code></td><td>один конкретный образ</td>
+        <td>по имени и тегу</td></tr>
+      <tr><td><code>docker image prune</code></td><td>«висячие» образы — без тега
+        (<code>&lt;none&gt;</code>)</td><td>по отсутствию тега</td></tr>
+      <tr><td><code>docker image prune -a</code></td><td>все образы, не используемые ни одним
+        контейнером</td><td>по факту использования</td></tr>
+    </table>
     <table>
       <tr><th>Объект</th><th>Удаляется командой</th><th>Что будет с данными</th></tr>
       <tr><td>Контейнер</td><td><code>docker rm</code></td><td>Записываемый слой пропадёт; тома

@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/dockerfile.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -32,33 +33,67 @@
         <code>Cmd</code>, пользователь, открытые порты, рабочая папка, healthcheck.</li>
     </ul>
     <div class="codewrap">
-      <pre><code class="language-bash"># docker image inspect             показать конфигурацию образа в виде JSON
-#   mcr.microsoft.com/dotnet/aspnet:8.0   имя образа: реестр/имя:тег
-#   --format '{{json .Config}}'     вывести только поле .Config (Go-шаблон); json — компактно, в одну строку
-#   | head -c 400                   обрезать вывод до 400 байт, чтобы влезло в экран
-docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{json .Config}}' | head -c 400
-
-# docker history                   список слоёв образа: команда сборки, размер, хеш
-#   mcr.microsoft.com/dotnet/aspnet:8.0   какой образ смотреть
-docker history mcr.microsoft.com/dotnet/aspnet:8.0
-#   --no-trunc     показать команды слоёв целиком, без «…»</code></pre>
+      <p class="cap">Конфигурация образа: команда и вывод (сокращённо)</p>
+      <pre><code class="language-bash">$ docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{json .Config}}'
+{"User":"","Env":["PATH=/usr/local/sbin:…",
+                  "APP_UID=1654",
+                  "ASPNETCORE_HTTP_PORTS=8080"],
+ "Cmd":null,"Entrypoint":null,"WorkingDir":"","ExposedPorts":null}</code></pre>
     </div>
+    <ul>
+      <li><code>--format '{{json .Config}}'</code> — вывести только раздел <code>Config</code> (это
+        Go-шаблон: <code>.Config</code> — поле объекта, <code>json</code> — «в одну строку»).</li>
+      <li><code>| head -c 400</code> — обрезать вывод до 400 байт, иначе он не влезет на экран.</li>
+      <li><code>Env</code> — переменные окружения, которые <strong>автоматически попадут в контейнер</strong>.
+        Здесь видно, что образ .NET задаёт <code>APP_UID=1654</code> и
+        <code>ASPNETCORE_HTTP_PORTS=8080</code>.</li>
+      <li><code>User</code> пустой — значит по умолчанию контейнер запустится от <code>root</code>
+        (поэтому в Dockerfile пишут <code>USER</code>, глава 5).</li>
+      <li><code>Cmd</code> и <code>Entrypoint</code> пустые: это <em>базовый</em> образ, у него нет
+        «команды по умолчанию» — её задаёт ваш образ.</li>
+    </ul>
+    <div class="codewrap">
+      <p class="cap">Слои: команда и вывод</p>
+      <pre><code class="language-bash">$ docker history mcr.microsoft.com/dotnet/aspnet:8.0
+IMAGE          CREATED      CREATED BY                                      SIZE
+&lt;missing&gt;      2 weeks ago  /bin/sh -c #(nop)  ENV ASPNETCORE_HTTP_PORTS=8080   0B
+&lt;missing&gt;      2 weeks ago  /bin/sh -c #(nop)  ENV APP_UID=1654                0B
+&lt;missing&gt;      2 weeks ago  /bin/sh -c apt-get update &amp;&amp; apt-get install …     38MB
+&lt;missing&gt;      2 weeks ago  /bin/sh -c #(nop) ADD file:3a1b… in /              75MB</code></pre>
+    </div>
+    <ul>
+      <li><code>IMAGE &lt;missing&gt;</code> — промежуточные слои не имеют собственного тега: их нельзя
+        запустить отдельно, они существуют только как часть образа.</li>
+      <li><code>CREATED BY</code> — команда, которая создала слой. <code>#(nop)</code> значит «ничего не
+        выполнялось»: инструкция меняла только настройки (<code>ENV</code>), поэтому слой весит
+        <code>0B</code>.</li>
+      <li><code>SIZE</code> — <strong>сколько добавил именно этот слой</strong>, а не размер всего
+        образа. Сумма столбца = размер образа.</li>
+      <li><code>--no-trunc</code> — показать команды целиком, без «…».</li>
+    </ul>
     <p>Идентификатор образа — хеш, посчитанный по содержимому конфигурации и слоёв. Поэтому один и тот же
       Dockerfile при тех же входных данных даёт один и тот же образ, а «поменяли файл вручную внутри
       контейнера» на образ не влияет вообще — контейнер пишет только в свой записываемый слой (глава 2).</p>
 
     <h2>Слои: почему десять контейнеров не занимают десять образов</h2>
-    <p>Слои разделяются между образами и контейнерами на диске. Схема для трёх контейнеров одного
-      приложения:</p>
+    <p>Слои <strong>не входят в контейнер и не копируются в него</strong>. Контейнер — это ссылка на те же
+      самые слои образа (только для чтения) плюс один собственный тонкий слой. На диске слои лежат в одном
+      экземпляре:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">слой N        ваш код (Api.dll, appsettings.json)          ← общий, лежит один раз
-слой N-1      aspnet runtime 8.0
-слой N-2      debian bookworm-slim (базовые библиотеки)
-...
-контейнер 1   + тонкий записываемый слой
-контейнер 2   + тонкий записываемый слой
-контейнер 3   + тонкий записываемый слой</code></pre>
+      <p class="cap">Один образ — три контейнера</p>
+      <pre><code class="language-text">ОБРАЗ orders-api:1.4.2 (слои лежат на диске ОДИН раз)
+  слой 3   ваш код: Api.dll, appsettings.json          40 МБ
+  слой 2   aspnet runtime 8.0                         220 МБ
+  слой 1   debian bookworm-slim (базовые библиотеки)  120 МБ
+
+КОНТЕЙНЕР 1 ─┐
+КОНТЕЙНЕР 2 ─┼─► каждый: ссылка на слои 1–3 + свой записываемый слой (пустой при старте)
+КОНТЕЙНЕР 3 ─┘
+
+Итого на диске: 380 МБ (образ) + почти ничего за контейнеры</code></pre>
     </div>
+    <p>Сравните с тем, как было бы при копировании: три контейнера × 380 МБ = 1,1 ГБ. Поэтому контейнер
+      стартует мгновенно: копировать нечего.</p>
     <p>По этой же причине <code>docker pull</code> скачивает только то, чего у вас нет: если базовый
       слой <code>aspnet:8.0</code> уже загружен, новый образ приложения «весит» только свои несколько
       мегабайт.</p>
@@ -75,11 +110,24 @@ docker history mcr.microsoft.com/dotnet/aspnet:8.0
         <code>HEALTHCHECK</code></td></tr>
     </table>
     <div class="box note">
-      <span class="t">Почему из этого следует «не удаляйте файлы в следующей инструкции»</span>
-      <p><code>RUN curl ... -o big.tar &amp;&amp; ... &amp;&amp; rm big.tar</code> — файл не попадёт в образ,
-        потому что создание и удаление произошли <em>в одном слое</em>. А если разнести на два
-        <code>RUN</code>, удаление попадёт в верхний слой, а сам файл останется в нижнем — образ будет
-        весить столько же, сколько и без удаления. Правило: «скачал и удалил» — в одной инструкции.</p>
+      <span class="t">Зачем думать о слоях: «скачал — удалил в одной инструкции»</span>
+      <p>Каждая инструкция <code>RUN</code>/<code>COPY</code> создаёт <strong>новый слой</strong>, а слои
+        <strong>не перезаписывают друг друга</strong> — они накладываются. Поэтому удаление файла «следующей
+        инструкцией» образ не уменьшает: файл остаётся в нижнем слое, а сверху появляется лишь метка
+        «не показывать».</p>
+      <p><strong>Плохо — два слоя:</strong></p>
+      <pre><code class="language-dockerfile">RUN curl -o /tmp/big.tar https://example.com/big.tar   # слой A: +500 МБ
+RUN rm /tmp/big.tar                                    # слой B: 0 МБ, но файл остался в A
+# образ весит +500 МБ, хотя файла «нет»</code></pre>
+      <p><strong>Хорошо — один слой:</strong></p>
+      <pre><code class="language-dockerfile">RUN curl -o /tmp/big.tar https://example.com/big.tar \
+ &amp;&amp; tar -xf /tmp/big.tar -C /opt \
+ &amp;&amp; rm /tmp/big.tar
+# всё произошло в слое A: в образ попал только результат распаковки, самого архива нет</code></pre>
+      <p>Проверяется это <code>docker history</code>: в плохом варианте будет слой на 500 МБ, в хорошем —
+        только то, что осталось после удаления. <strong>Зачем важно:</strong> меньше образ — быстрее
+        скачивание из реестра, меньше места в CI и на серверах. Именно поэтому в главе 5 установку пакетов
+        и очистку кэша пишут <em>одной</em> командой <code>RUN</code>.</p>
     </div>
 
     <h2>Теги и digest: почему <code>latest</code> — ловушка</h2>
@@ -183,8 +231,23 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   -t ghcr.io/acme/orders-api:1.4.2 --push .
 #   \  в конце первой строки — перенос длинной команды в bash</code></pre>
     </div>
-    <p>Ошибка выглядит как <code>exec /usr/bin/dotnet: exec format error</code> — это не «битый образ», а
-      несовпадение архитектур.</p>
+    <p>Ошибка возникает <strong>при запуске</strong> (<code>docker run</code>), а не при сборке:
+      <code>exec /usr/bin/dotnet: exec format error</code> — «ядро не может выполнить файл
+      <code>/usr/bin/dotnet</code> из этого образа». Причина одна: образ собран под другую архитектуру.
+      Например, на Mac с Apple Silicon (arm64) по умолчанию получился arm64-образ, а запускаете вы его на
+      сервере amd64 — или наоборот.</p>
+    <div class="codewrap">
+      <p class="cap">Как проверить, в чём дело</p>
+      <pre><code class="language-bash"># архитектура образа
+$ docker image inspect orders-api:1.4.2 --format '{{.Os}}/{{.Architecture}}'
+linux/arm64
+
+# архитектура машины, где запускаем
+$ docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
+linux/amd64          # ← не совпадает → exec format error</code></pre>
+    </div>
+    <p>Лечится сборкой под нужную платформу: <code>docker buildx build --platform linux/amd64 …</code>
+      (пример — ниже).</p>
 
     <h2>Сколько это занимает на диске</h2>
     <div class="codewrap">

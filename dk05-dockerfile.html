@@ -20,272 +20,337 @@
   <div class="chapter">
     <div class="part">Docker · Часть II · Каждый день</div>
     <h1>Глава 5. Dockerfile: инструкции и их смысл</h1>
-    <p class="sublead">Dockerfile — это рецепт сборки: каждая инструкция либо добавляет файлы, либо
-      меняет конфигурацию будущего контейнера. Разберём инструкции на работающем примере, а не списком.</p>
+    <p class="sublead">Dockerfile — это <strong>текстовый файл с инструкциями</strong>, по которому
+      собирается образ. Разберём не список команд, а конвейер: что происходит на каждом шаге, зачем
+      инструкция нужна и что будет, если её убрать.</p>
     <p><span class="tag core">основная глава</span></p>
 
-    <h2>Минимальный Dockerfile, который собирается</h2>
-    <p>Возьмём простое ASP.NET Core API и опишем его «в лоб» — так делают все в первый раз:</p>
+    <h2>Что происходит при сборке</h2>
+    <p>На входе — Dockerfile и папка с кодом (она называется <strong>контекст сборки</strong>). На
+      выходе — образ. Внутри — последовательность шагов:</p>
     <div class="codewrap">
-      <pre><code class="language-dockerfile"># FROM — с какого образа начинаем; SDK: компилятор, MSBuild, NuGet (~1 ГБ)
-FROM mcr.microsoft.com/dotnet/sdk:8.0
-# WORKDIR — создать папку и сделать её текущей для всех следующих инструкций
+      <pre><code class="language-text">папка проекта + Dockerfile
+        │
+        │  docker build
+        ▼
+ 1) Docker читает Dockerfile сверху вниз
+ 2) выполняет инструкцию за инструкцией
+ 3) каждая RUN / COPY / ADD создаёт НОВЫЙ СЛОЙ
+ 4) остальные инструкции (WORKDIR, ENV, USER, EXPOSE, ENTRYPOINT, CMD, HEALTHCHECK)
+    файлов не добавляют — они записывают НАСТРОЙКИ в конфиг образа
+        │
+        ▼
+     ОБРАЗ  =  слои (файлы)  +  конфиг (с чем и от кого запускать)
+        │
+        │  docker run
+        ▼
+   КОНТЕЙНЕР = слои образа (только чтение) + свой записываемый слой</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">«Будущий контейнер» и «текущий образ» — это одно и то же?</span>
+      <p>Почти. Dockerfile <em>собирает образ</em>. Контейнера на этом этапе ещё нет. Но конфиг
+        образа — это, по сути, «инструкция для будущего контейнера»: в нём записано, что запускать
+        (<code>ENTRYPOINT</code>/<code>CMD</code>), от какого пользователя (<code>USER</code>), с какими
+        переменными (<code>ENV</code>), какой порт слушать (<code>EXPOSE</code>). Каждый контейнер,
+        созданный из этого образа, заберёт эти настройки.</p>
+    </div>
+
+    <h2>Две группы инструкций</h2>
+    <table>
+      <tr><th>Группа</th><th>Что делает</th><th>Инструкции</th></tr>
+      <tr><td><strong>Меняют файлы</strong></td><td>Добавляют, удаляют, изменяют файлы → создают
+        <strong>слой</strong> (и участвуют в кэше)</td><td><code>RUN</code>, <code>COPY</code>,
+        <code>ADD</code></td></tr>
+      <tr><td><strong>Задают настройки</strong></td><td>Файлов не добавляют (размер образа не растёт),
+        но определяют, <em>как</em> запустится контейнер</td><td><code>FROM</code>,
+        <code>WORKDIR</code>, <code>ENV</code>, <code>ARG</code>, <code>EXPOSE</code>,
+        <code>USER</code>, <code>ENTRYPOINT</code>, <code>CMD</code>, <code>HEALTHCHECK</code>,
+        <code>LABEL</code></td></tr>
+    </table>
+    <p>Это деление объясняет, почему в <code>docker history</code> у инструкций из второй группы
+      размер <code>0B</code>: они не положили в образ ни одного файла, только записали настройку
+      (глава 3).</p>
+
+    <h2>Пример: собираем API «в лоб»</h2>
+    <p>Такой Dockerfile пишут в первый раз почти все — он работает, но у него есть цена:</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">FROM mcr.microsoft.com/dotnet/sdk:8.0
 WORKDIR /src
-# COPY — скопировать ВЕСЬ контекст сборки (код, bin, obj, .git) в текущую папку образа
 COPY . .
-# RUN — выполнить при сборке; результат сохранится отдельным слоем
-#   dotnet publish — собрать проект  ·  -c Release — конфигурация Release  ·  -o /app — куда положить
 RUN dotnet publish -c Release -o /app
-# WORKDIR — теперь работаем в папке с опубликованными dll
 WORKDIR /app
-# ENTRYPOINT — что запускать при старте контейнера (exec-форма: PID 1 = dotnet)
 ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
     </div>
-    <p>Что произошло построчно:</p>
-    <ol>
-      <li><code>FROM</code> — взяли базовый образ <strong>SDK</strong>: там компилятор, MSBuild, NuGet.</li>
-      <li><code>WORKDIR /src</code> — создали рабочую папку и перешли в неё (аналог <code>cd</code>, но
-        ещё и «по умолчанию» для последующих инструкций).</li>
-      <li><code>COPY . .</code> — скопировали в образ <strong>весь контекст сборки</strong>: код,
-        проекты, <code>bin</code>, <code>obj</code>, <code>.git</code>.</li>
-      <li><code>RUN dotnet publish</code> — собрали Release-версию в папку <code>/app</code>.</li>
-      <li><code>WORKDIR /app</code> — сделали её рабочей.</li>
-      <li><code>ENTRYPOINT</code> — сказали, что запускать при старте контейнера.</li>
-    </ol>
-    <p>Образ соберётся и даже запустится. Проблемы начнутся позже, и они системные:</p>
-    <ul>
-      <li><strong>Он огромный</strong> — в нём SDK (компилятор, NuGet, MSBuild), то есть около гигабайта
-        вместо ~200 МБ.</li>
-      <li><strong>В нём исходники</strong> — весь код приложения лежит в образе, который уезжает в
-        registry.</li>
-      <li><strong>Он собирается долго</strong> — любое изменение в любом файле пересобирает всё, включая
-        восстановление NuGet.</li>
-    </ul>
-    <p>Правильное решение — многостадийная сборка (глава 7). Но сначала нужно понять инструкции, из
-      которых она состоит.</p>
 
-    <h2>Инструкции, которые вы будете использовать</h2>
+    <h3>1. <code>FROM</code>: с какого образа начинаем</h3>
+    <p>Всё, что стоит после <code>FROM</code>, — это <strong>полное имя образа</strong>, а не «просто
+      тег». Оно состоит из трёх частей:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">mcr.microsoft.com / dotnet/sdk : 8.0
+└──── реестр ────┘   └ репозиторий┘ └тег┘
+   где лежит образ    что за образ    какая версия</code></pre>
+    </div>
+    <ul>
+      <li><strong>Реестр</strong> — сервер с образами. Здесь Microsoft Container Registry; мог быть
+        <code>docker.io</code> (Docker Hub) или ваш внутренний, например
+        <code>registry.company.local</code>.</li>
+      <li><strong>Репозиторий</strong> — имя образа внутри реестра. <code>dotnet/sdk</code> — SDK
+        .NET: компилятор, MSBuild, NuGet.</li>
+      <li><strong>Тег</strong> — версия: <code>8.0</code>. Тег можно не писать — тогда подставится
+        <code>latest</code> (глава 3), но так делать не стоит.</li>
+    </ul>
+    <p><strong>Нужен ли интернет?</strong> Демон сначала ищет образ у себя. Если его нет — качает из
+      реестра. Если интернета нет:</p>
+    <ul>
+      <li>на машине с интернетом: <code>docker pull mcr.microsoft.com/dotnet/sdk:8.0</code>, затем
+        <code>docker save … -o sdk.tar</code>;</li>
+      <li>на изолированной машине: <code>docker load -i sdk.tar</code> — и <code>FROM</code> возьмёт
+        образ из локального хранилища.</li>
+    </ul>
+    <p>То же можно делать через свой реестр: собрать базовый образ один раз, запушить и ссылаться на
+      него. <code>FROM scratch</code> — особый случай: «пустой» образ, с которого начинают
+      self-contained приложения.</p>
+
+    <h3>2. <code>WORKDIR /src</code>: где мы находимся</h3>
+    <p>У образа есть <strong>текущая папка</strong> — та, в которой выполняются <code>RUN</code> и
+      относительно которой работает <code>COPY</code>. По умолчанию это <code>/</code> (корень файловой
+      системы образа), если базовый образ не задал свою.</p>
+    <ul>
+      <li><code>WORKDIR /src</code> <strong>создаёт</strong> папку <code>/src</code> (если её нет) и
+        делает её текущей для всех следующих инструкций — аналог <code>cd</code>, но действующий до
+        конца файла.</li>
+      <li>Никакой «рабочей директории на вашем компьютере» тут нет: всё происходит <em>внутри образа</em>.</li>
+    </ul>
+
+    <h3>3. <code>COPY . .</code>: две точки — это источник и назначение</h3>
+    <p><code>COPY &lt;откуда&gt; &lt;куда&gt;</code>. Две точки — это два пути:</p>
     <table>
-      <tr><th>Инструкция</th><th>Что делает</th><th>Нужна, когда</th></tr>
-      <tr><td><code>FROM</code></td><td>Базовый образ, с которого начинается стадия</td><td>Всегда;
-        может быть несколько (multi-stage)</td></tr>
-      <tr><td><code>WORKDIR</code></td><td>Рабочая папка (создаёт, если нет)</td><td>Почти всегда —
-        вместо <code>RUN cd</code></td></tr>
-      <tr><td><code>COPY</code></td><td>Копирует файлы из контекста сборки в образ</td><td>Код,
-        <code>.csproj</code>, конфиги</td></tr>
-      <tr><td><code>ADD</code></td><td>То же + умеет распаковывать tar и качать URL</td><td>Почти
-        никогда: неявность вредит</td></tr>
-      <tr><td><code>RUN</code></td><td>Выполняет команду <strong>при сборке</strong> и сохраняет
-        результат в слой</td><td><code>dotnet restore</code>, установка пакетов</td></tr>
-      <tr><td><code>ENV</code></td><td>Переменная окружения — попадает в образ и в контейнер</td>
-        <td><code>ASPNETCORE_URLS</code>, <code>TZ</code></td></tr>
-      <tr><td><code>ARG</code></td><td>Переменная <strong>только на время сборки</strong></td>
-        <td>Версия приложения, флаги <code>--build-arg</code></td></tr>
-      <tr><td><code>EXPOSE</code></td><td>Документирует порт (не публикует!)</td><td>Для читаемости и
-        инструментов</td></tr>
-      <tr><td><code>USER</code></td><td>От какого пользователя работает контейнер</td><td>Всегда в
-        проде — non-root (глава 14)</td></tr>
-      <tr><td><code>VOLUME</code></td><td>Объявляет точку для данных</td><td>Редко; в compose и
-        <code>-v</code> понятнее</td></tr>
-      <tr><td><code>HEALTHCHECK</code></td><td>Команда проверки живости для Docker</td><td>Если
-        проверку делает Docker, а не оркестратор (глава 13)</td></tr>
-      <tr><td><code>ENTRYPOINT</code></td><td>Что запускать (не переопределяется аргументами)</td><td>У
-        приложения</td></tr>
-      <tr><td><code>CMD</code></td><td>Аргументы по умолчанию / команда, если нет
-        <code>ENTRYPOINT</code></td><td>Значения по умолчанию</td></tr>
-      <tr><td><code>LABEL</code></td><td>Метаданные (автор, версия, репозиторий)</td><td>По
-        желанию</td></tr>
+      <tr><th>Часть</th><th>Что значит</th><th>Куда ведёт</th></tr>
+      <tr><td>первая <code>.</code></td><td>весь <strong>контекст сборки</strong></td><td>папка, из
+        которой вы запустили <code>docker build</code> (обычно корень проекта)</td></tr>
+      <tr><td>вторая <code>.</code></td><td><strong>текущая папка образа</strong></td>
+        <td>то, что задал <code>WORKDIR</code>, здесь <code>/src</code></td></tr>
     </table>
+    <p>То есть «скопируй мою папку проекта в <code>/src</code> внутри образа». Копируется <em>всё</em>:
+      код, <code>bin</code>, <code>obj</code>, <code>.git</code> — поэтому нужен
+      <code>.dockerignore</code> (глава 6).</p>
 
-    <h2>COPY против ADD</h2>
-    <div class="codewrap">
-      <pre><code class="language-dockerfile"># COPY — скопировать файл из контекста сборки в образ
-#   src/Api/Api.csproj — источник (путь относительно контекста)
-#   src/Api/           — назначение: папка внутри образа (создастся сама)
-COPY src/Api/Api.csproj src/Api/
-
-# ADD — то же, но с «магией»: распакует .tar/.tar.gz или скачает URL — всё неявно
-#   https://example.com/tool.tar.gz — скачает архив
-#   /opt/                          — и распакует его в папку /opt
-ADD https://example.com/tool.tar.gz /opt/</code></pre>
-    </div>
-    <p>Правило из официальных рекомендаций: <strong>используйте <code>COPY</code></strong>. Если нужен
-      архив — распакуйте его явной командой (<code>RUN tar -xf</code>), если нужен файл из сети —
-      скачайте <code>curl</code> в <code>RUN</code> и проверьте контрольную сумму.</p>
-
-    <h2>RUN: форма записи и «скачал — удалил в том же слое»</h2>
-    <p>У <code>RUN</code> две формы:</p>
-    <div class="codewrap">
-      <pre><code class="language-dockerfile"># shell-форма: строка выполняется через /bin/sh -c — работают &amp;&amp;, |, $VAR
-#   apt-get update                              обновить список пакетов
-#   apt-get install -y                          -y: не спрашивать подтверждение
-#     --no-install-recommends                     не тянуть «рекомендованные» пакеты
-#     curl                                        что ставим
-#   &amp;&amp;                                           следующая команда — только при успехе предыдущей
-#   rm -rf /var/lib/apt/lists/*                 удалить кэш apt в ЭТОМ ЖЕ слое, иначе он останется в образе
-#   \                                            перенос длинной строки
-RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends curl \
-    &amp;&amp; rm -rf /var/lib/apt/lists/*
-
-# exec-форма: массив аргументов, без шелла — не работают &amp;&amp;, |, $VAR и перенаправления
-#   ["dotnet", "restore"]   = выполнить dotnet restore
-RUN ["dotnet", "restore"]</code></pre>
-    </div>
-    <p>Три правила, которые сразу отличают аккуратный Dockerfile:</p>
+    <h3>4. <code>RUN dotnet publish</code>: сборка внутри образа</h3>
+    <p><code>RUN</code> выполняется в текущей папке — в <code>/src</code>, где лежит проект.</p>
     <ul>
-      <li><strong>Обновление и установка — в одной инструкции</strong> с очисткой кэша пакетов. Иначе
-        список пакетов из старого слоя останется в образе навсегда.</li>
-      <li><strong>Не ставьте лишнего.</strong> Каждый пакет — это мегабайты и новые уязвимости в
-        сканере.</li>
-      <li><strong>Не используйте <code>apt-get upgrade</code></strong> внутри образа: получится
-        непредсказуемая смесь версий; обновляться нужно сменой базового образа.</li>
+      <li><code>dotnet publish</code> — собрать проект и подготовить к запуску (в отличие от
+        <code>build</code>, который только компилирует).</li>
+      <li><code>-c Release</code> — конфигурация Release: оптимизации, без отладочных символов.</li>
+      <li><code>-o /app</code> — <strong>куда</strong> положить результат. Путь абсолютный, поэтому от
+        текущей папки не зависит: результаты окажутся в <code>/app</code>.</li>
     </ul>
 
-    <h2>ENV против ARG</h2>
+    <h3>5. <code>WORKDIR /app</code>: это другая папка</h3>
+    <p><code>/src</code> и <code>/app</code> — <strong>разные папки</strong>. В <code>/src</code> лежат
+      исходники, в <code>/app</code> — то, что собрал <code>publish</code> (dll и конфиги). После этой
+      инструкции текущая папка — <code>/app</code>, и <code>ENTRYPOINT</code> будет искать файл там.</p>
+
+    <h3>6. <code>ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code>: что запускать</h3>
+    <p><code>Orders.Api.dll</code> — <strong>имя собранной сборки</strong>, а не класс и не «startup».
+      Оно берётся из <code>&lt;AssemblyName&gt;</code> в <code>.csproj</code> (по умолчанию — имя
+      проекта). <code>dotnet publish</code> создаёт этот файл в <code>/app</code>.</p>
+    <p>.NET-приложение запускается командой <code>dotnet &lt;имя&gt;.dll</code>: рантайм загружает
+      сборку и сам находит точку входа <code>Main</code> (в ASP.NET Core она генерируется из
+      <code>Program.cs</code>). Поэтому в <code>ENTRYPOINT</code> пишут <em>файл</em>, а не метод или
+      класс.</p>
+
+    <h2>Инструкции по одной: что делает, зачем, что будет без неё</h2>
+
+    <h3><code>RUN</code>: выполнить команду при сборке</h3>
+    <p><strong>Что делает:</strong> запускает команду внутри образа и сохраняет изменения как новый слой.
+      Выполняется только при <code>docker build</code> — при запуске контейнера не повторяется.</p>
+    <p><strong>Зачем:</strong> поставить пакеты, собрать проект, создать папки — всё, что нужно
+      подготовить.</p>
+    <p>Две формы записи — и зачем каждая:</p>
     <div class="codewrap">
-      <pre><code class="language-dockerfile"># ARG — переменная ТОЛЬКО на время сборки; в запущенном контейнере её уже нет
-#   APP_VERSION=1.0.0 — значение по умолчанию, если не передан --build-arg
-ARG APP_VERSION=1.0.0
+      <pre><code class="language-dockerfile"># 1) shell-форма: строка → Docker запускает /bin/sh -c "строка"
+#    Нужна, когда используются возможности шелла: &amp;&amp; (и), | (пайп),
+#    &gt; (редирект), $VAR (переменные), подстановки и glob-маски
+RUN apt-get update &amp;&amp; apt-get install -y curl &amp;&amp; rm -rf /var/lib/apt/lists/*
 
-# ENV — переменная окружения: попадает в сборку, в контейнер и в IConfiguration (.NET)
-#   ASPNETCORE_URLS=http://+:8080 — слушать все интерфейсы на порту 8080
-ENV ASPNETCORE_URLS=http://+:8080
+# 2) exec-форма: JSON-массив, без шелла — аргументы передаются как есть
+#    Нужна, когда шелла в образе нет вообще (chiseled/distroless) или важны
+#    точные аргументы (пробелы, кавычки) без обработки их шеллом
+RUN ["dotnet", "restore"]
 
-# RUN — на сборке можно подставить ARG через $ИМЯ
-RUN echo "собираем $APP_VERSION"
-
-# передать ARG при сборке:
-#   docker build --build-arg APP_VERSION=1.4.2 .
-# переопределить ENV при запуске (не пересобирая образ):
-#   docker run -e ASPNETCORE_URLS=http://+:9000 ...</code></pre>
+# так НЕ сработает: в exec-форме нет шелла, поэтому &amp;&amp; останется просто аргументом
+# RUN ["apt-get", "update", "&amp;&amp;", "apt-get", "install", "-y", "curl"]   ✘</code></pre>
     </div>
+    <p><strong>Почему установка и очистка — одной строкой:</strong> каждая <code>RUN</code> — отдельный
+      слой, а слои не перезаписывают друг друга. Если разделить «поставил» и «удалил кэш» на два
+      <code>RUN</code>, кэш останется в нижнем слое и образ не уменьшится (подробно — глава 3).</p>
+    <div class="box note">
+      <span class="t">Что такое <code>/var/lib/apt/lists/*</code> и кто его создал</span>
+      <p><code>apt-get update</code> не «обновляет программы» — он скачивает <strong>индексы
+        пакетов</strong> (списки того, что доступно в репозиториях) и кладёт их в
+        <code>/var/lib/apt/lists/</code>. Это стандартное место <code>apt</code> в Debian/Ubuntu — поэтому
+        путь именно такой. После <code>apt-get install</code> индексы в готовом образе не нужны: они
+        занимают десятки мегабайт и никем не читаются. <code>rm -rf /var/lib/apt/lists/*</code> удаляет
+        их <em>в том же слое</em>, поэтому в образ они не попадают.</p>
+    </div>
+
+    <h3><code>ENV</code> и <code>ARG</code>: переменные</h3>
+    <table>
+      <tr><th></th><th><code>ARG</code></th><th><code>ENV</code></th></tr>
+      <tr><td>Когда существует</td><td>только во время сборки</td><td>и при сборке, и в контейнере</td></tr>
+      <tr><td>Виден приложению</td><td>нет</td><td>да — как переменная окружения и в
+        <code>IConfiguration</code></td></tr>
+      <tr><td>Переопределяется</td><td><code>docker build --build-arg</code></td>
+        <td><code>docker run -e</code></td></tr>
+      <tr><td>Зачем</td><td>версия сборки, флаги, адрес NuGet-фида</td><td>настройки запуска: порт,
+        окружение, пути</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">ARG APP_VERSION=1.0.0              # по умолчанию; docker build --build-arg APP_VERSION=1.4.2
+ENV ASPNETCORE_HTTP_PORTS=8080     # попадёт в контейнер; docker run -e ASPNETCORE_HTTP_PORTS=9000
+
+RUN echo "собираем $APP_VERSION"   # ARG доступен на сборке</code></pre>
+    </div>
+    <p><strong>Что если не указать <code>ENV</code>:</strong> приложение возьмёт значения по умолчанию
+      (порт 5000) — частая причина «контейнер запустился, а порт не отвечает».</p>
     <div class="box warn">
       <span class="t">Секреты не передают ни через <code>ARG</code>, ни через <code>ENV</code></span>
       <p>Оба значения остаются в метаданных образа: <code>docker history --no-trunc</code> покажет
-        строку сборки, а <code>docker inspect</code> — переменные. Токен NuGet, пароль БД и ключ
-        подписи передаются отдельно — через BuildKit secrets или переменные окружения
-        <strong>при запуске</strong> (глава 10).</p>
+        строку сборки, <code>docker inspect</code> — переменные. Пароли и токены передаются при
+        <em>запуске</em> (глава 10).</p>
     </div>
 
-    <h2>ENTRYPOINT и CMD: кто что запускает</h2>
-    <p><code>ENTRYPOINT</code> — это «что за программа», <code>CMD</code> — «аргументы по умолчанию».</p>
+    <h3><code>COPY</code> и <code>ADD</code>: файлы в образ</h3>
+    <p><code>COPY &lt;откуда&gt; &lt;куда&gt;</code> — простое копирование из контекста сборки (разбор
+      <code>COPY . .</code> — выше). <code>ADD</code> умеет то же плюс две «магии»: распаковывает
+      локальные <code>.tar</code>/<code>.tar.gz</code> и скачивает URL.</p>
+    <p><strong>Почему советуют <code>COPY</code>:</strong> <code>ADD</code> делает неявные вещи. Нужен
+      архив — распакуйте явно (<code>RUN tar -xf</code>), нужен файл из сети — скачайте
+      <code>curl</code> и проверьте контрольную сумму. Так в Dockerfile видно, что происходит.</p>
+
+    <h3><code>EXPOSE</code>: заявить порт</h3>
+    <p><strong>Что делает:</strong> записывает в конфиг «приложение слушает этот порт» — документация для
+      людей и инструментов. <strong>Чего не делает:</strong> не публикует порт наружу, это делает
+      <code>-p</code> при запуске.</p>
+    <p><strong>Если не указать:</strong> ничего не сломается — трафик пойдёт, если порт опубликован. Но
+      читающему будет непонятно, куда стучаться.</p>
+
+    <h3><code>USER</code>: от какого пользователя работать</h3>
+    <p><strong>Что делает:</strong> переключает пользователя для следующих инструкций и для запуска.
+      <strong>Зачем:</strong> по умолчанию контейнер работает от <code>root</code> — при взломе
+      приложения у атакующего будут root-права внутри контейнера. В образах .NET 8 уже есть пользователь
+      <code>app</code> (<code>APP_UID=1654</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">USER $APP_UID      # процесс работает от app, а не от root
+USER 1654          # то же самое, если переменная недоступна</code></pre>
+    </div>
+    <p><strong>Если не указать:</strong> контейнер запустится от root — работает, но считается плохой
+      практикой (глава 14).</p>
+
+    <h3><code>HEALTHCHECK</code>: как Docker узнаёт, что приложение живо</h3>
+    <p><strong>Зачем:</strong> «процесс запущен» ≠ «приложение отвечает». <code>HEALTHCHECK</code> даёт
+      Docker команду проверки: он будет выполнять её периодически и менять статус контейнера в
+      <code>docker ps</code> на <code>healthy</code>/<code>unhealthy</code>. По этому статусу, например,
+      <code>depends_on</code> в compose ждёт базу.</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+#   --interval      как часто проверять
+#   --timeout       сколько ждать ответа
+#   --start-period  льготное время после старта (приложение греется)
+#   --retries       сколько провалов подряд → unhealthy
+#   curl -f         HTTP 4xx/5xx = провал;  || exit 1 — ненулевой код = провал</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">В образе <code>aspnet</code> нет <code>curl</code></span>
+      <p>Проверка выше упадёт не потому, что приложение больно, а потому что утилиты нет. Варианты:
+        добавить <code>curl</code> своим слоем (плюс мегабайты и уязвимости) или — правильнее в проде —
+        отдать проверку оркестратору: Kubernetes-проба <code>httpGet</code> не требует утилит внутри
+        образа. Подробно — глава 13.</p>
+    </div>
+
+    <h3><code>ENTRYPOINT</code> и <code>CMD</code>: что запускать и с какими аргументами</h3>
+    <p>Зачем их две. <code>ENTRYPOINT</code> — «<strong>что за программа</strong>»: он не переопределяется
+      аргументами в конце <code>docker run</code>. <code>CMD</code> — «<strong>аргументы по
+      умолчанию</strong>»: их легко заменить.</p>
     <table>
       <tr><th>ENTRYPOINT</th><th>CMD</th><th>Что выполнится</th></tr>
       <tr><td><code>["dotnet","Api.dll"]</code></td><td><code>["--urls","http://+:8080"]</code></td>
         <td><code>dotnet Api.dll --urls http://+:8080</code></td></tr>
       <tr><td><code>["dotnet","Api.dll"]</code></td><td>—</td><td><code>dotnet Api.dll</code></td></tr>
-      <tr><td>—</td><td><code>["dotnet","Api.dll"]</code></td><td><code>dotnet Api.dll</code>; легко
-        переопределить: <code>docker run img sh</code></td></tr>
+      <tr><td>—</td><td><code>["dotnet","Api.dll"]</code></td><td><code>dotnet Api.dll</code>, но
+        <code>docker run img sh</code> заменит команду целиком</td></tr>
       <tr><td><code>["dotnet","Api.dll"]</code></td><td>—</td><td><code>docker run img --help</code>
         добавит аргумент, а не заменит команду</td></tr>
     </table>
-    <p>Форма записи важнее, чем кажется:</p>
+    <p><strong>Форма записи важнее, чем кажется.</strong> Запуск без shell:</p>
     <div class="codewrap">
-      <pre><code class="language-dockerfile"># exec-форма (правильно): PID 1 = dotnet → SIGTERM от docker stop доходит до приложения
-#   ENTRYPOINT                     что запускать при старте контейнера
-#   ["dotnet", "Orders.Api.dll"]   JSON-массив: без /bin/sh, посредника нет
+      <pre><code class="language-dockerfile"># exec-форма: PID 1 = dotnet → SIGTERM от docker stop доходит до приложения
 ENTRYPOINT ["dotnet", "Orders.Api.dll"]
 
-# shell-форма: строка → Docker выполнит /bin/sh -c "dotnet Orders.Api.dll"
-#   PID 1 = /bin/sh
-#   плюс: раскрываются переменные ($ASPNETCORE_URLS)
-#   минус: SIGTERM часто не доходит до dotnet (глава 13)
+# shell-форма: Docker выполнит /bin/sh -c "dotnet Orders.Api.dll"
+#   PID 1 = /bin/sh; плюс — раскрываются переменные, минус — сигналы часто не доходят
 ENTRYPOINT dotnet Orders.Api.dll</code></pre>
     </div>
-    <p>Переопределить точку входа можно на запуске — это удобно для отладки:</p>
-    <div class="codewrap">
-      <pre><code class="language-bash"># --entrypoint bash   заменить точку входа образа: вместо приложения запустится bash
-#   --rm              удалить контейнер после выхода из шелла
-#   -it               интерактивно + TTY: получим приглашение и ввод
-#   orders-api:1.4.2  образ, у которого подменяем ENTRYPOINT
-docker run --rm -it --entrypoint bash orders-api:1.4.2
-
-# --entrypoint dotnet   запустить dotnet вместо точки входа образа
-#   orders-api:1.4.2    образ
-#   Orders.Api.dll      первый аргумент dotnet — что запускать
-#   --help              второй аргумент — уже приложению (выведет справку)
-docker run --rm --entrypoint dotnet orders-api:1.4.2 Orders.Api.dll --help</code></pre>
-    </div>
-
-    <h2>EXPOSE и USER: две инструкции, которые понимают неправильно</h2>
-    <ul>
-      <li><strong><code>EXPOSE 8080</code> ничего не публикует.</strong> Это документация: «приложение
-        слушает 8080 внутри». Наружу порт выводит только <code>-p</code> (или mapping в compose /
-        Service в Kubernetes).</li>
-      <li><strong><code>USER</code> переключает пользователя</strong> для всех последующих инструкций и
-        для запуска. В образах .NET 8 уже есть пользователь <code>app</code> (UID 1654) и переменная
-        <code>APP_UID</code>, поэтому достаточно <code>USER $APP_UID</code>.</li>
-    </ul>
-    <div class="codewrap">
-      <pre><code class="language-dockerfile"># ENV ASPNETCORE_HTTP_PORTS=8080 — порт, который слушает ASP.NET Core (.NET 8+);
-#   короче, чем ASPNETCORE_URLS: просто список портов через ;
-ENV ASPNETCORE_HTTP_PORTS=8080
-
-# EXPOSE 8080 — только ДОКУМЕНТАЦИЯ: «приложение слушает 8080 внутри».
-#   Порт наружу публикует -p при запуске (или ports: в compose)
-EXPOSE 8080
-
-# USER $APP_UID — от какого пользователя работает контейнер;
-#   $APP_UID есть в образах .NET 8: это 1654, пользователь app (не root)
-USER $APP_UID</code></pre>
-    </div>
-
-    <h2>HEALTHCHECK: полезно, но с оговоркой</h2>
-    <div class="codewrap">
-      <pre><code class="language-dockerfile"># HEALTHCHECK — Docker сам периодически проверяет, жив ли контейнер
-#   --interval=30s       как часто проверять (по умолчанию 30s)
-#   --timeout=3s         сколько ждать ответа, прежде чем считать проверку проваленной
-#   --start-period=10s   льготное время после старта: неудачи не считаются (приложение греется)
-#   --retries=3          столько провалов подряд → статус unhealthy
-#   CMD ...              что выполнять внутри контейнера
-#   curl -f              -f (fail): HTTP 4xx/5xx считаются ошибкой, а не успехом
-#   || exit 1            ненулевой код выхода = проверка провалена
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1</code></pre>
-    </div>
-    <div class="box note">
-      <span class="t">В образе <code>aspnet</code> нет <code>curl</code></span>
-      <p>Команда выше упадёт не потому, что приложение больно, а потому что утилиты нет. Варианты:
-        добавить <code>curl</code> своим слоем (плюс мегабайты и уязвимости), проверять порт иначе или
-        — что правильнее в проде — отдать проверку оркестратору (Kubernetes <code>httpGet</code>-проба
-        не требует утилит внутри образа). Подробно — в главе 13.</p>
-    </div>
+    <p><strong>Если не указать ни одну:</strong> контейнер выполнит <code>CMD</code> из базового образа
+      (у <code>aspnet</code> это <code>bash</code>) — ваше приложение просто не запустится, а контейнер
+      сразу завершится.</p>
 
     <h2>Сборка</h2>
     <div class="codewrap">
-      <pre><code class="language-bash"># docker build              собрать образ из ./Dockerfile
-#   -t orders-api:1.4.2     имя:тег результата  ·  . — контекст сборки (текущая папка),
-#                           именно её содержимое уходит демону и доступно COPY
-docker build -t orders-api:1.4.2 .
-
-#   -f docker/Api.Dockerfile — взять Dockerfile по другому пути (по умолчанию ./Dockerfile)
-#   -t ...                   — имя:тег
-#   .                        — контекст всё равно текущая папка
-docker build -f docker/Api.Dockerfile -t orders-api:1.4.2 .
-
-#   --progress=plain         — подробный текстовый лог шагов вместо интерактивного прогресса;
-#                              так видно, какой слой взялся из кэша
-docker build --progress=plain -t orders-api:1.4.2 .</code></pre>
+      <p class="cap">Команда и её вывод</p>
+      <pre><code class="language-bash">$ docker build -t orders-api:1.4.2 .
+[+] Building 41.7s (9/9) FINISHED
+ =&gt; [internal] load build definition from Dockerfile
+ =&gt; [1/4] FROM mcr.microsoft.com/dotnet/sdk:8.0
+ =&gt; [2/4] WORKDIR /src
+ =&gt; [3/4] COPY . .
+ =&gt; [4/4] RUN dotnet publish -c Release -o /app
+ =&gt; exporting to image
+ =&gt; =&gt; naming to docker.io/library/orders-api:1.4.2</code></pre>
     </div>
-    <p>Точка в конце — не опечатка: это <strong>контекст</strong>, папка, содержимое которой Docker
-      отправляет демону и из которой работает <code>COPY</code>. Чем контекст больше, тем дольше сборка —
-      поэтому нужен <code>.dockerignore</code> (глава 6).</p>
+    <ul>
+      <li><code>docker build</code> — собрать образ по Dockerfile.</li>
+      <li><code>-t orders-api:1.4.2</code> — имя и тег результата (<code>-t</code> = tag). Без него образ
+        будет без имени, только с ID.</li>
+      <li><code>.</code> — <strong>контекст сборки</strong>: папка, содержимое которой отправляется демону
+        и доступно для <code>COPY</code>. Чем больше контекст, тем дольше сборка — поэтому нужен
+        <code>.dockerignore</code> (глава 6).</li>
+      <li>Строки <code>[1/4] … [4/4]</code> — шаги; каждый создаёт слой. Если шаг не изменился, при
+        следующей сборке он берётся из кэша (глава 6).</li>
+      <li><code>-f docker/Api.Dockerfile</code> — взять Dockerfile по другому пути (по умолчанию
+        <code>./Dockerfile</code>).</li>
+      <li><code>--progress=plain</code> — подробный текстовый лог; <code>--no-cache</code> — не
+        использовать кэш.</li>
+    </ul>
+    <p>Что получилось:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ docker images orders-api
+REPOSITORY    TAG     IMAGE ID       CREATED          SIZE
+orders-api    1.4.2   5d3c1b7a9e21   10 seconds ago   1.02GB</code></pre>
+    </div>
+    <p>Гигабайт — потому что в финальном образе остался <strong>SDK</strong> (компилятор, MSBuild, NuGet),
+      а вместе с ним и исходники. Для разработки это терпимо, для продакшена — нет: образ качается
+      минутами и содержит то, чем можно собрать вредоносный код. Лечится многостадийной сборкой —
+      глава 7.</p>
 
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
       <ul>
-        <li><code>RUN</code>/<code>COPY</code> меняют файловую систему и создают слои;
-          <code>ENV</code>/<code>ENTRYPOINT</code>/<code>USER</code>/<code>EXPOSE</code> — только
-          конфигурацию.</li>
-        <li><code>COPY</code> вместо <code>ADD</code>; «скачал и удалил» — в одном
-          <code>RUN</code>.</li>
-        <li><code>ARG</code> — только сборка, <code>ENV</code> — и сборка, и запуск; секреты — ни там,
-          ни там.</li>
-        <li><code>ENTRYPOINT</code> в <strong>exec-форме</strong> — иначе сигналы не дойдут до
-          приложения.</li>
-        <li><code>EXPOSE</code> — документация, порт публикует <code>-p</code>.</li>
-        <li>Наивный одностадийный Dockerfile тянет SDK и исходники в прод — лечится multi-stage
-          (глава 7).</li>
+        <li>Dockerfile читается сверху вниз; <code>RUN</code>/<code>COPY</code>/<code>ADD</code> создают
+          слои, остальные инструкции пишут настройки в конфиг образа.</li>
+        <li><code>FROM</code> — полное имя образа: <code>реестр/репозиторий:тег</code>; без интернета
+          образ берётся из локального хранилища (<code>docker load</code>).</li>
+        <li><code>WORKDIR</code> задаёт текущую папку; <code>COPY . .</code> — «контекст → текущая
+          папка».</li>
+        <li><code>RUN</code> — две формы: shell (нужны <code>&amp;&amp;</code>, <code>$VAR</code>) и exec
+          (без шелла); установка и очистка — в одной инструкции.</li>
+        <li><code>ARG</code> — только сборка, <code>ENV</code> — и сборка, и запуск; секреты — ни там, ни
+          там.</li>
+        <li><code>EXPOSE</code> — документация; <code>USER</code> — non-root; <code>HEALTHCHECK</code> —
+          как Docker проверяет живость.</li>
+        <li><code>ENTRYPOINT</code> — программа (в exec-форме), <code>CMD</code> — аргументы по
+          умолчанию.</li>
       </ul>
     </div>
 
@@ -298,5 +363,7 @@ docker build --progress=plain -t orders-api:1.4.2 .</code></pre>
 <script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
+
 
 
