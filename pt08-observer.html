@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 8 · Наблюдатель: события, подписки и доменные события</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="patterns.html">← Оглавление</a>
+  <span class="booktitle">Паттерны в .NET</span>
+  <a href="patterns.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Паттерны · Часть II · Шесть паттернов на каждый день</div>
+    <h1>Глава 8. Наблюдатель: события, подписки и доменные события</h1>
+    <p class="sublead">Один объект изменился — об этом должны узнать другие, но он <strong>не должен знать,
+      кто именно</strong>. Разберём `event` в C#, доменные события и главную ловушку: публикацию до
+      `SaveChanges`.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Разминка: идея на пятнадцати строках</h2>
+    <p>Заказ оплачен — надо, чтобы об этом узнали все, кому интересно. Сам заказ не должен знать, кто
+      именно слушает:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Order
+{
+    public decimal Total { get; init; }
+
+    // Событие: «кто хочет — подпишись». Тип EventHandler&lt;decimal&gt; значит
+    // «обработчик получает отправителя и число (сумму)».
+    public event EventHandler&lt;decimal&gt;? Paid;
+
+    public void Pay()
+    {
+        // … тут списание денег …
+        Paid?.Invoke(this, Total);   // ?. — если подписчиков нет, ничего не падает
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var order = new Order { Total = 1500m };
+
+order.Paid += (sender, total) =&gt; Console.WriteLine($"[письмо] оплачен заказ на {total}");
+order.Paid += (sender, total) =&gt; Console.WriteLine($"[склад] зарезервировать товары");
+order.Paid += (sender, total) =&gt; Console.WriteLine($"[аналитика] +1 оплата");
+
+order.Pay();</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">[письмо] оплачен заказ на 1500
+[склад] зарезервировать товары
+[аналитика] +1 оплата</code></pre>
+    </div>
+    <p>Что произошло по сути: <code>Order</code> сообщил «я оплачен» и <strong>не знает</strong>, кто на
+      это отреагировал. Добавить нового слушателя — это одна строка <code>+=</code>, а класс заказа при этом
+      не меняется. Это и есть <strong>наблюдатель</strong> (Observer): «издатель» и любое число
+      «подписчиков».</p>
+    <div class="box note">
+      <span class="t">Чем <code>event</code> отличается от обычного делегата</span>
+      <p>Поле-делегат можно вызвать откуда угодно и присвоить целиком (<code>handler = other</code>), а
+        <code>event</code> разрешает снаружи только <code>+=</code> и <code>-=</code>. Вызвать
+        (<code>Invoke</code>) может лишь сам класс-издатель. Это и есть инкапсуляция подписки: снаружи
+        нельзя «перезаписать» всех слушателей или дёрнуть событие в обход владельца.</p>
+    </div>
+
+    <h2>Проблема в реальном проекте</h2>
+    <p>Сначала — как это выглядит, когда паттерна нет. Метод оплаты в сервисе заказов:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public async Task PayAsync(Guid orderId)
+{
+    var order = await _db.Orders.FindAsync(orderId);
+    order.Status = OrderStatus.Paid;
+    await _db.SaveChangesAsync();          // 1) сохранили заказ
+
+    await _email.SendReceiptAsync(order);  // 2) письмо клиенту
+    await _stock.ReserveAsync(order);      // 3) резерв на складе
+    await _analytics.TrackAsync(order);    // 4) событие в аналитику
+    await _bonus.AccrueAsync(order);       // 5) бонусы
+}</code></pre>
+    </div>
+    <p>Чем это плохо — по пунктам, а не «так не принято»:</p>
+    <ul>
+      <li><strong>Связанность.</strong> Сервис заказов знает про письма, склад, аналитику и бонусы. Смена
+        почтового провайдера трогает код оплаты.</li>
+      <li><strong>Каждая новая реакция — правка метода.</strong> «Ещё нужно пушить в 1С» → меняем
+        <code>PayAsync</code> и все его тесты.</li>
+      <li><strong>Ошибка одного шага ломает остальные.</strong> Упало письмо — заказ уже оплачен, но
+        склад не зарезервирован; и наоборот: заказ откатился, а письмо ушло.</li>
+      <li><strong>Тесты.</strong> Чтобы проверить оплату, нужно подделать пять зависимостей, хотя сама
+        оплата — это «сменить статус и сохранить».</li>
+    </ul>
+    <p>Решение: заказ объявляет <strong>факт</strong> («оплачен»), а реакции живут отдельно от него.</p>
+
+    <h2>Решение: событие + обработчики</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1) Событие домена — просто «факт, который произошёл». Никакой логики внутри.
+public sealed record OrderPaid(Guid OrderId, decimal Total, DateTimeOffset At);
+
+// 2) Контракт обработчика: одна реакция — один класс.
+public interface IOrderPaidHandler
+{
+    Task HandleAsync(OrderPaid e, CancellationToken ct);
+}
+
+// 3) Сервис оплаты больше ничего не знает о подписчиках.
+public sealed class OrderService(AppDbContext db, IEnumerable&lt;IOrderPaidHandler&gt; handlers)
+{
+    public async Task PayAsync(Guid orderId, CancellationToken ct)
+    {
+        var order = await db.Orders.FindAsync([orderId], ct);
+        order!.Status = OrderStatus.Paid;
+
+        await db.SaveChangesAsync(ct);          // СНАЧАЛА фиксируем в базе
+
+        var e = new OrderPaid(order.Id, order.Total, DateTimeOffset.UtcNow);
+        foreach (var handler in handlers)       // ПОТОМ сообщаем всем
+            await handler.HandleAsync(e, ct);
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 4) Реакции — отдельные классы, каждый со своей зависимостью.
+public sealed class SendReceiptOnOrderPaid(IEmail email) : IOrderPaidHandler
+{
+    public Task HandleAsync(OrderPaid e, CancellationToken ct)
+        =&gt; email.SendReceiptAsync(e.OrderId, e.Total, ct);
+}
+
+public sealed class ReserveStockOnOrderPaid(IStock stock) : IOrderPaidHandler
+{
+    public Task HandleAsync(OrderPaid e, CancellationToken ct)
+        =&gt; stock.ReserveAsync(e.OrderId, ct);
+}
+
+// 5) Регистрация: порядок вызовов = порядок регистраций.
+builder.Services.AddScoped&lt;IOrderPaidHandler, SendReceiptOnOrderPaid&gt;();
+builder.Services.AddScoped&lt;IOrderPaidHandler, ReserveStockOnOrderPaid&gt;();</code></pre>
+    </div>
+    <p><code>IEnumerable&lt;IOrderPaidHandler&gt;</code> — это и есть «список подписчиков», который
+      подставляет DI (механика — «Backend на .NET», глава 15). Новый подписчик = новый класс + одна строка
+      регистрации; <code>OrderService</code> не меняется.</p>
+    <div class="box tip">
+      <span class="t">Почему в прикладном коде чаще берут интерфейс, а не <code>event</code></span>
+      <p><code>event</code> — синхронный, привязан к конкретному экземпляру и не умеет <code>async</code>,
+        DI и подписку «по соглашению». Список обработчиков за тем же интерфейсом решает это и легко
+        тестируется: в тесте подставляется фейковый обработчик и проверяется, что событие пришло. Именно
+        так устроены <code>INotificationHandler</code> в MediatR и обработчики доменных событий в DDD.</p>
+    </div>
+
+    <h2>Пять ловушек наблюдателя</h2>
+    <table>
+      <tr><th>Ловушка</th><th>Что происходит</th><th>Как не попасть</th></tr>
+      <tr><td><strong>Публикация до <code>SaveChanges</code></strong></td><td>Обработчик прочитал ещё
+        старые данные; транзакция откатилась, а письмо уже ушло</td><td>Публиковать <em>после</em>
+        фиксации; для внешних эффектов — Outbox («Backend на .NET», глава 31)</td></tr>
+      <tr><td><strong>Исключение в обработчике</strong></td><td>Падает вся цепочка: остальные реакции не
+        выполнились, запрос вернул 500</td><td>Выбрать политику: «всё или ничего» (тогда обработчики в
+        одной транзакции) или «каждый сам за себя» (try/catch + лог)</td></tr>
+      <tr><td><strong>Утечка подписок</strong></td><td>Подписчик не собирается GC, пока жив издатель</td>
+        <td>Отписываться (<code>-=</code>) в <code>Dispose</code>, слабые ссылки для долгоживущих
+        издателей</td></tr>
+      <tr><td><strong>Порядок вызовов</strong></td><td>«Письмо после резерва» не гарантировано</td>
+        <td>Не полагаться на порядок; если зависимость есть — она внутри одного обработчика</td></tr>
+      <tr><td><strong>Двойная доставка</strong></td><td>Retry после ошибки → письмо ушло дважды</td>
+        <td>Идемпотентность: идентификатор события + дедупликация (глава 31)</td></tr>
+    </table>
+    <p>Утечка — самое частое на практике, потому что выглядит безобидно:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ подписка на долгоживущий объект: кэш (singleton) держит ссылку на подписчика вечно
+_cache.Invalidated += OnInvalidated;
+
+// ✔ подписка оформлена парой с отпиской
+public sealed class PriceView : IDisposable
+{
+    private readonly PriceCache _cache;
+
+    public PriceView(PriceCache cache)
+    {
+        _cache = cache;
+        _cache.Invalidated += OnInvalidated;
+    }
+
+    public void Dispose() =&gt; _cache.Invalidated -= OnInvalidated;   // без этого — утечка
+
+    private void OnInvalidated(object? sender, EventArgs e) { /* обновить отображение */ }
+}</code></pre>
+    </div>
+
+    <h2>Где это уже работает в .NET</h2>
+    <table>
+      <tr><th>Место</th><th>Кто издатель, кто подписчик</th></tr>
+      <tr><td><code>INotifyPropertyChanged</code></td><td>Модель сообщает об изменении свойства, UI
+        (WPF/MAUI) подписан и перерисовывает</td></tr>
+      <tr><td><code>FileSystemWatcher</code></td><td>Файловая система «издатель», ваш код — подписчик на
+        <code>Changed</code>/<code>Created</code></td></tr>
+      <tr><td><code>IObserver&lt;T&gt;</code> / <code>IObservable&lt;T&gt;</code></td><td>Стандартные
+        контракты «издатель/подписчик» в BCL; на них стоит Rx (System.Reactive)</td></tr>
+      <tr><td><code>CancellationToken.Register</code></td><td>Токен сообщает «отменили», ваш код
+        подписывается и освобождает ресурсы</td></tr>
+      <tr><td><code>AppDomain.UnhandledException</code></td><td>Платформа сообщает о необработанном
+        исключении, вы подписываетесь и логируете</td></tr>
+      <tr><td><code>INotificationHandler&lt;T&gt;</code> (MediatR)</td><td>Прикладной вариант: издатель
+        шлёт <code>INotification</code>, обработчиков может быть много, DI их находит</td></tr>
+    </table>
+
+    <h2>Не путать с соседями</h2>
+    <table>
+      <tr><th>Паттерн</th><th>Схема</th><th>Кто решает, что делать</th></tr>
+      <tr><td><strong>Наблюдатель</strong></td><td>один → <em>много</em></td><td>Каждый подписчик
+        реагирует сам; издатель не в курсе</td></tr>
+      <tr><td><strong>Цепочка обязанностей</strong> (глава 6)</td><td>один → следующий → следующий</td>
+        <td>Каждое звено решает, передавать ли дальше</td></tr>
+      <tr><td><strong>Декоратор</strong> (глава 5)</td><td>обёртка вокруг одного</td><td>Вызов один, но
+        с дополнительным поведением до/после</td></tr>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li>Наблюдатель — это <strong>один ко многим</strong>: издатель объявляет факт, подписчики
+          реагируют, издатель их не знает.</li>
+        <li><code>event</code> — встроенный вариант в C#; снаружи только <code>+=</code>/<code>-=</code>,
+          вызывает только владелец.</li>
+        <li>В прикладном коде чаще берут <strong>список обработчиков за интерфейсом</strong>: работает с
+          DI, <code>async</code> и тестами.</li>
+        <li><strong>Публикуйте после <code>SaveChanges</code></strong>, а внешние эффекты отправляйте
+          через Outbox — иначе письмо уйдёт об отменённом заказе.</li>
+        <li>Отписывайтесь; исключение в обработчике и двойная доставка — штатные проблемы, у них должны
+          быть правила.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="pt07-repository.html">← <span class="sp">Глава 7. Репозиторий и Unit of Work: когда нужны, а когда мешают</span></a>
+      <a href="patterns.html"><span class="sp">Оглавление</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

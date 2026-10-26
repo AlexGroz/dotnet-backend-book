@@ -19,7 +19,7 @@
   <div class="chapter">
     <div class="part">Паттерны · Часть I · Как это читать</div>
     <h1>Глава 1. Паттерны и статистика: как считать честно</h1>
-    <p class="sublead">Прежде чем разбирать пять паттернов, договоримся о двух вещах: что такое паттерн в
+    <p class="sublead">Прежде чем разбирать шесть паттернов, договоримся о двух вещах: что такое паттерн в
       современном C# и что на самом деле известно про частоту его использования.</p>
     <p><span class="tag lead">подводящая глава</span></p>
 
@@ -107,18 +107,19 @@
       </ul>
     </div>
 
-    <h2>Пять паттернов, которые в .NET встречаются постоянно</h2>
+    <h2>Шесть паттернов, которые в .NET встречаются постоянно</h2>
     <p>Отбор простой: паттерн попал в книгу, если он <strong>либо встроен в платформу</strong>, либо
       <strong>встречается почти в любом прикладном проекте</strong> — и без него код объективно хуже
       (жёстче связан, хуже тестируется или имеет известный дефект).</p>
     <table>
       <thead><tr><th>Паттерн</th><th>Где живёт в .NET</th><th>Доля проектов<br><small>оценка</small></th><th>Доля от всех<br>использований<br><small>оценка, Σ = 100 %</small></th></tr></thead>
       <tbody>
-        <tr><td><strong>Стратегия</strong></td><td>интерфейсы + DI, <code>IComparer&lt;T&gt;</code>, <code>ILoggerProvider</code></td><td>~90 %</td><td>~30 %</td></tr>
-        <tr><td><strong>Фабрика</strong></td><td><code>IHttpClientFactory</code>, <code>ILoggerFactory</code>, <code>IServiceProvider</code></td><td>~85 %</td><td>~25 %</td></tr>
-        <tr><td><strong>Декоратор</strong></td><td><code>Stream</code>, <code>DelegatingHandler</code>, DI-обёртки</td><td>~60 %</td><td>~15 %</td></tr>
-        <tr><td><strong>Цепочка обязанностей</strong></td><td>middleware ASP.NET Core, фильтры</td><td>~70 %</td><td>~20 %</td></tr>
-        <tr><td><strong>Репозиторий + Unit of Work</strong></td><td><code>DbContext</code> + репозитории в прикладном коде</td><td>~50 %</td><td>~10 %</td></tr>
+        <tr><td><strong>Стратегия</strong></td><td>интерфейсы + DI, <code>IComparer&lt;T&gt;</code>, <code>ILoggerProvider</code></td><td>~90 %</td><td>~28 %</td></tr>
+        <tr><td><strong>Фабрика</strong></td><td><code>IHttpClientFactory</code>, <code>ILoggerFactory</code>, <code>IServiceProvider</code></td><td>~85 %</td><td>~22 %</td></tr>
+        <tr><td><strong>Декоратор</strong></td><td><code>Stream</code>, <code>DelegatingHandler</code>, DI-обёртки</td><td>~60 %</td><td>~13 %</td></tr>
+        <tr><td><strong>Цепочка обязанностей</strong></td><td>middleware ASP.NET Core, фильтры</td><td>~70 %</td><td>~18 %</td></tr>
+        <tr><td><strong>Репозиторий + Unit of Work</strong></td><td><code>DbContext</code> + репозитории в прикладном коде</td><td>~50 %</td><td>~9 %</td></tr>
+        <tr><td><strong>Наблюдатель</strong></td><td><code>event</code>, <code>INotifyPropertyChanged</code>, <code>IObserver&lt;T&gt;</code>, <code>INotificationHandler</code></td><td>~80 %</td><td>~10 %</td></tr>
       </tbody>
     </table>
     <div class="box tip">
@@ -132,7 +133,7 @@
         <li><strong>Почему стратегия выше всех:</strong> это самый «дешёвый» паттерн в C# — интерфейс плюс
           регистрация в DI. Он появляется в проекте даже без осознанного решения «применим стратегию».</li>
         <li><strong>Почему репозиторий ниже:</strong> EF Core <em>уже</em> даёт репозиторий и Unit of Work,
-          поэтому дополнительные обёртки добавляют не все (и это нормально — см. главу 6).</li>
+          поэтому дополнительные обёртки добавляют не все (и это нормально — см. главу 7).</li>
       </ul>
     </div>
 
