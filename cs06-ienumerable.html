@@ -35,7 +35,7 @@
         следующий), <code>Current</code> (текущий), <code>Dispose()</code> (освободить ресурсы).</li>
     </ul>
     <div class="codewrap">
-      <pre><code class="language-csharp">// orders — это ЛЮБОЙ IEnumerable<Order>: List<Order>, массив, результат LINQ
+      <pre><code class="language-csharp">// orders — это ЛЮБОЙ IEnumerable&lt;Order&gt;: List&lt;Order&gt;, массив, результат LINQ
 IEnumerable&lt;Order&gt; orders = new List&lt;Order&gt; { new() { Id = 1 }, new() { Id = 2 } };
 
 // то, что делает foreach, — примерно так:

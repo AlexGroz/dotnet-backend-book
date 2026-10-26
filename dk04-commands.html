@@ -65,7 +65,19 @@
     <h2>Практика: PostgreSQL за тридцать секунд</h2>
     <p>Самый частый сценарий новичка — «нужна база, а ставить её на машину не хочется»:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># 1) запустить базу в фоне, с паролем, портом и томом для данных
+      <pre><code class="language-bash"># docker run                      создать и запустить контейнер
+#   -d                            в фоне (detached): терминал останется свободным
+#   --name pg                     имя контейнера: по нему работают exec, logs, stop, rm
+#                                 (без имени Docker выдаст случайное вроде happy_turing)
+#   -e POSTGRES_PASSWORD=secret   переменная окружения ВНУТРИ контейнера;
+#                                 официальный образ postgres требует её при первом старте
+#   -p 5432:5432                  опубликовать порт «хост:контейнер»:
+#                                 слева порт на вашей машине, справа порт внутри контейнера
+#   -v pgdata:/var/lib/postgresql/data
+#                                 том pgdata подключить в папку данных PostgreSQL —
+#                                 данные переживут удаление контейнера
+#   postgres:16                   образ: официальный postgres, тег 16
+#   \                             перенос длинной команды на следующую строку (bash)
 docker run -d \
   --name pg \
   -e POSTGRES_PASSWORD=secret \
@@ -73,17 +85,27 @@ docker run -d \
   -v pgdata:/var/lib/postgresql/data \
   postgres:16
 
-# 2) посмотреть, что она жива
+# docker ps                       список РАБОТАЮЩИХ контейнеров
+#                                 (ID, IMAGE, STATUS, PORTS, NAMES)
 docker ps
 
-# 3) подключиться psql изнутри контейнера
+# docker exec                     выполнить команду внутри работающего контейнера
+#   -i                            держать stdin открытым (нужно интерактивным программам)
+#   -t                            выделить псевдо-TTY (без него не будет приглашения и ввода)
+#   pg                            имя контейнера
+#   psql -U postgres              клиент PostgreSQL, пользователь postgres
 docker exec -it pg psql -U postgres
 
-# 4) посмотреть логи сервера
+# docker logs                     stdout/stderr процесса контейнера
+#   pg                            чей лог; без -f выведет накопленное и завершится
 docker logs pg
 
-# 5) остановить и удалить (данные в томе pgdata останутся)
+# docker stop                     SIGTERM → ждать 10 секунд → SIGKILL;
+#                                 контейнер остаётся в списке docker ps -a
 docker stop pg
+
+# docker rm                       удалить остановленный контейнер;
+#                                 том pgdata НЕ удаляется — данные останутся
 docker rm pg</code></pre>
     </div>
     <p>Что здесь важно: пароль передан <strong>переменной окружения</strong>, порт
@@ -92,18 +114,35 @@ docker rm pg</code></pre>
 
     <h2>Смотреть: ps, logs, inspect, stats</h2>
     <div class="codewrap">
-      <pre><code class="language-bash">docker ps                       # что работает
-docker ps -a                    # включая упавшие
+      <pre><code class="language-bash"># docker ps                    список работающих контейнеров
+docker ps
+#   -a                         все, включая остановленные и упавшие (exited)
+#   -q                         только ID — удобно для скриптов: docker stop $(docker ps -q)
+#   --format 'шаблон'          свой вывод (Go-шаблон):
+#     {{.Names}}               имя контейнера
+#     {{.Status}}              «Up 5 minutes» или «Exited (1) 2 minutes ago»
+#     {{.Ports}}               опубликованные порты
+#     \t                       табуляция между столбцами
 docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
 
-docker logs -f --tail 100 api   # последние 100 строк и следить дальше
-docker logs --since 10m api     # за последние 10 минут
+# docker logs                  что процесс писал в stdout/stderr
+#   -f                         следить в реальном времени (как tail -f)
+#   --tail 100                 начать с последних 100 строк
+#   api                        имя контейнера
+docker logs -f --tail 100 api
+#   --since 10m                только за последние 10 минут (10m, 2h, 2026-10-26T10:00:00)
+docker logs --since 10m api
 
-docker inspect api              # вся конфигурация контейнера (JSON)
+# docker inspect               полная конфигурация и состояние контейнера (JSON)
+docker inspect api
+#   -f '{{.State.ExitCode}}'   код выхода: 0 — ок, 137 — SIGKILL/OOM, 143 — SIGTERM
 docker inspect -f '{{.State.ExitCode}}' api
+#   -f '{{.HostConfig.Memory}}'  лимит памяти в байтах (0 — лимит не задан)
 docker inspect -f '{{.HostConfig.Memory}}' api
 
-docker stats --no-stream        # CPU, память, сеть по контейнерам</code></pre>
+# docker stats                 живая статистика CPU, памяти и сети по контейнерам
+#   --no-stream                вывести один раз и выйти (без него — обновляется, как top)
+docker stats --no-stream</code></pre>
     </div>
     <p><code>inspect</code> — главный инструмент разбора: там видно итоговый образ, переменные,
       лимиты, сеть, точку монтирования, код выхода. Формат <code>-f</code> принимает Go-шаблоны,
@@ -111,11 +150,27 @@ docker stats --no-stream        # CPU, память, сеть по контей�
 
     <h2>Залезть внутрь: exec</h2>
     <div class="codewrap">
-      <pre><code class="language-bash">docker exec -it api sh          # шелл внутри работающего контейнера
-docker exec -it api bash        # если образ на Debian и bash есть
-docker exec -u root api bash    # от root, когда приложение работает от app
-docker exec api printenv        # переменные окружения
-docker exec api ls -la /app     # что реально лежит в папке приложения</code></pre>
+      <pre><code class="language-bash"># docker exec                 выполнить команду в работающем контейнере
+#   -i                        оставить stdin открытым (ввод с клавиатуры)
+#   -t                        псевдо-TTY: получим нормальное приглашение шелла
+#   api                       имя контейнера
+#   sh                        интерпретатор: sh есть почти везде (alpine, debian, chiseled-extra)
+docker exec -it api sh
+
+# bash                        если образ на Debian/Ubuntu — там полноценный bash
+docker exec -it api bash
+
+#   -u root                   выполнить от root: приложение работает от пользователя app,
+#                             а для чтения защищённых файлов нужны права
+docker exec -u root api bash
+
+# printenv                    переменные окружения контейнера — так проверяют, что -e дошло
+docker exec api printenv
+
+# ls -la /app                 что реально лежит в папке приложения
+#   -l                        длинный формат (права, владелец, размер)
+#   -a                        показывать и скрытые файлы
+docker exec api ls -la /app</code></pre>
     </div>
     <ul>
       <li><code>exec</code> запускает <strong>новый</strong> процесс в существующем контейнере — это
@@ -165,11 +220,26 @@ docker exec api ls -la /app     # что реально лежит в папке
 
     <h2>Мелочи, которые экономят время</h2>
     <div class="codewrap">
-      <pre><code class="language-bash">docker cp api:/app/appsettings.json .   # вытащить файл из контейнера
-docker diff api                          # что изменилось в записываемом слое
-docker top api                           # процессы контейнера
-docker port api                          # какие порты опубликованы
-docker logs api 2&gt;&amp;1 | head              # первые строки лога (если упал сразу)</code></pre>
+      <pre><code class="language-bash"># docker cp                    скопировать файл между контейнером и хостом
+#   api:/app/appsettings.json  источник: имя контейнера : путь внутри него
+#   .                          назначение: текущая папка на хосте
+docker cp api:/app/appsettings.json .
+
+# docker diff                  что изменилось в записываемом слое контейнера
+#                              A — файл добавлен, C — изменён, D — удалён
+docker diff api
+
+# docker top                   процессы контейнера (ps с учётом его namespace)
+docker top api
+
+# docker port                  какие порты опубликованы и куда: 0.0.0.0:8080 → 8080/tcp
+docker port api
+
+# docker logs api 2&gt;&amp;1 | head
+#   logs api                   лог контейнера
+#   2&gt;&amp;1                      направить stderr в stdout, чтобы ошибки тоже попали в вывод
+#   | head                     показать только первые 10 строк (если контейнер упал сразу)
+docker logs api 2&gt;&amp;1 | head</code></pre>
     </div>
 
     <div class="box gold">

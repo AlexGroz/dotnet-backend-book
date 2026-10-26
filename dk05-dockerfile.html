@@ -27,11 +27,18 @@
     <h2>Минимальный Dockerfile, который собирается</h2>
     <p>Возьмём простое ASP.NET Core API и опишем его «в лоб» — так делают все в первый раз:</p>
     <div class="codewrap">
-      <pre><code class="language-dockerfile">FROM mcr.microsoft.com/dotnet/sdk:8.0
+      <pre><code class="language-dockerfile"># FROM — с какого образа начинаем; SDK: компилятор, MSBuild, NuGet (~1 ГБ)
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+# WORKDIR — создать папку и сделать её текущей для всех следующих инструкций
 WORKDIR /src
+# COPY — скопировать ВЕСЬ контекст сборки (код, bin, obj, .git) в текущую папку образа
 COPY . .
+# RUN — выполнить при сборке; результат сохранится отдельным слоем
+#   dotnet publish — собрать проект  ·  -c Release — конфигурация Release  ·  -o /app — куда положить
 RUN dotnet publish -c Release -o /app
+# WORKDIR — теперь работаем в папке с опубликованными dll
 WORKDIR /app
+# ENTRYPOINT — что запускать при старте контейнера (exec-форма: PID 1 = dotnet)
 ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
     </div>
     <p>Что произошло построчно:</p>
@@ -92,10 +99,14 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
 
     <h2>COPY против ADD</h2>
     <div class="codewrap">
-      <pre><code class="language-dockerfile"># обычное копирование — предсказуемо
+      <pre><code class="language-dockerfile"># COPY — скопировать файл из контекста сборки в образ
+#   src/Api/Api.csproj — источник (путь относительно контекста)
+#   src/Api/           — назначение: папка внутри образа (создастся сама)
 COPY src/Api/Api.csproj src/Api/
 
-# ADD: распакует archive.tar.gz или скачает URL — «магия», которую потом ищут полчаса
+# ADD — то же, но с «магией»: распакует .tar/.tar.gz или скачает URL — всё неявно
+#   https://example.com/tool.tar.gz — скачает архив
+#   /opt/                          — и распакует его в папку /opt
 ADD https://example.com/tool.tar.gz /opt/</code></pre>
     </div>
     <p>Правило из официальных рекомендаций: <strong>используйте <code>COPY</code></strong>. Если нужен
@@ -105,11 +116,19 @@ ADD https://example.com/tool.tar.gz /opt/</code></pre>
     <h2>RUN: форма записи и «скачал — удалил в том же слое»</h2>
     <p>У <code>RUN</code> две формы:</p>
     <div class="codewrap">
-      <pre><code class="language-dockerfile"># shell-форма: команда идёт через /bin/sh -c, работают &amp;&amp; и $VAR
+      <pre><code class="language-dockerfile"># shell-форма: строка выполняется через /bin/sh -c — работают &amp;&amp;, |, $VAR
+#   apt-get update                              обновить список пакетов
+#   apt-get install -y                          -y: не спрашивать подтверждение
+#     --no-install-recommends                     не тянуть «рекомендованные» пакеты
+#     curl                                        что ставим
+#   &amp;&amp;                                           следующая команда — только при успехе предыдущей
+#   rm -rf /var/lib/apt/lists/*                 удалить кэш apt в ЭТОМ ЖЕ слое, иначе он останется в образе
+#   \                                            перенос длинной строки
 RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends curl \
     &amp;&amp; rm -rf /var/lib/apt/lists/*
 
-# exec-форма: без шелла, массив аргументов
+# exec-форма: массив аргументов, без шелла — не работают &amp;&amp;, |, $VAR и перенаправления
+#   ["dotnet", "restore"]   = выполнить dotnet restore
 RUN ["dotnet", "restore"]</code></pre>
     </div>
     <p>Три правила, которые сразу отличают аккуратный Dockerfile:</p>
@@ -124,13 +143,21 @@ RUN ["dotnet", "restore"]</code></pre>
 
     <h2>ENV против ARG</h2>
     <div class="codewrap">
-      <pre><code class="language-dockerfile">ARG APP_VERSION=1.0.0             # только во время сборки
-ENV ASPNETCORE_URLS=http://+:8080 # попадёт в контейнер и в IConfiguration
+      <pre><code class="language-dockerfile"># ARG — переменная ТОЛЬКО на время сборки; в запущенном контейнере её уже нет
+#   APP_VERSION=1.0.0 — значение по умолчанию, если не передан --build-arg
+ARG APP_VERSION=1.0.0
 
+# ENV — переменная окружения: попадает в сборку, в контейнер и в IConfiguration (.NET)
+#   ASPNETCORE_URLS=http://+:8080 — слушать все интерфейсы на порту 8080
+ENV ASPNETCORE_URLS=http://+:8080
+
+# RUN — на сборке можно подставить ARG через $ИМЯ
 RUN echo "собираем $APP_VERSION"
 
-# передаётся при сборке: docker build --build-arg APP_VERSION=1.4.2 .
-# ENV можно переопределить при запуске: docker run -e ASPNETCORE_URLS=http://+:9000 ...</code></pre>
+# передать ARG при сборке:
+#   docker build --build-arg APP_VERSION=1.4.2 .
+# переопределить ENV при запуске (не пересобирая образ):
+#   docker run -e ASPNETCORE_URLS=http://+:9000 ...</code></pre>
     </div>
     <div class="box warn">
       <span class="t">Секреты не передают ни через <code>ARG</code>, ни через <code>ENV</code></span>
@@ -154,16 +181,29 @@ RUN echo "собираем $APP_VERSION"
     </table>
     <p>Форма записи важнее, чем кажется:</p>
     <div class="codewrap">
-      <pre><code class="language-dockerfile"># exec-форма (правильно): PID 1 = dotnet, SIGTERM доходит до приложения
+      <pre><code class="language-dockerfile"># exec-форма (правильно): PID 1 = dotnet → SIGTERM от docker stop доходит до приложения
+#   ENTRYPOINT                     что запускать при старте контейнера
+#   ["dotnet", "Orders.Api.dll"]   JSON-массив: без /bin/sh, посредника нет
 ENTRYPOINT ["dotnet", "Orders.Api.dll"]
 
-# shell-форма: PID 1 = /bin/sh -c, переменные раскрываются,
-# но сигналы часто не доходят (глава 13)
+# shell-форма: строка → Docker выполнит /bin/sh -c "dotnet Orders.Api.dll"
+#   PID 1 = /bin/sh
+#   плюс: раскрываются переменные ($ASPNETCORE_URLS)
+#   минус: SIGTERM часто не доходит до dotnet (глава 13)
 ENTRYPOINT dotnet Orders.Api.dll</code></pre>
     </div>
     <p>Переопределить точку входа можно на запуске — это удобно для отладки:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker run --rm -it --entrypoint bash orders-api:1.4.2
+      <pre><code class="language-bash"># --entrypoint bash   заменить точку входа образа: вместо приложения запустится bash
+#   --rm              удалить контейнер после выхода из шелла
+#   -it               интерактивно + TTY: получим приглашение и ввод
+#   orders-api:1.4.2  образ, у которого подменяем ENTRYPOINT
+docker run --rm -it --entrypoint bash orders-api:1.4.2
+
+# --entrypoint dotnet   запустить dotnet вместо точки входа образа
+#   orders-api:1.4.2    образ
+#   Orders.Api.dll      первый аргумент dotnet — что запускать
+#   --help              второй аргумент — уже приложению (выведет справку)
 docker run --rm --entrypoint dotnet orders-api:1.4.2 Orders.Api.dll --help</code></pre>
     </div>
 
@@ -177,14 +217,30 @@ docker run --rm --entrypoint dotnet orders-api:1.4.2 Orders.Api.dll --help</code
         <code>APP_UID</code>, поэтому достаточно <code>USER $APP_UID</code>.</li>
     </ul>
     <div class="codewrap">
-      <pre><code class="language-dockerfile">ENV ASPNETCORE_HTTP_PORTS=8080
+      <pre><code class="language-dockerfile"># ENV ASPNETCORE_HTTP_PORTS=8080 — порт, который слушает ASP.NET Core (.NET 8+);
+#   короче, чем ASPNETCORE_URLS: просто список портов через ;
+ENV ASPNETCORE_HTTP_PORTS=8080
+
+# EXPOSE 8080 — только ДОКУМЕНТАЦИЯ: «приложение слушает 8080 внутри».
+#   Порт наружу публикует -p при запуске (или ports: в compose)
 EXPOSE 8080
+
+# USER $APP_UID — от какого пользователя работает контейнер;
+#   $APP_UID есть в образах .NET 8: это 1654, пользователь app (не root)
 USER $APP_UID</code></pre>
     </div>
 
     <h2>HEALTHCHECK: полезно, но с оговоркой</h2>
     <div class="codewrap">
-      <pre><code class="language-dockerfile">HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+      <pre><code class="language-dockerfile"># HEALTHCHECK — Docker сам периодически проверяет, жив ли контейнер
+#   --interval=30s       как часто проверять (по умолчанию 30s)
+#   --timeout=3s         сколько ждать ответа, прежде чем считать проверку проваленной
+#   --start-period=10s   льготное время после старта: неудачи не считаются (приложение греется)
+#   --retries=3          столько провалов подряд → статус unhealthy
+#   CMD ...              что выполнять внутри контейнера
+#   curl -f              -f (fail): HTTP 4xx/5xx считаются ошибкой, а не успехом
+#   || exit 1            ненулевой код выхода = проверка провалена
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/health || exit 1</code></pre>
     </div>
     <div class="box note">
@@ -197,9 +253,19 @@ USER $APP_UID</code></pre>
 
     <h2>Сборка</h2>
     <div class="codewrap">
-      <pre><code class="language-bash">docker build -t orders-api:1.4.2 .          # . — контекст сборки (папка)
+      <pre><code class="language-bash"># docker build              собрать образ из ./Dockerfile
+#   -t orders-api:1.4.2     имя:тег результата  ·  . — контекст сборки (текущая папка),
+#                           именно её содержимое уходит демону и доступно COPY
+docker build -t orders-api:1.4.2 .
+
+#   -f docker/Api.Dockerfile — взять Dockerfile по другому пути (по умолчанию ./Dockerfile)
+#   -t ...                   — имя:тег
+#   .                        — контекст всё равно текущая папка
 docker build -f docker/Api.Dockerfile -t orders-api:1.4.2 .
-docker build --progress=plain -t orders-api:1.4.2 .   # подробный лог шагов</code></pre>
+
+#   --progress=plain         — подробный текстовый лог шагов вместо интерактивного прогресса;
+#                              так видно, какой слой взялся из кэша
+docker build --progress=plain -t orders-api:1.4.2 .</code></pre>
     </div>
     <p>Точка в конце — не опечатка: это <strong>контекст</strong>, папка, содержимое которой Docker
       отправляет демону и из которой работает <code>COPY</code>. Чем контекст больше, тем дольше сборка —

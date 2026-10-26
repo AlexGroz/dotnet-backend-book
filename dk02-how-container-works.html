@@ -26,16 +26,31 @@
     <h2>Один процесс, которому выдали своё окружение</h2>
     <p>Запустим контейнер и посмотрим на него с двух сторон — изнутри и с хоста:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># изнутри контейнера
+      <pre><code class="language-bash"># ── изнутри контейнера ─────────────────────────────────────────────
+# docker run            создать и запустить контейнер из образа
+#   --rm                удалить контейнер сразу после завершения процесса
+#                       (без него контейнер останется в списке docker ps -a)
+#   alpine              имя образа; тег не указан → alpine:latest
+#   ps aux              команда, которая выполнится ВНУТРИ контейнера
+#                       (перекрывает стандартную команду образа)
 docker run --rm alpine ps aux
 
-PID   USER     TIME  COMMAND
-    1 root      0:00 ps aux          # ← единственный процесс, и он PID 1
+# что показывает вывод:
+#   PID     1           нумерация внутри контейнера своя — первый процесс всегда PID 1
+#   USER    root        от какого пользователя работает процесс
+#   TIME    0:00        сколько процессорного времени потрачено
+#   COMMAND ps aux      сама команда
 
-# с хоста, пока контейнер работает
+# ── с хоста, пока контейнер работает ───────────────────────────────
+# -d                    запустить в фоне (detached) и вернуть терминал
+# --name demo           дать контейнеру имя (иначе Docker придумает случайное)
+# sleep 300             команда внутри: «спать» 300 секунд; контейнер живёт, пока она работает
 docker run -d --name demo alpine sleep 300
+
+# ps aux                список процессов ХОСТА (это обычная команда Linux, не Docker)
+# | grep 'sleep 300'    оставить только строки, где встречается текст
 ps aux | grep 'sleep 300'
-root  48173  ...  sleep 300          # ← тот же процесс, обычный PID на хосте</code></pre>
+# вывод: тот же процесс виден на хосте как обычный PID (например, 48173)</code></pre>
     </div>
     <p>Это главное, что нужно усвоить: <strong>контейнер — не «коробка с ОС»</strong>. На хосте это
       обычный процесс (или несколько), которому ядро показало другую картину мира: свои процессы, свою
@@ -63,14 +78,18 @@ root  48173  ...  sleep 300          # ← тот же процесс, обыч�
         лимиты</td></tr>
     </table>
     <div class="codewrap">
-      <pre><code class="language-bash"># внутри контейнера: чужих процессов нет
+      <pre><code class="language-bash"># ps aux — все процессы внутри контейнера; процессов хоста здесь не видно
+#   --rm    удалить контейнер после выполнения команды
+#   alpine  образ, из которого создаётся контейнер
 docker run --rm alpine ps aux
 
-# внутри контейнера: свой сетевой стек
+# ip addr — сетевые интерфейсы контейнера
+#   --rm    контейнер-одноразовка: нужен только чтобы посмотреть вывод
+#   lo      «петля» 127.0.0.1 — своя у каждого контейнера
+#   eth0    интерфейс в сети Docker; 172.17.0.2 — адрес, выданный контейнеру
 docker run --rm alpine ip addr
-# 1: lo: ... 2: eth0: ... inet 172.17.0.2/16
 
-# а это — ядро хоста, не «ядро контейнера»
+# uname -a — версия ядра; совпадёт с ядром хоста: своего ядра у контейнера нет
 docker run --rm alpine uname -a</code></pre>
     </div>
 
@@ -78,13 +97,28 @@ docker run --rm alpine uname -a</code></pre>
     <p>Namespaces отвечают на вопрос «что видно», cgroups — на вопрос «сколько разрешено».
       Контрольные группы считают и ограничивают CPU, память, ввод-вывод, число процессов.</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker run -d --name limited --memory 512m --cpus 1.5 my-api
+      <pre><code class="language-bash"># docker run              создать и запустить контейнер
+#   -d                    в фоне (detached), не занимать терминал
+#   --name limited        имя контейнера — по нему потом обращаемся в exec/inspect
+#   --memory 512m         лимит памяти 512 МБ (cgroup); 512m = 512 мебибайт
+#   --cpus 1.5            лимит CPU: полтора ядра (cgroup, файл cpu.max)
+#   my-api                имя образа
+docker run -d --name limited --memory 512m --cpus 1.5 my-api
 
-# внутри контейнера лимит видно как «свой» корень cgroup (cgroup v2)
-docker exec limited cat /sys/fs/cgroup/memory.max     # 536870912
-docker exec limited cat /sys/fs/cgroup/cpu.max        # 150000 100000  = 1.5 CPU
+# docker exec limited ...  выполнить команду в УЖЕ работающем контейнере (новый процесс)
+# cat                      вывести содержимое файла
+# /sys/fs/cgroup/memory.max  файл cgroup v2: максимум памяти в байтах
+#                            536870912 байт = 512 МБ — столько видит сам контейнер
+docker exec limited cat /sys/fs/cgroup/memory.max
 
-# и с хоста
+# /sys/fs/cgroup/cpu.max   два числа: квота и период в микросекундах
+#                            150000 / 100000 = 1.5 ядра
+docker exec limited cat /sys/fs/cgroup/cpu.max
+
+# docker inspect            показать полную конфигурацию контейнера (JSON)
+#   -f 'шаблон'             вывести только нужное поле (Go-шаблон)
+#   .HostConfig.Memory      лимит памяти в байтах
+#   .HostConfig.NanoCpus    лимит CPU в наноядрах: 1.5 → 1500000000
 docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' limited</code></pre>
     </div>
     <p>Зачем это разработчику: лимиты — не только про «чужой шумный сосед». От них зависит поведение
@@ -141,10 +175,15 @@ docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' limited</cod
       <code>SIGKILL</code>. Ядро относится к PID 1 особо: сигнал, для которого не установлен обработчик,
       <em>по умолчанию не убивает</em> процесс. Поэтому важно, <strong>кто</strong> у вас PID 1:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># exec-форма: PID 1 = dotnet, сигнал дойдёт до приложения
+      <pre><code class="language-bash"># exec-форма: PID 1 = dotnet, поэтому SIGTERM дойдёт до приложения
+#   ENTRYPOINT        что запускать при старте контейнера
+#   ["dotnet", "..."] JSON-массив: запуск без /bin/sh, лишнего процесса-посредника нет
+#   Orders.Api.dll    сборка приложения (лежит в рабочей папке из WORKDIR)
 ENTRYPOINT ["dotnet", "Orders.Api.dll"]
 
-# shell-форма: PID 1 = /bin/sh, который часто не пробрасывает SIGTERM дальше
+# shell-форма: строка без скобок → Docker выполняет /bin/sh -c "dotnet Orders.Api.dll"
+#   PID 1 = /bin/sh, и SIGTERM часто не доходит до dotnet
+#   зато раскрываются переменные: $ASPNETCORE_URLS подставится
 ENTRYPOINT dotnet Orders.Api.dll</code></pre>
     </div>
     <p>Именно из-за этого «контейнер не останавливается, приходится ждать 10 секунд и он умирает

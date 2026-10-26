@@ -32,11 +32,16 @@
         <code>Cmd</code>, пользователь, открытые порты, рабочая папка, healthcheck.</li>
     </ul>
     <div class="codewrap">
-      <pre><code class="language-bash"># конфигурация (env, entrypoint, user, ports)
+      <pre><code class="language-bash"># docker image inspect             показать конфигурацию образа в виде JSON
+#   mcr.microsoft.com/dotnet/aspnet:8.0   имя образа: реестр/имя:тег
+#   --format '{{json .Config}}'     вывести только поле .Config (Go-шаблон); json — компактно, в одну строку
+#   | head -c 400                   обрезать вывод до 400 байт, чтобы влезло в экран
 docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{json .Config}}' | head -c 400
 
-# слои: команда сборки, размер, хеш
-docker history mcr.microsoft.com/dotnet/aspnet:8.0</code></pre>
+# docker history                   список слоёв образа: команда сборки, размер, хеш
+#   mcr.microsoft.com/dotnet/aspnet:8.0   какой образ смотреть
+docker history mcr.microsoft.com/dotnet/aspnet:8.0
+#   --no-trunc     показать команды слоёв целиком, без «…»</code></pre>
     </div>
     <p>Идентификатор образа — хеш, посчитанный по содержимому конфигурации и слоёв. Поэтому один и тот же
       Dockerfile при тех же входных данных даёт один и тот же образ, а «поменяли файл вручную внутри
@@ -81,13 +86,20 @@ docker history mcr.microsoft.com/dotnet/aspnet:8.0</code></pre>
     <p>Тег — это <strong>указатель</strong> на образ. Он изменяем: завтра <code>8.0</code> может означать
       другой набор слоёв (вышел патч). Digest — хеш содержимого, он неизменяем.</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># тег: удобно, но может «переехать»
+      <pre><code class="language-bash"># имя образа с тегом: удобно, но тег — «плавающий» указатель, его могут перевесить
+#   mcr.microsoft.com   реестр
+#   dotnet/aspnet       репозиторий: владелец/имя
+#   8.0                 тег — версия .NET
 mcr.microsoft.com/dotnet/aspnet:8.0
 
-# тот же образ, зафиксированный по содержимому
+# тот же образ, зафиксированный по содержимому: тег + digest через @
+#   sha256:…   digest — хеш содержимого; неизменяем: это именно этот образ,
+#              а не «что сейчас лежит под тегом 8.0»
 mcr.microsoft.com/dotnet/aspnet:8.0@sha256:3f1a2b...
 
-# посмотреть digest локального образа
+# docker image inspect ... --format '{{index .RepoDigests 0}}'
+#   .RepoDigests   массив строк «имя@digest»
+#   index ... 0    взять первый элемент массива (то есть digest этого образа)
 docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{index .RepoDigests 0}}'</code></pre>
     </div>
     <ul>
@@ -113,9 +125,21 @@ docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{index .Repo
       <tr><td>Harbor, Nexus, Artifactory</td><td>Свой реестр внутри компании</td></tr>
     </table>
     <div class="codewrap">
-      <pre><code class="language-bash">docker login ghcr.io                        # токен/пароль, не пароль от аккаунта
+      <pre><code class="language-bash"># docker login            войти в реестр; данные сохранятся в ~/.docker/config.json
+#   ghcr.io               адрес реестра (GitHub Container Registry)
+#   пароль                personal access token с правом write:packages, а не пароль от аккаунта
+docker login ghcr.io
+
+# docker build            собрать образ из Dockerfile в текущей папке
+#   -t ghcr.io/acme/orders-api:1.4.2   имя:тег результата; адрес реестра сразу в имени,
+#                                      чтобы docker push нашёл, куда отправлять
+#   .                                  контекст сборки — текущая папка
 docker build -t ghcr.io/acme/orders-api:1.4.2 .
+
+# docker push             отправить образ в реестр (недостающие слои загрузятся)
 docker push ghcr.io/acme/orders-api:1.4.2
+
+# docker pull             забрать образ из реестра; скачаются только те слои, которых нет локально
 docker pull ghcr.io/acme/orders-api:1.4.2</code></pre>
     </div>
     <p>Имя образа — это адрес: <code>реестр/владелец/имя:тег</code>. Если реестр не указан, используется
@@ -144,21 +168,40 @@ docker pull ghcr.io/acme/orders-api:1.4.2</code></pre>
     <p>Образ собирается под архитектуру процессора. На Apple Silicon (arm64) по умолчанию получится
       arm64-образ, который не запустится на amd64-сервере — и наоборот.</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># на чём собираем и под что
+      <pre><code class="language-bash"># docker buildx build        сборка через BuildKit; единственный способ собрать под другую архитектуру
+#   --platform linux/amd64   под какое железо собирать: amd64 — обычные серверы Intel/AMD,
+#                            linux/arm64 — Apple Silicon и ARM-серверы
+#   -t ghcr.io/...:1.4.2     имя и тег результата
+#   --push                   сразу отправить в реестр; мультиарх-образ локально в docker images не «загрузить»
+#   .                        контекст сборки
 docker buildx build --platform linux/amd64 -t ghcr.io/acme/orders-api:1.4.2 --push .
 
-# сразу под две архитектуры
+# два значения через запятую → один тег с манифестом сразу под обе архитектуры:
+# один и тот же 1.4.2 скачается arm64 на Mac и amd64 на сервере
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/acme/orders-api:1.4.2 --push .</code></pre>
+  -t ghcr.io/acme/orders-api:1.4.2 --push .
+#   \  в конце первой строки — перенос длинной команды в bash</code></pre>
     </div>
     <p>Ошибка выглядит как <code>exec /usr/bin/dotnet: exec format error</code> — это не «битый образ», а
       несовпадение архитектур.</p>
 
     <h2>Сколько это занимает на диске</h2>
     <div class="codewrap">
-      <pre><code class="language-bash">docker system df          # образы, контейнеры, тома, кэш сборки
-docker image prune        # удалить «висячие» образы без тега
-docker system prune -a    # удалить всё неиспользуемое (внимательно: образы тоже)</code></pre>
+      <pre><code class="language-bash"># docker system df         сколько занимают образы, контейнеры, тома и кэш сборки
+#                          (ключей нет — команда только показывает статистику)
+docker system df
+
+# docker image prune       удалить «висячие» образы — те, что остались без тега (&lt;none&gt;:&lt;none&gt;)
+docker image prune
+#   -a       удалить ВСЕ образы, которые не используются ни одним контейнером,
+#            а не только висячие
+#   -f       не спрашивать подтверждение
+
+# docker system prune -a   удалить всё неиспользуемое: остановленные контейнеры,
+#                          сети, образы и кэш сборки
+docker system prune -a
+#   -a           «все неиспользуемые образы», а не только висячие
+#   --volumes    дополнительно удалить неиспользуемые тома (это данные! по умолчанию не трогает)</code></pre>
     </div>
     <div class="box tip">
       <span class="t">Что стоит запомнить про размер</span>
