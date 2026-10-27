@@ -17,7 +17,7 @@
 
 ## Раздел 1. C#: язык и типы
 
-**Часть I. Как устроена память** — 1. Стек, куча и статическая память: карта · 2. Строки · 3. Равенство и хеш: Equals, GetHashCode, IEquatable, with · 4. struct: что это и когда применять · 5. ref struct и Span
+**Часть I. Как устроена память** — 1. Стек, куча и статическая память: карта · 2. Строки · 3. Равенство, хеш и ToString: Equals, GetHashCode, IEquatable, with · 4. struct: что это и когда применять · 5. ref struct и Span
 **Часть II. Коллекции и перечисления** — 6. Коллекции: generic против non-generic · 7. IEnumerable, yield и IAsyncEnumerable
 **Часть III. Типы и асинхронность** — 8. Модификаторы типов: sealed, abstract, static, record · 9. Task.Run: когда нужен и когда вредит · 10. null, `?.` и ссылка на самого себя
 

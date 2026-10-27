@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 3 · Равенство и хеш: Equals, GetHashCode, IEquatable, with</title>
+<title>Глава 3 · Равенство, хеш и ToString: Equals, GetHashCode, IEquatable, with</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -18,7 +18,7 @@
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть I · Как устроена память</div>
-    <h1>Глава 3. Равенство и хеш: <code>Equals</code>, <code>GetHashCode</code>, <code>IEquatable</code>, <code>with</code></h1>
+    <h1>Глава 3. Равенство, хеш и <code>ToString</code>: <code>Equals</code>, <code>GetHashCode</code>, <code>IEquatable</code>, <code>with</code></h1>
     <p class="sublead">Почему два объекта с одинаковыми данными не равны, зачем нужен <code>GetHashCode</code>,
       что даёт <code>IEquatable&lt;T&gt;</code> и при чём здесь <code>record</code>, <code>with</code>,
       <code>init</code> и <code>required</code>.</p>
@@ -220,6 +220,88 @@ public record Order(Guid Id, decimal Total);</code></pre>
         <td>компилятор не даст создать объект, не задав поле</td></tr>
     </table>
 
+    <h2><code>ToString</code>: третья функция того же набора</h2>
+    <p>В Java в этой связке всегда идут три метода: <code>equals</code>, <code>hashCode</code>,
+      <code>toString</code>. В C# — то же самое: <code>Equals</code>, <code>GetHashCode</code>,
+      <code>ToString</code>. Первые два отвечают за сравнение, третий — за текстовое представление.</p>
+
+    <h3>Что возвращает по умолчанию</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var m = new Money(1000, "RUB");
+
+Console.WriteLine(m);        // MyApp.Money   ← полное имя типа, данных нет
+Console.WriteLine($"{m}");   // MyApp.Money   ← интерполяция вызывает ToString
+var s = "Итого: " + m;       // MyApp.Money   ← конкатенация тоже</code></pre>
+    </div>
+    <p>В Java по умолчанию было бы <code>Money@1b6d3586</code>, в C# — полное имя типа. Смысл один: без
+      переопределения в логах и письмах вы увидите <em>не данные</em>, а имя класса. Поэтому
+      <code>ToString</code> переопределяют для доменных типов, DTO и всего, что попадает в логи.</p>
+
+    <h3>Как переопределить</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public readonly struct Money : IEquatable&lt;Money&gt;, IFormattable
+{
+    public long Kopeks { get; }
+    public string Currency { get; }
+
+    // обычный вид: для логов, консоли, отладчика
+    public override string ToString() =&gt; $"{Kopeks / 100m:0.00} {Currency}";
+
+    // форматируемый вид: ToString("C"), ToString("0.000", CultureInfo.InvariantCulture)
+    public string ToString(string? format, IFormatProvider? provider) =&gt;
+        (Kopeks / 100m).ToString(format ?? "0.00", provider ?? CultureInfo.InvariantCulture)
+        + " " + Currency;
+}
+
+Console.WriteLine(new Money(1000, "RUB"));                      // 10.00 RUB
+Console.WriteLine(new Money(1000, "RUB").ToString("0.0"));      // 10.0 RUB</code></pre>
+    </div>
+    <p><code>IFormattable</code> нужен, когда у текста есть варианты («кратко», «с валютой», «машинный
+      формат»). Обычный <code>ToString()</code> — это «формат по умолчанию».</p>
+
+    <h3>Три правила</h3>
+    <ul>
+      <li><strong><code>ToString</code> — для человека, а не для протокола.</strong> Его формат может измениться
+        в любой момент. Не парсите <code>ToString</code> обратно и не отдавайте его как поле API: для JSON есть
+        сериализатор, для обмена — явный контракт.</li>
+      <li><strong>Культура.</strong> Интерполяция использует <code>CurrentCulture</code>: на сервере с
+        <code>ru-RU</code> разделитель — запятая, на другом — точка, и логи двух реплик будут разными. Для
+        стабильных логов и машинных значений — <code>InvariantCulture</code> (для дат ещё формат
+        <code>"O"</code>).</li>
+      <li><strong>Никаких секретов.</strong> <code>ToString</code> попадает в логи, исключения и трейсы —
+        пароли, токены и полные номера карт там оказаться не должны.</li>
+    </ul>
+
+    <h3>Где он вызывается без вашего участия</h3>
+    <table>
+      <tr><th>Место</th><th>Что происходит</th></tr>
+      <tr><td>Интерполяция <code>$"{obj}"</code>, конкатенация, <code>Console.WriteLine</code></td>
+        <td>вызывается <code>ToString()</code></td></tr>
+      <tr><td>Отладчик</td><td>показывает <code>ToString()</code> (или значение из
+        <code>[DebuggerDisplay]</code>)</td></tr>
+      <tr><td><code>record</code></td><td><code>ToString</code> генерируется:
+        <code>Order { Id = …, Total = 100 }</code></td></tr>
+      <tr><td>Структурный лог</td><td>аргументы сохраняются как <em>данные</em>, а не через
+        <code>ToString</code> — по ним можно искать</td></tr>
+    </table>
+
+    <h3>Про производительность</h3>
+    <p><code>ToString</code> создаёт строку. В горячем пути это лишняя аллокация (гл. 7 .NET-раздела):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ строка собирается всегда, даже если уровень логирования выключен
+_logger.LogDebug("item " + item);
+
+// ✔ структурированный лог: строка нужна только при включённом уровне,
+//   а поля остаются отдельными данными
+_logger.LogDebug("item {Id} {Name}", item.Id, item.Name);</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Частая путаница</span>
+      <p><code>ToString</code> <strong>не участвует</strong> в равенстве и в хеше. Сравнение — это
+        <code>Equals</code>/<code>GetHashCode</code>; поменять <code>ToString</code> и ждать, что изменится
+        <code>Contains</code> в коллекции, — не сработает.</p>
+    </div>
+
     <h2>Три ловушки, на которых спотыкаются</h2>
     <ul>
       <li><strong>Ключ в словаре изменился.</strong> Объект положили в <code>Dictionary</code> или
@@ -244,6 +326,8 @@ public record Order(Guid Id, decimal Total);</code></pre>
           <code>struct</code>.</li>
         <li><code>record</code> генерирует <code>Equals</code>, <code>GetHashCode</code>, <code>==</code>,
           <code>ToString</code>, <code>with</code> — писать руками не нужно.</li>
+        <li><strong><code>ToString</code></strong> — представление для человека (логи, отладчик), а не для
+          протокола; в равенстве он не участвует.</li>
         <li><code>with</code> — копия с изменением; <code>init</code> — «задать при создании»;
           <code>required</code> — «нельзя забыть».</li>
         <li>Менять поле, участвующее в хеше, после вставки в словарь — значит потерять объект.</li>
