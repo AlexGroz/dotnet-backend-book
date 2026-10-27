@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 7 · Модификаторы типов: sealed, abstract, static, record</title>
+<title>Глава 8 · Модификаторы типов: sealed, abstract, static, record</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs08-task-run.html">Далее →</a>
+  <a href="cs09-task-run.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть III · Типы и асинхронность</div>
-    <h1>Глава 7. Модификаторы типов: sealed, abstract, static, record</h1>
+    <h1>Глава 8. Модификаторы типов: sealed, abstract, static, record</h1>
     <p class="sublead">Почему в коде пишут <code>public sealed class</code>, чем <code>abstract</code> отличается
       от интерфейса, зачем нужен <code>partial</code> и когда брать <code>record</code>.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -69,8 +69,30 @@ public sealed class OrderRepository : Repository
     public sealed override void Save() { … }   // «дальше уже нельзя переопределять»
 }</code></pre>
     </div>
-    <p>Классический пример из .NET: <code>string</code> объявлен <code>sealed</code> — иначе можно было бы
-      создать «строку с другим поведением» и сломать все гарантии неизменяемости (глава 1).</p>
+    <div class="box note">
+      <span class="t">Нужен ли <code>sealed</code> перед <code>override</code> — и зачем, если класс уже <code>sealed</code>?</span>
+      <p>В примере выше <code>sealed override</code> <strong>избыточен</strong>: класс
+        <code>OrderRepository</code> уже <code>sealed</code>, наследников у него нет, переопределять метод
+        некому. Компилятор это разрешает, но смысла нет.</p>
+      <p><code>sealed override</code> нужен, когда класс <strong>не</strong> запечатан, а конкретный метод
+        дальше переопределять нельзя:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public class Repository        { public virtual void Save() { } }
+
+public class AuditRepository : Repository
+{
+    // переопределили и ЗАПЕЧАТАЛИ: наследники AuditRepository уже не смогут менять Save
+    public sealed override void Save() { /* аудит + сохранение */ }
+}
+
+public class SpecialAudit : AuditRepository
+{
+    // public override void Save() { }   // ✘ ошибка CS0239: Save запечатан в AuditRepository
+}</code></pre>
+      </div>
+      <p>Итого три роли: <code>virtual</code> — «разрешаю переопределять», <code>override</code> — «я
+        переопределяю», <code>sealed override</code> — «переопределяю и запрещаю дальше».</p>
+    </div>
 
     <h2><code>abstract</code> против интерфейса</h2>
     <table>
@@ -159,8 +181,9 @@ public partial class OrderService
 
     <h2><code>record</code>: равенство по значениям</h2>
     <p>У <code>record</code> компилятор сам генерирует <code>Equals</code>, <code>GetHashCode</code>,
-      <code>ToString</code> и <code>with</code> — и всё это <strong>по значениям полей</strong>. Сравните с обычным
-      классом:</p>
+      <code>ToString</code> и <code>with</code> — и всё это <strong>по значениям полей</strong>. Подробный разбор
+      равенства, <code>IEquatable</code>, <code>with</code>, <code>init</code> и <code>required</code> — в главе 3.
+      Сравните с обычным классом:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">public sealed class OrderClass
 {
@@ -246,6 +269,20 @@ public class Derived : Base
     <p><code>virtual</code>/<code>override</code> — это полиморфизм: <code>Base b = new Derived(); b.Run()</code>
       вызовет реализацию наследника. <code>new</code> лишь «прячет» член, и такое поведение почти всегда
       нежелательно: код, работающий с базовым типом, увидит одно, а с производным — другое.</p>
+    <table>
+      <tr><th>Что написано</th><th>Где</th><th>Что означает</th><th>Обязательно ли</th></tr>
+      <tr><td><code>virtual</code></td><td>базовый класс</td><td>«этот метод можно переопределить»</td>
+        <td>да, без него <code>override</code> невозможен (ошибка CS0506)</td></tr>
+      <tr><td><code>override</code></td><td>наследник</td><td>«я заменяю реализацию базового метода»</td>
+        <td>да, если хотите полиморфизм</td></tr>
+      <tr><td><code>sealed override</code></td><td>наследник</td><td>«заменяю и запрещаю дальнейшие
+        переопределения»</td><td>нет, по желанию</td></tr>
+      <tr><td><code>new</code></td><td>наследник</td><td>«это другой метод с тем же именем, спрячь
+        базовый»</td><td>нет; без него компилятор выдаст предупреждение CS0108 и всё равно спрячет</td></tr>
+    </table>
+    <p><strong>Без <code>override</code> полиморфизма нет:</strong> если в наследнике написать
+      <code>public void Run()</code> (без слова), метод спрячет базовый — вызов через
+      <code>Base b</code> пойдёт в <code>Base.Run</code>, и никакой ошибки не будет.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">Base b = new Derived();      // переменная базового типа
 b.Run();                     // Derived.Run  ← сработал override (полиморфизм)
@@ -277,8 +314,8 @@ d.Fixed();                   // Derived.Fixed ← сработало «скры�
     </div>
 
     <div class="pager">
-      <a href="cs06-ienumerable.html">← <span class="sp">Глава 6. IEnumerable, yield и IAsyncEnumerable</span></a>
-      <a href="cs08-task-run.html"><span class="sp">Глава 8. Task.Run: когда нужен и когда вредит</span> →</a>
+      <a href="cs07-ienumerable.html">← <span class="sp">Глава 7. IEnumerable, yield и IAsyncEnumerable</span></a>
+      <a href="cs09-task-run.html"><span class="sp">Глава 9. Task.Run: когда нужен и когда вредит</span> →</a>
     </div>
   </div>
 </div>

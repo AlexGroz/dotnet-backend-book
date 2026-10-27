@@ -47,35 +47,35 @@
 
   <div class="toc-part">Docker · Часть I. Как это работает</div>
   <div class="toc">
-    <a href="dk01-why-containers.html"><span class="n">Глава 1</span><span class="t">Зачем нужны контейнеры</span><span class="d"><span class="tag lead">подводящая</span>Три проблемы, из которых вырос Docker, и что он не решает</span></a>
-    <a href="dk02-how-container-works.html"><span class="n">Глава 2</span><span class="t">Контейнер — это процесс: namespaces, cgroups, слои</span><span class="d"><span class="tag lead">подводящая</span>Три механизма Linux, из которых собран контейнер, и отличие от виртуалки</span></a>
-    <a href="dk03-images-layers-registry.html"><span class="n">Глава 3</span><span class="t">Образ, слой и реестр</span><span class="d"><span class="tag lead">подводящая</span>Из чего состоит образ, чем тег отличается от digest и как образ доезжает до сервера</span></a>
+    <a href="dk01-why-containers.html"><span class="n">Глава 1<span class="t">Зачем нужны контейнеры</span><span class="d"><span class="tag lead">подводящая</span>Три проблемы, из которых вырос Docker, и что он не решает</span></a>
+    <a href="dk02-how-container-works.html"><span class="n">Глава 2<span class="t">Контейнер — это процесс: namespaces, cgroups, слои</span><span class="d"><span class="tag lead">подводящая</span>Три механизма Linux, из которых собран контейнер, и отличие от виртуалки</span></a>
+    <a href="dk03-images-layers-registry.html"><span class="n">Глава 5<span class="t">Образ, слой и реестр</span><span class="d"><span class="tag lead">подводящая</span>Из чего состоит образ, чем тег отличается от digest и как образ доезжает до сервера</span></a>
   </div>
 
   <div class="toc-part">Docker · Часть II. Каждый день</div>
   <div class="toc">
-    <a href="dk04-commands.html"><span class="n">Глава 4</span><span class="t">Команды: run, ps, logs, exec</span><span class="d"><span class="tag core">основная</span>Жизненный цикл контейнера и десять команд, которые закрывают почти всё</span></a>
-    <a href="dk05-dockerfile.html"><span class="n">Глава 5</span><span class="t">Dockerfile: инструкции и их смысл</span><span class="d"><span class="tag core">основная</span>FROM, COPY, RUN, ENV, USER, ENTRYPOINT и CMD — что реально делает каждая</span></a>
-    <a href="dk06-build-cache.html"><span class="n">Глава 6</span><span class="t">Кэш слоёв и .dockerignore</span><span class="d"><span class="tag core">основная</span>Почему сборка идёт 4 минуты вместо 20 секунд и как это исправить</span></a>
-    <a href="dk07-dotnet-multistage.html"><span class="n">Глава 7</span><span class="t">Multi-stage: сборка .NET-образа построчно</span><span class="d"><span class="tag core">основная</span>SDK-стадия, publish, runtime-стадия, non-root — полный рабочий Dockerfile</span></a>
-    <a href="dk08-network.html"><span class="n">Глава 8</span><span class="t">Сеть: порты, DNS и localhost</span><span class="d"><span class="tag core">основная</span><code>-p host:container</code>, почему <code>localhost</code> внутри — не хост, и как сервисы находят друг друга</span></a>
-    <a href="dk09-volumes.html"><span class="n">Глава 9</span><span class="t">Данные: volumes и bind mounts</span><span class="d"><span class="tag core">основная</span>Почему данные исчезают, где они на самом деле живут и что монтировать в dev и в prod</span></a>
-    <a href="dk10-config-secrets.html"><span class="n">Глава 10</span><span class="t">Конфигурация и секреты</span><span class="d"><span class="tag core">основная</span>Переменные окружения → <code>IConfiguration</code>, <code>__</code> для вложенности, секреты вне образа</span></a>
-    <a href="dk11-compose.html"><span class="n">Глава 11</span><span class="t">Compose: весь стек одной командой</span><span class="d"><span class="tag core">основная</span>API + PostgreSQL + healthcheck, <code>depends_on</code> и почему это не «прод-оркестратор»</span></a>
+    <a href="dk04-commands.html"><span class="n">Глава 6<span class="t">Команды: run, ps, logs, exec</span><span class="d"><span class="tag core">основная</span>Жизненный цикл контейнера и десять команд, которые закрывают почти всё</span></a>
+    <a href="dk05-dockerfile.html"><span class="n">Глава 7<span class="t">Dockerfile: инструкции и их смысл</span><span class="d"><span class="tag core">основная</span>FROM, COPY, RUN, ENV, USER, ENTRYPOINT и CMD — что реально делает каждая</span></a>
+    <a href="dk06-build-cache.html"><span class="n">Глава 8<span class="t">Кэш слоёв и .dockerignore</span><span class="d"><span class="tag core">основная</span>Почему сборка идёт 4 минуты вместо 20 секунд и как это исправить</span></a>
+    <a href="dk07-dotnet-multistage.html"><span class="n">Глава 9<span class="t">Multi-stage: сборка .NET-образа построчно</span><span class="d"><span class="tag core">основная</span>SDK-стадия, publish, runtime-стадия, non-root — полный рабочий Dockerfile</span></a>
+    <a href="dk08-network.html"><span class="n">Глава 10<span class="t">Сеть: порты, DNS и localhost</span><span class="d"><span class="tag core">основная</span><code>-p host:container</code>, почему <code>localhost</code> внутри — не хост, и как сервисы находят друг друга</span></a>
+    <a href="dk09-volumes.html"><span class="n">Глава 10<span class="t">Данные: volumes и bind mounts</span><span class="d"><span class="tag core">основная</span>Почему данные исчезают, где они на самом деле живут и что монтировать в dev и в prod</span></a>
+    <a href="dk10-config-secrets.html"><span class="n">Глава 10<span class="t">Конфигурация и секреты</span><span class="d"><span class="tag core">основная</span>Переменные окружения → <code>IConfiguration</code>, <code>__</code> для вложенности, секреты вне образа</span></a>
+    <a href="dk11-compose.html"><span class="n">Глава 11<span class="t">Compose: весь стек одной командой</span><span class="d"><span class="tag core">основная</span>API + PostgreSQL + healthcheck, <code>depends_on</code> и почему это не «прод-оркестратор»</span></a>
   </div>
 
   <div class="toc-part">Docker · Часть III. .NET в контейнере</div>
   <div class="toc">
-    <a href="dk12-dotnet-in-container.html"><span class="n">Глава 12</span><span class="t">.NET в контейнере: память, CPU и GC</span><span class="d"><span class="tag core">основная</span>Cgroup-лимиты, HeapHardLimit, Server GC, <code>DOTNET_PROCESSOR_COUNT</code> и OOMKilled</span></a>
-    <a href="dk13-start-stop.html"><span class="n">Глава 13</span><span class="t">Запуск и остановка: порт, SIGTERM, healthcheck</span><span class="d"><span class="tag core">основная</span>Почему .NET 8 слушает 8080, куда приходит SIGTERM и как не рвать запросы</span></a>
+    <a href="dk12-dotnet-in-container.html"><span class="n">Глава 12<span class="t">.NET в контейнере: память, CPU и GC</span><span class="d"><span class="tag core">основная</span>Cgroup-лимиты, HeapHardLimit, Server GC, <code>DOTNET_PROCESSOR_COUNT</code> и OOMKilled</span></a>
+    <a href="dk13-start-stop.html"><span class="n">Глава 13<span class="t">Запуск и остановка: порт, SIGTERM, healthcheck</span><span class="d"><span class="tag core">основная</span>Почему .NET 8 слушает 8080, куда приходит SIGTERM и как не рвать запросы</span></a>
   </div>
 
   <div class="toc-part">Docker · Часть IV. Поставка и практика</div>
   <div class="toc">
-    <a href="dk14-image-size-security.html"><span class="n">Глава 14</span><span class="t">Размер и безопасность образа</span><span class="d"><span class="tag core">основная</span>Chiseled и alpine, non-root, <code>--cap-drop</code>, сканирование и фиксация версий</span></a>
-    <a href="dk15-delivery-cicd-k8s.html"><span class="n">Глава 15</span><span class="t">Поставка: CI/CD, теги и граница с Kubernetes</span><span class="d"><span class="tag core">основная</span>Сборка в пайплайне, <code>latest</code> и digest, что Docker уже не делает</span></a>
-    <a href="dk16-diagnostics.html"><span class="n">Глава 16</span><span class="t">Диагностика: OOMKilled, коды выхода, inspect</span><span class="d"><span class="tag core">основная</span>Контейнер не стартует или умер — алгоритм разбора по шагам</span></a>
-    <a href="dk17-interview.html"><span class="n">Глава 17</span><span class="t">Как отвечать на интервью по Docker</span><span class="d"><span class="tag core">основная</span>Двадцать вопросов с короткими ответами и структура ответа</span></a>
+    <a href="dk14-image-size-security.html"><span class="n">Глава 14<span class="t">Размер и безопасность образа</span><span class="d"><span class="tag core">основная</span>Chiseled и alpine, non-root, <code>--cap-drop</code>, сканирование и фиксация версий</span></a>
+    <a href="dk15-delivery-cicd-k8s.html"><span class="n">Глава 15<span class="t">Поставка: CI/CD, теги и граница с Kubernetes</span><span class="d"><span class="tag core">основная</span>Сборка в пайплайне, <code>latest</code> и digest, что Docker уже не делает</span></a>
+    <a href="dk16-diagnostics.html"><span class="n">Глава 16<span class="t">Диагностика: OOMKilled, коды выхода, inspect</span><span class="d"><span class="tag core">основная</span>Контейнер не стартует или умер — алгоритм разбора по шагам</span></a>
+    <a href="dk17-interview.html"><span class="n">Глава 17<span class="t">Как отвечать на интервью по Docker</span><span class="d"><span class="tag core">основная</span>Двадцать вопросов с короткими ответами и структура ответа</span></a>
   </div>
 
   <p style="color:var(--muted);font-size:14px;margin-top:34px">

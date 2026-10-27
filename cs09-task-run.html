@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 8 · Task.Run: когда нужен и когда вредит</title>
+<title>Глава 9 · Task.Run: когда нужен и когда вредит</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -18,7 +18,7 @@
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть III · Типы и асинхронность</div>
-    <h1>Глава 8. Task.Run: когда нужен и когда вредит</h1>
+    <h1>Глава 9. Task.Run: когда нужен и когда вредит</h1>
     <p class="sublead">«Обернуть в <code>Task.Run</code>, чтобы стало асинхронно» — самый частый способ сделать
       хуже. Разберём, что именно делает этот метод и где его место.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -75,7 +75,7 @@ public Task&lt;Order&gt; GetAsync(Guid id, CancellationToken ct) =&gt;
         просто возвращает эту задачу дальше, ничего не дожидаясь.</p>
       <p><code>async</code>/<code>await</code> нужны, когда после ожидания надо <strong>что-то сделать</strong>:</p>
       <div class="codewrap">
-        <pre><code class="language-text">// без async: «верни задачу как есть»
+        <pre><code class="language-csharp">// без async: «верни задачу как есть»
 public Task&lt;Order&gt; GetAsync(...) =&gt; _db.Orders.FirstAsync(...);
 
 // с async/await: «дождись, потом обработай результат»
@@ -134,10 +134,28 @@ public async Task SendAsync(CancellationToken ct) =&gt; await _client.PostAsync(
       <li><strong>Отмена:</strong> передавайте <code>CancellationToken</code> <em>внутрь</em> делегата и проверяйте
         его в длинных циклах. Сам по себе токен у <code>Task.Run</code> отменяет только <em>запуск</em>, если
         задача ещё не начала выполняться.</li>
-      <li><strong><code>ConfigureAwait(false)</code></strong> — в библиотечном коде: «не возвращайся в исходный
-        контекст». В ASP.NET Core контекста синхронизации нет, поэтому эффекта почти нет, но в библиотеках это
-        правильная привычка.</li>
+      <li><strong><code>ConfigureAwait(false)</code></strong> — «не возвращайся в исходный контекст после
+        <code>await</code>». По умолчанию <code>await</code> старается продолжить работу там же, где начал:
+        в UI-приложении — в UI-потоке, в ASP.NET (старые версии) — в контексте запроса. В ASP.NET Core
+        контекста синхронизации нет, поэтому эффекта почти нет, но в <strong>библиотеках</strong> это
+        правильная привычка: библиотека не должна диктовать приложению, в каком потоке продолжать.</li>
     </ul>
+    <div class="codewrap">
+      <p class="cap">Где он пишется</p>
+      <pre><code class="language-csharp">// библиотечный метод: после каждого await — ConfigureAwait(false)
+public async Task&lt;string&gt; GetAsync(string url, CancellationToken ct)
+{
+    var response = await _client.GetAsync(url, ct).ConfigureAwait(false);   // ← здесь
+    var body     = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false); // ← и здесь
+    return body;
+}
+
+// код приложения ASP.NET Core: можно не писать — контекста синхронизации нет
+public async Task&lt;Order&gt; GetOrderAsync(Guid id, CancellationToken ct)
+    =&gt; await _db.Orders.FirstAsync(o =&gt; o.Id == id, ct);</code></pre>
+    </div>
+    <p><strong>Чего <code>ConfigureAwait</code> не делает:</strong> не отменяет операцию, не ускоряет её и не
+      «отвязывает» от токена. Это только про то, <em>где</em> продолжится код после <code>await</code>.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">var results = await Task.Run(() =&gt;
 {
@@ -196,7 +214,7 @@ await Parallel.ForEachAsync(
     </div>
 
     <div class="pager">
-      <a href="cs07-class-modifiers.html">← <span class="sp">Глава 7. Модификаторы типов: sealed, abstract, static, record</span></a>
+      <a href="cs08-class-modifiers.html">← <span class="sp">Глава 8. Модификаторы типов: sealed, abstract, static, record</span></a>
       <a href="csharp.html"><span class="sp">Оглавление</span> →</a>
     </div>
   </div>

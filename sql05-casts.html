@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 5 · Приведение типов: CAST и ::</title>
+<title>Глава 6 · Приведение типов: CAST и ::</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -18,7 +18,7 @@
 <div class="container">
   <div class="chapter">
     <div class="part">SQL · Часть I · Фундамент</div>
-    <h1>Глава 5. Приведение типов: <code>CAST</code> и <code>::</code></h1>
+    <h1>Глава 6. Приведение типов: <code>CAST</code> и <code>::</code></h1>
     <p class="sublead"><code>'2026-01-01'::date</code>, <code>count(*)::int</code>,
       <code>data-&gt;&gt;'age'::int</code> — двоеточие с двоеточием встречается в каждом втором примере.
       Разберём, что оно делает, где применяется и когда из-за него перестаёт работать индекс.</p>
@@ -166,8 +166,8 @@ SELECT * FROM orders WHERE created_at::text &gt;= '2026-01-01';</code></pre>
     </div>
 
     <div class="pager">
-      <a href="sql04-query-params.html">← <span class="sp">Глава 4. Параметры в SQL: :имя, @имя и $1</span></a>
-      <a href="sql06-pages-heap.html"><span class="sp">Глава 6. Страницы и heap: где физически лежат строки</span> →</a>
+      <a href="sql04-query-params.html">← <span class="sp">Глава 5. Параметры в SQL: :имя, @имя и $1</span></a>
+      <a href="sql06-pages-heap.html"><span class="sp">Глава 7. Страницы и heap: где физически лежат строки</span> →</a>
     </div>
   </div>
 </div>

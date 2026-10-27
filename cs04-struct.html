@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 3 · struct: что это и когда применять</title>
+<title>Глава 4 · struct: что это и когда применять</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,36 +13,89 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs04-ref-struct-span.html">Далее →</a>
+  <a href="cs05-ref-struct-span.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть I · Как устроена память</div>
-    <h1>Глава 3. struct: что это и когда применять</h1>
+    <h1>Глава 4. struct: что это и когда применять</h1>
     <p class="sublead">Целый тип, объявленный одним словом <code>struct</code>: что в нём можно хранить, чем он
       отличается от класса и почему с ним так легко выстрелить себе в ногу.</p>
     <p><span class="tag core">основная глава</span></p>
 
-    <h2>Что такое struct</h2>
-    <p><strong><code>struct</code> — это способ объявить свой значимый тип.</strong> Переменная такого типа хранит
-      <em>само значение</em>, а не ссылку на объект в куче. Скопировали переменную — скопировалось значение.</p>
+    <h2>Что такое struct: значение целиком, без отдельной ссылки</h2>
+    <p><strong><code>struct</code> — способ объявить свой значимый тип.</strong> Разница с классом видна, если
+      посмотреть на переменную: у переменной-класса в стеке лежит <em>адрес</em> объекта в куче, а у
+      переменной-структуры — <strong>сами данные</strong>, все поля подряд. Отдельной «ссылки на структуру»
+      нет.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">public struct Point        // значимый тип
+      <p class="cap">Куда что кладётся</p>
+      <pre><code class="language-text">класс (ссылочный тип)                    struct (значимый тип)
+Stack                 Heap               Stack
+┌───────────────┐    ┌───────────────┐   ┌────────────────────────────┐
+│ ссылка 0x2A7  │───▶│ объект Order  │   │ Point: X=1  Y=2  (8 байт)  │
+└───────────────┘    └───────────────┘   └────────────────────────────┘
+  в переменной        данные объекта       данные лежат В САМОЙ переменной
+  только адрес        (в куче)             (тут же, где объявлена)</code></pre>
+    </div>
+    <p><strong>Где именно лежат поля структуры</strong> — зависит от того, где объявлена переменная:</p>
+    <table>
+      <tr><th>Где объявлена</th><th>Где лежат её поля</th></tr>
+      <tr><td>Локальная переменная в методе</td><td>В стеке этого метода (в его «кадре»)</td></tr>
+      <tr><td>Поле класса</td><td><strong>Внутри</strong> объекта класса в куче — не отдельным объектом</td></tr>
+      <tr><td>Элемент массива <code>Point[]</code></td><td>Внутри самого массива: 8 байт на элемент, без
+        ссылок</td></tr>
+      <tr><td>Поле другой структуры</td><td>Внутри неё — структуры просто вкладываются друг в друга</td></tr>
+    </table>
+    <p><strong>Как программа узнаёт, где данные.</strong> Никакого поиска в рантайме нет: тип переменной
+      известен компилятору, а вместе с типом известны <em>размер и состав</em> значения. Для <code>Point</code>
+      это «два <code>int</code> = 8 байт», и компилятор просто резервирует эти 8 байт там, где объявлена
+      переменная. Для класса он резервирует 8 байт под ссылку, а объект создаётся отдельно в куче.</p>
+    <div class="box note">
+      <span class="t">А ссылка у структуры всё-таки бывает?</span>
+      <p>Только в двух случаях: (1) когда структуру кладут в <code>object</code> или интерфейс — это
+        <strong>упаковка (бокс)</strong>: значение копируется в кучу, и появляется ссылка на копию;
+        (2) когда структура — поле класса: тогда к ней ходят через ссылку на объект-владелец. Сама по себе
+        структура ссылки не имеет — поэтому не может быть <code>null</code>.</p>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public struct Point        // значимый тип: 8 байт данных
 {
     public int X;
     public int Y;
 }
 
 var a = new Point { X = 1, Y = 2 };
-var b = a;                 // копия значения
+var b = a;                 // скопировались ВСЕ 8 байт значения
 b.X = 99;
 
-Console.WriteLine(a.X);    // 1 — оригинал не изменился
+Console.WriteLine(a.X);    // 1  — у a своя копия данных
 Console.WriteLine(b.X);    // 99</code></pre>
     </div>
-    <p>Встроенные значимые типы — это тоже структуры: <code>int</code> (<code>System.Int32</code>),
-      <code>double</code>, <code>bool</code>, <code>DateTime</code>, <code>Guid</code>. То есть «struct» — не
-      экзотика, а способ сделать <em>свой</em> такой тип.</p>
+
+    <h2>int, double, DateTime — тоже struct. Как это увидеть</h2>
+    <p><code>int</code> — не «встроенное ключевое слово», а короткое имя типа <code>System.Int32</code>,
+      который объявлен структурой в базовой библиотеке. Проверяется обычным кодом:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(typeof(int).FullName);            // System.Int32
+Console.WriteLine(typeof(int).IsValueType);         // True  ← это значение, не ссылка
+Console.WriteLine(typeof(int).BaseType);            // System.ValueType
+Console.WriteLine(typeof(int) == typeof(Int32));    // True  ← int и Int32 — один тип
+Console.WriteLine(typeof(List&lt;int&gt;).IsValueType);   // False ← а это класс</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">System.Int32
+True
+System.ValueType
+False</code></pre>
+    </div>
+    <p>То же самое верно для <code>double</code> (<code>System.Double</code>), <code>bool</code>,
+      <code>long</code>, <code>DateTime</code>, <code>Guid</code>, <code>decimal</code>. В исходниках .NET они
+      объявлены примерно так: <code>public readonly struct Int32 : …</code>. А <code>int?</code> — это
+      <code>Nullable&lt;int&gt;</code>, тоже структура (глава 10).</p>
+    <p>Вывод: «struct» — не экзотика, а способ сделать <em>свой</em> такой тип. Вопрос только в том, стоит ли:
+      ниже — когда да, а когда нет.</p>
     <div class="box tip">
       <span class="t">Три следствия, которые надо принять сразу</span>
       <ul>
@@ -146,8 +199,20 @@ var h = new Holder();
 h.C.Inc();                             // ⚠ вызов на КОПИИ, которую вернуло свойство
 Console.WriteLine(h.C.Value);          // 0 — изменение потеряно, без единой ошибки компиляции</code></pre>
     </div>
-    <p>Свойство возвращает <em>копию</em> значения. Метод меняет копию — и она выбрасывается. Такие ошибки не
-      ловятся компилятором в момент вызова метода, поэтому изменяемые структуры считаются плохой практикой.</p>
+    <div class="box warn">
+      <span class="t">Почему напечаталось <code>0</code> — по шагам</span>
+      <ol>
+        <li><code>h.C</code> — это <em>свойство</em>. Оно возвращает <strong>значение</strong> поля, а не
+          «ссылку на него», то есть <em>копию</em> структуры <code>Counter</code> с <code>Value = 0</code>.</li>
+        <li><code>h.C.Inc()</code> вызывает метод на этой копии: у копии <code>Value</code> становится 1.</li>
+        <li>Копия временная — после строки она никому не нужна и выбрасывается.</li>
+        <li><code>h.C.Value</code> в следующей строке снова возвращает копию <em>исходного</em> поля, где
+          <code>Value</code> так и осталось 0. Отсюда <code>0</code>.</li>
+      </ol>
+      <p>Компилятор не ошибся: код синтаксически корректен. Ошибка смысловая — изменение ушло в никуда. Именно
+        поэтому изменяемые структуры (с методами, меняющими поля) считаются плохой практикой: решение —
+        <code>readonly struct</code> (ниже) или класс вместо структуры.</p>
+    </div>
     <div class="box tip">
       <span class="t">Правило, которое снимает половину проблем</span>
       <p>Объявляйте структуры <strong><code>readonly struct</code></strong>, а методы делайте возвращающими
@@ -234,7 +299,7 @@ list.Add(p);</code></pre>
     </div>
     <p>Бокс «невидим» там, где API ждёт <code>object</code>: не-generic коллекции, старый <code>string.Format</code>,
       сравнение через <code>Equals(object)</code>. Лечится generic-типами и <code>IEquatable&lt;T&gt;</code>
-      (глава 5).</p>
+      (подробно — глава 3).</p>
 
     <h2>Отличия от класса</h2>
     <table>
@@ -271,7 +336,7 @@ list.Add(p);</code></pre>
         <strong>семантику значения</strong>, а не про «оптимизацию на всякий случай».</p>
     </div>
     <p>Особый подвид — <strong><code>ref struct</code></strong> (например, <code>Span&lt;T&gt;</code>): такие типы
-      принципиально живут только на стеке. Это отдельная тема — глава 4.</p>
+      принципиально живут только на стеке. Это отдельная тема — глава 5.</p>
 
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
@@ -288,8 +353,8 @@ list.Add(p);</code></pre>
     </div>
 
     <div class="pager">
-      <a href="cs02-strings.html">← <span class="sp">Глава 2. Строки: неизменяемость, пул строк и StringBuilder</span></a>
-      <a href="cs04-ref-struct-span.html"><span class="sp">Глава 4. ref struct и Span: окно в память</span> →</a>
+      <a href="cs03-equality.html">← <span class="sp">Глава 3. Равенство и хеш: Equals, GetHashCode, IEquatable, with</span></a>
+      <a href="cs05-ref-struct-span.html"><span class="sp">Глава 5. ref struct и Span: окно в память</span> →</a>
     </div>
   </div>
 </div>

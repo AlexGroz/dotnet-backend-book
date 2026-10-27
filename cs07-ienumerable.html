@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 6 · IEnumerable, yield и IAsyncEnumerable</title>
+<title>Глава 7 · IEnumerable, yield и IAsyncEnumerable</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs07-class-modifiers.html">Далее →</a>
+  <a href="cs08-class-modifiers.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 6. IEnumerable, yield и IAsyncEnumerable</h1>
+    <h1>Глава 7. IEnumerable, yield и IAsyncEnumerable</h1>
     <p class="sublead">Что значит «по чему-то можно пройти в <code>foreach</code>», откуда берётся отложенное
       выполнение LINQ и зачем понадобился <code>IAsyncEnumerable</code>.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -178,9 +178,21 @@ await foreach (var row in StreamAsync(ct))
       <li><strong><code>await foreach</code></strong> — аналог <code>foreach</code>, но каждый шаг может ждать,
         не занимая поток.</li>
       <li><strong><code>yield return</code></strong> работает и в <code>async</code>-итераторах (C# 8+).</li>
-      <li><strong><code>[EnumeratorCancellation]</code></strong> нужен, чтобы токен отмены передавался в
-        итератор (иначе компилятор предупредит).</li>
+      <li><strong><code>[EnumeratorCancellation]</code></strong> — атрибут (то, что в квадратных скобках),
+        который говорит компилятору: «вот этот параметр — токен отмены, передавай его в
+        <code>GetAsyncEnumerator(ct)</code> самого итератора». Без него токен, переданный извне через
+        <code>WithCancellation(ct)</code> или <code>await foreach (… .WithCancellation(ct))</code>, внутрь
+        итератора не попадёт, и компилятор предупредит (CS8425).</li>
     </ul>
+    <div class="box note">
+      <span class="t">Что вообще такое <code>[ ... ]</code> перед параметром или типом</span>
+      <p>Это <strong>атрибут</strong> — пометка в метаданных. Сама по себе она ничего не выполняет: её читает
+        либо компилятор, либо библиотека/рантайм. Примеры: <code>[Obsolete]</code> — компилятор предупреждает;
+        <code>[JsonPropertyName("id")]</code> — <code>System.Text.Json</code> так называет поле в JSON;
+        <code>[FromQuery]</code> — ASP.NET Core берёт значение из query-строки;
+        <code>[EnumeratorCancellation]</code> — компилятор меняет сгенерированный код итератора.
+        В этой книге атрибуты отдельно не разбираются: здесь достаточно знать, что это метаданные.</p>
+    </div>
     <div class="box note">
       <span class="t">Почему не <code>Task&lt;IEnumerable&lt;T&gt;&gt;</code></span>
       <p><code>Task&lt;IEnumerable&lt;T&gt;&gt;</code> означает «подожди, пока <em>весь</em> результат будет
@@ -251,8 +263,8 @@ public Task&lt;List&lt;Order&gt;&gt; GetForYearAsync(int year, CancellationToken
     </div>
 
     <div class="pager">
-      <a href="cs05-collections.html">← <span class="sp">Глава 5. Коллекции: generic против non-generic</span></a>
-      <a href="cs07-class-modifiers.html"><span class="sp">Глава 7. Модификаторы типов: sealed, abstract, static, record</span> →</a>
+      <a href="cs06-collections.html">← <span class="sp">Глава 6. Коллекции: generic против non-generic</span></a>
+      <a href="cs08-class-modifiers.html"><span class="sp">Глава 8. Модификаторы типов: sealed, abstract, static, record</span> →</a>
     </div>
   </div>
 </div>

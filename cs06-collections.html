@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 5 · Коллекции: generic против non-generic</title>
+<title>Глава 6 · Коллекции: generic против non-generic</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs06-ienumerable.html">Далее →</a>
+  <a href="cs07-ienumerable.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 5. Коллекции: generic против non-generic</h1>
+    <h1>Глава 6. Коллекции: generic против non-generic</h1>
     <p class="sublead">Почему <code>List&lt;int&gt;</code> лучше <code>ArrayList</code>, что такое
       <em>generic</em> и как выбрать коллекцию под задачу.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -69,7 +69,7 @@ list2.Add("два");                   // ошибка компиляции</cod
         <tr><td><code>Queue</code>, <code>Stack</code></td><td><code>Queue&lt;T&gt;</code>, <code>Stack&lt;T&gt;</code></td><td>То же плюс отсутствие бокса</td></tr>
         <tr><td><code>SortedList</code></td><td><code>SortedList&lt;TKey, TValue&gt;</code>, <code>SortedDictionary&lt;TKey, TValue&gt;</code></td><td>Типизация; разная внутренняя структура и сложность</td></tr>
         <tr><td><code>CollectionBase</code></td><td><code>Collection&lt;T&gt;</code></td><td>Готовые проверки и уведомления об изменениях</td></tr>
-        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 4)</td></tr>
+        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 7)</td></tr>
       </tbody>
     </table>
     <p>Non-generic-версии остались ради совместимости. В новом коде их не используют — исключение только
@@ -79,7 +79,7 @@ list2.Add("два");                   // ошибка компиляции</cod
     <table>
       <thead><tr><th>Интерфейс</th><th>Что умеет</th><th>Когда использовать в сигнатуре</th></tr></thead>
       <tbody>
-        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 4)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
+        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 7)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
         <tr><td><code>IReadOnlyCollection&lt;T&gt;</code></td><td>Перечисление + <code>Count</code></td><td>Чтение набора</td></tr>
         <tr><td><code>IReadOnlyList&lt;T&gt;</code></td><td>Плюс доступ по индексу</td><td>Результат выборки, который нельзя менять</td></tr>
         <tr><td><code>ICollection&lt;T&gt;</code>, <code>IList&lt;T&gt;</code></td><td>Добавление, удаление, индексатор</td><td>Когда вызывающий действительно должен менять коллекцию</td></tr>
@@ -191,8 +191,8 @@ void Print(IEnumerable&lt;Order&gt; orders)
     </div>
 
     <div class="pager">
-      <a href="cs04-ref-struct-span.html">← <span class="sp">Глава 4. ref struct и Span: окно в память без аллокаций</span></a>
-      <a href="cs06-ienumerable.html"><span class="sp">Глава 6. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+      <a href="cs05-ref-struct-span.html">← <span class="sp">Глава 5. ref struct и Span: окно в память без аллокаций</span></a>
+      <a href="cs07-ienumerable.html"><span class="sp">Глава 7. IEnumerable, yield и IAsyncEnumerable</span> →</a>
     </div>
   </div>
 </div>

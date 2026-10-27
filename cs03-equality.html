@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Равенство и хеш: Equals, GetHashCode, IEquatable, with</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs04-struct.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть I · Как устроена память</div>
+    <h1>Глава 3. Равенство и хеш: <code>Equals</code>, <code>GetHashCode</code>, <code>IEquatable</code>, <code>with</code></h1>
+    <p class="sublead">Почему два объекта с одинаковыми данными не равны, зачем нужен <code>GetHashCode</code>,
+      что даёт <code>IEquatable&lt;T&gt;</code> и при чём здесь <code>record</code>, <code>with</code>,
+      <code>init</code> и <code>required</code>.</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Задача: «одинаковые данные» и «одинаковый объект» — не одно и то же</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class Money          // обычный класс
+{
+    public long Kopeks { get; init; }
+}
+
+var a = new Money { Kopeks = 1000 };
+var b = new Money { Kopeks = 1000 };
+
+Console.WriteLine(a == b);            // False
+Console.WriteLine(a.Equals(b));       // False
+Console.WriteLine(ReferenceEquals(a, b)); // False</code></pre>
+    </div>
+    <p>Данные одинаковые, а результат — <code>False</code>, потому что для класса по умолчанию сравниваются
+      <strong>ссылки</strong> (где объект лежит), а не содержимое. Это называется <em>ссылочной
+      семантикой</em>. Чтобы «1000 копеек» и «1000 копеек» считались равными, нужно объяснить компилятору,
+      <strong>что</strong> в этом типе считать значением.</p>
+
+    <h2>Три разных «равно»</h2>
+    <table>
+      <tr><th>Что</th><th>Что сравнивает</th><th>Когда используется</th></tr>
+      <tr><td><code>ReferenceEquals(a, b)</code></td><td>Один и тот же объект в памяти</td><td>Проверить
+        «это тот же экземпляр» (например, в пуле или кэше)</td></tr>
+      <tr><td><code>a == b</code></td><td>То, что определяет оператор <code>==</code>: для класса — ссылки,
+        для <code>string</code> — символы, для своих типов — что вы написали</td><td>Обычное сравнение в
+        коде</td></tr>
+      <tr><td><code>a.Equals(b)</code></td><td>То, что определяет метод <code>Equals</code></td>
+        <td>Сравнение «по значению»; его вызывают коллекции</td></tr>
+    </table>
+    <p>В <code>Dictionary</code>, <code>HashSet</code>, <code>List.Contains</code>,
+      <code>Enumerable.Distinct</code> используется именно <strong><code>Equals</code> +
+      <code>GetHashCode</code></strong>, а не <code>==</code>. Поэтому «перегрузил <code>==</code>, и всё
+      заработало» — не работает.</p>
+
+    <h2>Зачем нужен <code>GetHashCode</code></h2>
+    <p>Хеш-коллекции (словарь, множество) устроены так: по хешу вычисляют <em>корзину</em>, в которой искать
+      значение, — и уже внутри корзины сравнивают через <code>Equals</code>. Отсюда контракт:</p>
+    <ul>
+      <li>если <code>a.Equals(b)</code> истинно, то <code>a.GetHashCode() == b.GetHashCode()</code>
+        <strong>обязательно</strong>;</li>
+      <li>обратное неверно: одинаковый хеш не означает равенство (бывают коллизии).</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ нарушен контракт: Equals «по значению», а хеш — по ссылке (по умолчанию)
+public class Money
+{
+    public long Kopeks { get; init; }
+    public override bool Equals(object? obj) =&gt; obj is Money m &amp;&amp; Kopeks == m.Kopeks;
+    // GetHashCode не переопределён → у двух равных объектов разные хеши
+}
+
+var set = new HashSet&lt;Money&gt; { new() { Kopeks = 1000 } };
+Console.WriteLine(set.Contains(new Money { Kopeks = 1000 }));   // False  ← «равный» объект не найден</code></pre>
+    </div>
+    <p>Причина: словарь ищет в корзине по хешу, а объект попал в другую корзину. Поэтому
+      <code>Equals</code> и <code>GetHashCode</code> переопределяют <strong>парой</strong>.</p>
+
+    <h2>Как правильно: <code>IEquatable&lt;T&gt;</code> + <code>Equals</code> + <code>GetHashCode</code></h2>
+    <p><strong>Что такое <code>IEquatable&lt;T&gt;</code>:</strong> интерфейс из одного метода —
+      <code>bool Equals(T other)</code>. Зачем он, если уже есть <code>Equals(object)</code>? Потому что
+      <code>Equals(object)</code> принимает <code>object</code>, и для <code>struct</code> каждое сравнение
+      означает <strong>упаковку</strong> (бокс): значение копируется в кучу, чтобы стать объектом.
+      Типизированный вариант сравнивает напрямую, без копий и без приведения типов.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public readonly struct Money : IEquatable&lt;Money&gt;
+{
+    public long Kopeks { get; }
+    public string Currency { get; }
+
+    public Money(long kopeks, string currency) =&gt; (Kopeks, Currency) = (kopeks, currency);
+
+    // 1) типизированное сравнение — его вызывают List, Dictionary, LINQ;
+    //    работает без бокса, потому что параметр — Money, а не object
+    public bool Equals(Money other) =&gt; Kopeks == other.Kopeks &amp;&amp; Currency == other.Currency;
+
+    // 2) версия для object — нужна там, где тип известен только как object
+    public override bool Equals(object? obj) =&gt; obj is Money m &amp;&amp; Equals(m);
+
+    // 3) хеш: у равных объектов обязан быть одинаковым.
+    //    HashCode.Combine — стандартный помощник, смешивает хеши полей
+    public override int GetHashCode() =&gt; HashCode.Combine(Kopeks, Currency);
+
+    // 4) операторы — чтобы == в обычном коде вёл себя так же, как Equals
+    public static bool operator ==(Money a, Money b) =&gt; a.Equals(b);
+    public static bool operator !=(Money a, Money b) =&gt; !a.Equals(b);
+
+    // 5) человекочитаемый вид: удобно в логах и отладчике
+    public override string ToString() =&gt; $"{Kopeks / 100m} {Currency}";
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var a = new Money(1000, "RUB");
+var b = new Money(1000, "RUB");
+
+Console.WriteLine(a == b);                 // True  — оператор вызвал Equals
+Console.WriteLine(a.Equals(b));            // True
+Console.WriteLine(a.Equals((object)b));    // True  — версия для object
+Console.WriteLine(a.GetHashCode() == b.GetHashCode()); // True</code></pre>
+    </div>
+    <p>Зачем пункты 2 и 4, если есть пункт 1: коллекции и <code>object</code>-API вызывают
+      <code>Equals(object)</code>, а ваш код — <code>==</code>. Без них «равенство» зависело бы от того,
+      каким способом его спросили.</p>
+
+    <h2><code>record</code>: то же самое, но за вас</h2>
+    <p>Всё, что выше, компилятор умеет писать сам. <code>record</code> — это тип, для которого «равенство =
+      равенство данных»: он автоматически получает <code>Equals</code>, <code>GetHashCode</code>,
+      <code>==</code>, <code>ToString</code> и <code>with</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public record Order(Guid Id, decimal Total);      // record class (ссылочный тип)
+
+var a = new Order(Guid.Parse("…"), 100m);
+var b = new Order(a.Id, 100m);
+
+Console.WriteLine(a == b);      // True  — сравнение по значениям, а не по ссылке
+Console.WriteLine(a);           // Order { Id = …, Total = 100 }   ← ToString сгенерирован
+
+public readonly record struct Point(int X, int Y); // record struct (значимый тип)</code></pre>
+    </div>
+    <table>
+      <tr><th>Что генерируется</th><th>Зачем</th></tr>
+      <tr><td><code>Equals</code> / <code>GetHashCode</code> по всем полям</td><td>Равенство «по
+        данным» и корректная работа в словаре/множестве</td></tr>
+      <tr><td><code>==</code> и <code>!=</code></td><td>Сравнение в коде ведёт себя так же, как
+        <code>Equals</code></td></tr>
+      <tr><td><code>ToString()</code></td><td>Читаемые логи без ручного кода</td></tr>
+      <tr><td><code>with</code></td><td>Копия с изменённым полем (ниже)</td></tr>
+      <tr><td><code>Deconstruct</code> (у позиционного)</td><td>Распаковка: <code>var (id, total) =
+        order;</code></td></tr>
+    </table>
+    <div class="box note">
+      <span class="t">Разница между <code>class</code>, <code>record class</code> и <code>record struct</code></span>
+      <p><code>class</code> — ссылка, равенство по ссылке. <code>record class</code> — тоже ссылка (в куче),
+        но равенство <em>по значениям</em>. <code>record struct</code> — значение (как struct), равенство
+        по значениям. Для DTO и событий домена почти всегда подходит <code>record</code>.</p>
+    </div>
+
+    <h2><code>with</code>: копия с изменением</h2>
+    <p><strong>Что делает:</strong> берёт объект (или значение), копирует <em>все</em> поля и заменяет те, что
+      указаны в фигурных скобках. Исходный остаётся нетронутым:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var a = new Order(id, 100m);
+var b = a with { Total = 200m };      // копия a, но с новым Total
+
+Console.WriteLine(a.Total);           // 100 — исходный не изменился
+Console.WriteLine(b.Total);           // 200
+Console.WriteLine(a == b);            // False — данные разные
+Console.WriteLine(ReferenceEquals(a, b)); // False — это два разных объекта</code></pre>
+    </div>
+    <ul>
+      <li><strong>Где работает:</strong> <code>record</code>, <code>record struct</code> и любой
+        <code>struct</code> (C# 10+). Для обычного <code>class</code> — нельзя.</li>
+      <li><strong>Зачем:</strong> способ «изменить» неизменяемый объект — не мутировать, а создать новый с
+        другим полем. Безопаснее в многопоточности: никто не увидит объект в промежуточном состоянии.</li>
+      <li><strong>Почему работает:</strong> <code>with</code> может задавать свойства, объявленные
+        <code>init</code>.</li>
+    </ul>
+
+    <h2><code>init</code>: задать при создании, дальше — нельзя</h2>
+    <p><strong>Инициализатор</strong> — это фигурные скобки после <code>new</code>:
+      <code>new Order { Id = id, Total = 100 }</code>. <code>init</code> разрешает присвоить свойство
+      <em>только</em> в конструкторе, в инициализаторе и в <code>with</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Order
+{
+    public required Guid Id { get; init; }     // обязательно задать, потом нельзя менять
+    public decimal Total { get; init; }        // можно не задавать → останется 0
+}
+
+var o = new Order { Id = id, Total = 100 };    // ✔ создание через инициализатор
+// o.Total = 200;                              // ✘ ошибка компиляции: свойство только init</code></pre>
+    </div>
+    <p><strong>Чем <code>init</code> лучше <code>set</code>:</strong> объект нельзя случайно изменить после
+      создания — ни в методе, ни в другом потоке. Именно поэтому <code>with</code> имеет смысл: «изменить»
+      можно только создав копию.</p>
+
+    <h2><code>required</code>: компилятор проверит, что поле задано</h2>
+    <p>Без <code>required</code> свойство можно забыть — и получить <code>null</code> или <code>0</code> в
+      самом неудобном месте. <code>required</code> превращает это в ошибку компиляции:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var bad = new Order { Total = 100 };              // ✘ CS9035: требуется Id
+var ok  = new Order { Id = id, Total = 100 };     // ✔
+
+// в позиционном record required не нужен: параметры конструктора уже обязательны
+public record Order(Guid Id, decimal Total);</code></pre>
+    </div>
+    <table>
+      <tr><th>Модификатор</th><th>Когда можно задать</th><th>Что гарантирует</th></tr>
+      <tr><td><code>set</code></td><td>всегда</td><td>ничего — можно менять в любой момент (и сломать
+        инварианты)</td></tr>
+      <tr><td><code>init</code></td><td>при создании, в конструкторе и в <code>with</code></td>
+        <td>после создания значение не изменится</td></tr>
+      <tr><td><code>required</code></td><td>вместе с <code>init</code> (или <code>set</code>)</td>
+        <td>компилятор не даст создать объект, не задав поле</td></tr>
+    </table>
+
+    <h2>Три ловушки, на которых спотыкаются</h2>
+    <ul>
+      <li><strong>Ключ в словаре изменился.</strong> Объект положили в <code>Dictionary</code> или
+        <code>HashSet</code>, а потом поменяли поле, участвующее в <code>GetHashCode</code>: хеш стал другим,
+        и объект «потерялся». Поэтому ключи делают неизменяемыми.</li>
+      <li><strong>Внутри <code>record</code> — массив.</strong> Сгенерированный <code>Equals</code> сравнит
+        поля, а для массива это сравнение <em>ссылок</em>: два <code>record</code> с одинаковым содержимым
+        массивов будут не равны. Нужен свой <code>Equals</code> с <code>SequenceEqual</code>.</li>
+      <li><strong><code>GetHashCode</code> «на глаз».</strong> Если вернуть константу, всё скомпилируется, но
+        все объекты попадут в одну корзину, и словарь выродится в список. Используйте
+        <code>HashCode.Combine</code>.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li><code>Equals</code> — «равны ли по значению», <code>GetHashCode</code> — «в какую корзину
+          положить»; переопределяют <strong>парой</strong>.</li>
+        <li>Коллекции (<code>Dictionary</code>, <code>HashSet</code>, LINQ) используют
+          <code>Equals</code>/<code>GetHashCode</code>, а не <code>==</code>.</li>
+        <li><code>IEquatable&lt;T&gt;</code> — типизированный <code>Equals</code>, без бокса для
+          <code>struct</code>.</li>
+        <li><code>record</code> генерирует <code>Equals</code>, <code>GetHashCode</code>, <code>==</code>,
+          <code>ToString</code>, <code>with</code> — писать руками не нужно.</li>
+        <li><code>with</code> — копия с изменением; <code>init</code> — «задать при создании»;
+          <code>required</code> — «нельзя забыть».</li>
+        <li>Менять поле, участвующее в хеше, после вставки в словарь — значит потерять объект.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs02-strings.html">← <span class="sp">Глава 2. Строки: неизменяемость, интернирование, StringBuilder</span></a>
+      <a href="cs04-struct.html"><span class="sp">Глава 4. struct: что это и когда применять</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+

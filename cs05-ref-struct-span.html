@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 4 · ref struct и Span: окно в память без аллокаций</title>
+<title>Глава 5 · ref struct и Span: окно в память без аллокаций</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs05-collections.html">Далее →</a>
+  <a href="cs06-collections.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть I · Как устроена память</div>
-    <h1>Глава 4. ref struct и Span: окно в память без аллокаций</h1>
+    <h1>Глава 5. ref struct и Span: окно в память без аллокаций</h1>
     <p class="sublead">Как смотреть на часть строки или массива, ничего не копируя, — и почему такие типы
       принципиально не могут попасть в кучу.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -27,13 +27,39 @@
     <div class="codewrap">
       <pre><code class="language-csharp">string line = "10,20,30";
 
-string[] parts = line.Split(',');     // массив + три новые строки
-string first = line.Substring(0, 2);  // ещё одна новая строка
+// Split(',') — разбить строку по запятой. Возвращает МАССИВ строк,
+// и каждая часть — НОВАЯ строка в куче (здесь их три: "10", "20", "30").
+// Плюс сам массив — ещё один объект в куче.
+string[] parts = line.Split(',');
 
-ReadOnlySpan&lt;char&gt; window = line.AsSpan(0, 2);   // окно — без новых строк</code></pre>
+// Substring(0, 2) — взять 2 символа с позиции 0. Возвращает НОВУЮ строку "10"
+// (в куче появился ещё один объект), исходная строка не меняется.
+string first = line.Substring(0, 2);
+
+// AsSpan(0, 2) — НЕ создаёт строку: возвращает «окно» из двух чисел
+// (адрес символа «1» + длина 2) на уже существующей строке в куче.
+ReadOnlySpan&lt;char&gt; window = line.AsSpan(0, 2);
+
+Console.WriteLine($"{parts.Length} части, первая = {parts[0]}, окно = {window.ToString()}");</code></pre>
     </div>
-    <p>В первых двух строках появились <strong>новые объекты в куче</strong> (глава 1), которые потом станут мусором
-      для GC. Третья строка создаёт только «окно» — и в этом весь смысл <code>Span</code>.</p>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">3 части, первая = 10, окно = 10</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Сколько объектов создалось</span>
+      <ul>
+        <li><code>Split</code>: <strong>4 объекта</strong> в куче — массив + три строки (<code>"10"</code>,
+          <code>"20"</code>, <code>"30"</code>).</li>
+        <li><code>Substring</code>: <strong>+1 объект</strong> — новая строка <code>"10"</code>.</li>
+        <li><code>AsSpan</code>: <strong>0 объектов</strong> в куче — только окно на стеке (адрес + длина),
+          которое смотрит на те же символы исходной строки.</li>
+        <li><code>window.ToString()</code> — вот здесь объект появится: чтобы напечатать окно как строку,
+          её придётся создать. Поэтому в горячем коде с окном работают через индексатор и сравнение, а не
+          через <code>ToString()</code>.</li>
+      </ul>
+    </div>
+    <p>Дальше — что такое само окно и почему так получается.</p>
 
     <h2>Что такое Span</h2>
     <p><code>Span&lt;T&gt;</code> — это <strong>ссылка на участок памяти + длина</strong>. Он не владеет данными и
@@ -137,11 +163,11 @@ if (123.TryFormat(chars, out int written))
       <pre><code class="language-csharp">// ✘ поле класса — окно переживёт данные
 public sealed class Parser
 {
-    private ReadOnlySpan&lt;char&gt; _line;     // CS8345: нельзя
+    private ReadOnlySpan&lt;char&gt; _line;     // CS8345
 }
 
 // ✘ в коллекции или массиве
-var list = new List&lt;ReadOnlySpan&lt;char&gt;&gt;();   // CS0306: нельзя использовать как аргумент типа
+var list = new List&lt;ReadOnlySpan&lt;char&gt;&gt;();   // CS0306
 
 // ✘ в async-методе: окно «переживёт» await
 async Task&lt;int&gt; CountAsync(ReadOnlySpan&lt;char&gt; line)   // ошибка компиляции
@@ -150,12 +176,27 @@ async Task&lt;int&gt; CountAsync(ReadOnlySpan&lt;char&gt; line)   // ошибк�
     return line.Length;
 }
 
-// ✘ захват в лямбду
-Func&lt;int&gt; f = () =&gt; line.Length;            // ошибка компиляции</code></pre>
+// ✘ захват в лямбду: переменная уедет в объект-замыкание в куче
+ReadOnlySpan&lt;char&gt; line = "10,20".AsSpan();
+Func&lt;int&gt; f = () =&gt; line.Length;             // ошибка компиляции</code></pre>
     </div>
-    <p><strong>Причина одна:</strong> окно не владеет памятью. Если бы его можно было сохранить в куче (или
-      пережить им <code>await</code>), оно могло бы остаться, когда исходные данные уже освобождены или стек
-      «схлопнулся». Компилятор просто не даёт создать такую ситуацию.</p>
+    <p>Что означает каждое сообщение:</p>
+    <ul>
+      <li><strong>CS8345</strong> — «полю запрещено иметь тип <code>ref struct</code>». Поле живёт столько же,
+        сколько объект в куче, а окно должно умереть вместе с данными на стеке. Поэтому окно нельзя хранить в
+        классе.</li>
+      <li><strong>CS0306</strong> — <code>ref struct</code> нельзя подставлять как аргумент типа:
+        <code>List&lt;ReadOnlySpan&lt;char&gt;&gt;</code> хранит элементы в массиве в куче, то есть окна там жить не
+        могут.</li>
+      <li><strong>В <code>async</code>-методе</strong> параметр <code>ref struct</code> запрещён: при
+        <code>await</code> состояние метода сохраняется в объект в куче, а окно туда «переехать» не может.</li>
+      <li><strong>В лямбде</strong> захваченная переменная копируется в <em>замыкание</em> — объект в куче.
+        Здесь <code>line</code> — это <code>ReadOnlySpan&lt;char&gt;</code> (строка 3 выше), поэтому захват
+        невозможен; для <code>string</code> на этом месте ошибки бы не было — вот в чём разница.</li>
+    </ul>
+    <p><strong>Причина у всех одна:</strong> окно не владеет памятью. Если бы его можно было сохранить в куче
+      (или пережить им <code>await</code>), оно могло бы остаться, когда исходные данные уже освобождены или
+      стек «схлопнулся». Компилятор просто не даёт создать такую ситуацию.</p>
     <div class="box tip">
       <span class="t">Что делать, если очень нужно через <code>await</code></span>
       <p>Используйте <code>Memory&lt;T&gt;</code>/<code>ReadOnlyMemory&lt;T&gt;</code> — это «переносимое» окно
@@ -185,8 +226,8 @@ Func&lt;int&gt; f = () =&gt; line.Length;            // ошибка компи�
     </div>
 
     <div class="pager">
-      <a href="cs03-struct.html">← <span class="sp">Глава 3. struct: что это и когда применять</span></a>
-      <a href="cs05-collections.html"><span class="sp">Глава 5. Коллекции: generic против non-generic</span> →</a>
+      <a href="cs04-struct.html">← <span class="sp">Глава 4. struct: что это и когда применять</span></a>
+      <a href="cs06-collections.html"><span class="sp">Глава 6. Коллекции: generic против non-generic</span> →</a>
     </div>
   </div>
 </div>
