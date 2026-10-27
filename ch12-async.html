@@ -27,6 +27,14 @@
       <code>await</code> метод не блокирует поток: он сохраняет своё состояние и возвращает управление
       вызывающему (поток уходит обслуживать другие запросы). Когда операция завершится, продолжение
       выполнится — возможно, на другом потоке.</p>
+    <div class="box note">
+      <span class="t">Где разобрано внутреннее устройство</span>
+      <p>Во что именно разворачивается <code>async</code> (поля стейт-машины, <code>MoveNext</code>,
+        <code>AsyncTaskMethodBuilder</code>), почему <code>Task</code> — это обещание, а не поток, когда
+        <code>ValueTask</code> экономит аллокацию и какие у него ограничения, а также что делает
+        <code>ConfigureAwait(false)</code> — в C#-книге, глава 9. Здесь — прикладная сторона: как писать
+        асинхронный код сервиса.</p>
+    </div>
 
     <div class="codewrap">
       <pre><code class="language-csharp">public async Task&lt;UserDto&gt; GetUserAsync(int id, CancellationToken ct)

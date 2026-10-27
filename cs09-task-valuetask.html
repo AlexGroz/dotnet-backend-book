@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 9 · Task, ValueTask и стейт-машина async/await</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs10-task-run.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы и асинхронность</div>
+    <h1>Глава 9. Task, ValueTask и стейт-машина async/await</h1>
+    <p class="sublead">Что такое <code>Task</code> на самом деле, когда <code>ValueTask</code> экономит
+      аллокацию, а когда превращается в скрытый баг, во что компилятор разворачивает <code>async/await</code>
+      и что делает <code>ConfigureAwait(false)</code>.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2><code>Task</code> — это не поток, а обещание результата</h2>
+    <p><code>Task</code> — объект-обещание: «результат будет позже». Внутри нет потока; есть:</p>
+    <ul>
+      <li><strong>состояние</strong>: <code>WaitingForActivation</code> → <code>RanToCompletion</code> /
+        <code>Faulted</code> / <code>Canceled</code>;</li>
+      <li><strong>результат</strong> (для <code>Task&lt;T&gt;</code>) или исключение;</li>
+      <li><strong>список продолжений</strong> (<em>continuations</em>) — что выполнить после завершения.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var task = _http.GetStringAsync(url);   // объект создан СРАЗУ, работа идёт фоном
+
+Console.WriteLine(task.Status);         // WaitingForActivation
+var body = await task;                  // подождать и получить результат
+Console.WriteLine(task.Status);         // RanToCompletion</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Сколько стоит <code>Task</code></span>
+      <p><code>Task</code> — <strong>класс</strong>, то есть объект в куче: заголовок + поля + результат.
+        Для API, который вызывается миллионы раз, это лишние аллокации и работа. Отсюда два кэша в BCL:
+        <code>Task.CompletedTask</code> (один объект на всех) и <code>Task.FromResult</code>, который для
+        часто встречающихся значений возвращает готовый кэшированный экземпляр.</p>
+    </div>
+
+    <h2><code>ValueTask</code>: структура, которая экономит аллокацию</h2>
+    <p><code>ValueTask</code> / <code>ValueTask&lt;T&gt;</code> — это <strong>struct</strong>, который
+      внутри хранит либо готовый результат, либо <code>Task</code>, либо источник значения
+      (<code>IValueTaskSource</code>). Если результат уже есть — объекта в куче не появляется вообще.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// кэш: чаще всего значение уже есть → Task создавать незачем
+public ValueTask&lt;string&gt; GetNameAsync(int id)
+{
+    if (_cache.TryGetValue(id, out string? cached))
+        return new ValueTask&lt;string&gt;(cached);      // 0 аллокаций: struct с готовым значением
+
+    return new ValueTask&lt;string&gt;(LoadFromDbAsync(id));  // реально асинхронный путь
+}</code></pre>
+    </div>
+    <p>Часто такие методы вызываются в «горячих» местах, где синхронный путь — норма: чтение из кэша,
+      <code>PipeReader.ReadAsync</code>, <code>IAsyncEnumerator.MoveNextAsync</code>,
+      <code>ChannelReader.ReadAsync</code>. Именно поэтому BCL местами возвращает <code>ValueTask</code>.</p>
+
+    <h2>Цена <code>ValueTask</code>: правила, которые нельзя нарушать</h2>
+    <p><code>ValueTask</code> — не «более быстрый <code>Task</code>». Это <strong>одноразовое</strong>
+      значение: его разрешено прочитать (дождаться) <em>ровно один раз</em>.</p>
+    <table>
+      <tr><th>Нельзя</th><th>Что произойдёт</th></tr>
+      <tr><td><code>await vt; await vt;</code> (повторное ожидание)</td><td><code>InvalidOperationException</code>
+        или неверный результат: объект уже вернулся в пул и переиспользован</td></tr>
+      <tr><td><code>vt.Result</code>, <code>vt.Wait()</code>, <code>GetAwaiter().GetResult()</code></td>
+        <td>синхронное ожидание запрещено контрактом — легко получить зависание или исключение</td></tr>
+      <tr><td><code>Task.WhenAll(vt1, vt2)</code></td><td>не компилируется: <code>ValueTask</code> не
+        приводится к <code>Task</code></td></tr>
+      <tr><td>Сохранить в поле и ждать позже, передать другому потоку</td><td>источник значения уже
+        освобождён — гонки и порча данных</td></tr>
+      <tr><td>Использовать в <code>lock</code>/<code>foreach</code> как обычное значение</td><td>копирование
+        структуры даёт вторую «ссылку» на одноразовый источник</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ классическая ошибка: значение нужно дважды — а ValueTask одноразовый
+ValueTask&lt;string&gt; vt = GetNameAsync(42);
+if (await vt is null) return;
+var name = await vt;                    // второе ожидание: уже сломанный объект
+
+// ✔ нужен повторный доступ — превращаем в Task (одна аллокация, зато безопасно)
+Task&lt;string&gt; task = GetNameAsync(42).AsTask();
+if (await task is null) return;
+var name = await task;                  // Task можно ожидать сколько угодно раз</code></pre>
+    </div>
+    <p>Откуда строгость: производители <code>ValueTask</code> (например, <code>PipeReader</code>) отдают
+      объект из <em>пула</em>. После первого <code>await</code> он возвращается в пул и может быть выдан
+      следующему вызову — поэтому «сохранённое» значение превращается в чужое.</p>
+
+    <h2>Когда <code>ValueTask</code> даёт профит, а когда вредит</h2>
+    <table>
+      <tr><th>Профит</th><th>Вред</th></tr>
+      <tr><td>Метод <strong>часто завершается синхронно</strong> (кэш, буфер, готовые данные)</td>
+        <td>Метод <strong>почти всегда реально асинхронный</strong> — структура ничего не экономит, только
+        усложняет API</td></tr>
+      <tr><td>Очень горячий путь: миллионы вызовов, где важна каждая аллокация</td><td>Вызывающий код может
+        законно захотеть <code>.Result</code>, <code>WhenAll</code>, повторный <code>await</code></td></tr>
+      <tr><td>Метод — внутренний, и вы контролируете всех вызывающих</td><td>Публичный API библиотеки: ломать
+        ожидания пользователей ради пары байт — плохая сделка</td></tr>
+      <tr><td>Реализация интерфейса, где так задумано BCL (<code>IAsyncEnumerator</code>,
+        <code>ChannelReader</code>)</td><td>Возвращать <code>ValueTask</code> из <code>async</code>-метода
+        «на всякий случай» — почти всегда ошибка: компилятор всё равно создаст объект состояния</td></tr>
+    </table>
+    <div class="box tip">
+      <span class="t">Правило выбора</span>
+      <p>Начинайте с <code>Task</code>. Переходите на <code>ValueTask</code> только если <em>есть замер</em>
+        (гл. 21 .NET-раздела), который показывает, что аллокации <code>Task</code> заметны, и метод
+        действительно часто завершается синхронно. И тогда соблюдайте контракт «одно ожидание».</p>
+    </div>
+
+    <h2>Во что компилятор разворачивает <code>async/await</code></h2>
+    <p><code>async</code>/<code>await</code> — не «магия рантайма», а <strong>переписывание метода
+      компилятором</strong>. Метод превращается в маленький автомат состояний (стейт-машину), который умеет
+      «приостановиться» и потом продолжить с того же места.</p>
+    <div class="codewrap">
+      <p class="cap">Исходный код</p>
+      <pre><code class="language-csharp">public async Task&lt;int&gt; SumAsync(int a, int b)
+{
+    var x = await GetAAsync(a);
+    var y = await GetBAsync(b);
+    return x + y;
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Как это выглядит после компиляции (упрощённо)</p>
+      <pre><code class="language-csharp">public Task&lt;int&gt; SumAsync(int a, int b)          // метод-обёртка: создаёт машину и запускает
+{
+    var sm = new SumAsyncStateMachine();          // структура; в Debug-сборке — класс (для отладчика)
+    sm._this = this;
+    sm.a = a;                                     // параметры → поля структуры
+    sm.b = b;
+    sm._builder = AsyncTaskMethodBuilder&lt;int&gt;.Create();
+    sm._state = -1;                               // «ещё не начинали»
+    sm._builder.Start(ref sm);                    // синхронно вызывает MoveNext()
+    return sm._builder.Task;                      // наружу — обещание результата
+}
+
+struct SumAsyncStateMachine : IAsyncStateMachine
+{
+    public int _state;                            // на каком await мы остановились
+    public AsyncTaskMethodBuilder&lt;int&gt; _builder;  // «обещание» + способы завершить его
+    public TaskAwaiter&lt;int&gt; _awaiter;             // ожидатель текущей задачи
+    public int a, b, x, y;                        // параметры и локальные — теперь ПОЛЯ
+
+    public void MoveNext()                        // основной цикл автомата
+    {
+        try
+        {
+            switch (_state)
+            {
+                case 0: goto AfterFirst;          // продолжили после первого await
+                case 1: goto AfterSecond;         // после второго
+            }
+
+            _awaiter = GetAAsync(a).GetAwaiter();
+
+            if (!_awaiter.IsCompleted)            // задача ещё не готова
+            {
+                _state = 0;                       // запомнили точку возврата
+                _builder.AwaitUnsafeOnCompleted(ref _awaiter, ref this);
+                return;                           // ВЫХОД из метода: поток свободен
+            }
+        AfterFirst:
+            x = _awaiter.GetResult();             // результат или исключение
+
+            _awaiter = GetBAsync(b).GetAwaiter();
+            if (!_awaiter.IsCompleted)
+            {
+                _state = 1;
+                _builder.AwaitUnsafeOnCompleted(ref _awaiter, ref this);
+                return;
+            }
+        AfterSecond:
+            y = _awaiter.GetResult();
+
+            _builder.SetResult(x + y);            // задача завершена успешно
+        }
+        catch (Exception ex)
+        {
+            _builder.SetException(ex);            // ошибка тоже «внутри» задачи
+        }
+    }
+}</code></pre>
+    </div>
+    <p>Что из этого следует:</p>
+    <ul>
+      <li><strong>До первого незавершённого <code>await</code> метод выполняется синхронно.</strong>
+        <code>Start</code> вызывает <code>MoveNext</code> прямо в вызывающем потоке — именно поэтому
+        «асинхронный» метод успевает сделать часть работы до возврата управления.</li>
+      <li><strong><code>await</code> — это не блокировка.</strong> Если задача не готова, машина запоминает
+        состояние и <code>return</code>: поток возвращается в пул, а продолжение (<code>MoveNext</code>)
+        вызовут, когда задача завершится (гл. 12 .NET-раздела).</li>
+      <li><strong>Если задача уже завершена</strong> (<code>IsCompleted</code>), продолжение идёт сразу, без
+        переключения потоков и без постановки в очередь.</li>
+      <li><strong>Исключения не «вылетают» из метода</strong>: они ловятся и складываются в задачу
+        (<code>SetException</code>), а <code>await</code> потом их пробрасывает. Поэтому
+        <code>try/catch</code> вокруг вызова без <code>await</code> исключение не поймает.</li>
+      <li><strong>Локальные переменные стали полями</strong> <code>x</code>, <code>y</code>: их нужно
+        сохранить между «приостановками». Параметры тоже.</li>
+      <li><strong>Память:</strong> пока метод не приостановился, машина — структура на стеке. При первой
+        приостановке её нужно сохранить дольше, чем живёт стек, — она <em>упаковывается в кучу</em> (бокс).
+        Отсюда правило: <code>async</code>-метод, который завершился синхронно, почти ничего не стоит;
+        метод, который реально ждал, — стоит объект состояния.</li>
+    </ul>
+
+    <h2><code>ConfigureAwait(false)</code>: где продолжится код после <code>await</code></h2>
+    <p>По умолчанию после <code>await</code> продолжение пытается вернуться в <strong>исходный контекст</strong>
+      (SynchronizationContext или TaskScheduler). <code>ConfigureAwait(false)</code> говорит: «мне всё равно,
+      в каком потоке продолжать» — продолжение пойдёт в потоке пула.</p>
+    <ul>
+      <li><strong>Зачем в библиотеках:</strong> библиотека не знает, кто её вызвал. Если это UI-приложение,
+        возврат в UI-поток после каждого <code>await</code> — лишние переключения и риск дедлока при
+        синхронном ожидании снаружи.</li>
+      <li><strong>В ASP.NET Core</strong> контекста синхронизации нет, поэтому эффект почти нулевой — но
+        правило остаётся: библиотечный код не должен зависеть от контекста вызывающего.</li>
+      <li><strong>Что он не делает:</strong> не отменяет операцию, не ускоряет её и не влияет на код
+        <em>до</em> <code>await</code> — только на то, где выполнится код <em>после</em>.</li>
+      <li>Для <code>ValueTask</code> и <code>IAsyncEnumerable</code> он тоже есть:
+        <code>await vt.ConfigureAwait(false)</code>, <code>enumerable.ConfigureAwait(false)</code>.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// библиотечный метод: после каждого await — ConfigureAwait(false)
+public async Task&lt;string&gt; GetAsync(string url, CancellationToken ct)
+{
+    var response = await _client.GetAsync(url, ct).ConfigureAwait(false);
+    return await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+}</code></pre>
+    </div>
+
+    <h2>Сколько всё это стоит: сводка по памяти</h2>
+    <table>
+      <tr><th>Сценарий</th><th>Что попадает в кучу</th></tr>
+      <tr><td><code>async Task</code> без результата, завершился синхронно</td><td>ничего: отдаётся
+        кэшированный <code>Task.CompletedTask</code></td></tr>
+      <tr><td><code>async Task&lt;T&gt;</code>, завершился синхронно</td><td>объект <code>Task&lt;T&gt;</code>
+        (для некоторых значений — кэшированный)</td></tr>
+      <tr><td><code>async Task</code>, был реальный <code>await</code></td><td>бокс стейт-машины + объект
+        <code>Task</code></td></tr>
+      <tr><td><code>async ValueTask</code>, завершился синхронно</td><td><strong>ничего</strong> — это и есть
+        смысл <code>ValueTask</code></td></tr>
+      <tr><td><code>async ValueTask</code>, был <code>await</code></td><td>бокс стейт-машины; результат может
+        вернуться из пула (есть <code>PoolingAsyncValueTaskMethodBuilder</code>)</td></tr>
+      <tr><td><code>Task.FromResult(0)</code></td><td>кэшированный экземпляр — ничего</td></tr>
+    </table>
+    <p>Вывод: <code>ValueTask</code> выигрывает на <strong>синхронном</strong> пути. Если метод всё равно
+      уходит в реальное ожидание, экономии не будет — останутся только ограничения.</p>
+
+    <h2>Правила, которые стоит запомнить</h2>
+    <ol>
+      <li><strong>По умолчанию — <code>Task</code>.</strong> Он безопасен: его можно ожидать сколько угодно
+        раз, складывать в <code>WhenAll</code>, хранить.</li>
+      <li><strong><code>ValueTask</code> — только по замеру</strong> и только для методов, которые часто
+        завершаются синхронно.</li>
+      <li><strong>Одно ожидание.</strong> Нужно больше — <code>.AsTask()</code>.</li>
+      <li><strong>Никогда не блокируйте</strong> <code>Task</code>/<code>ValueTask</code> через
+        <code>.Result</code>/<code>.Wait()</code>: это и голодание пула (гл. 9 .NET-раздела), и дедлоки.</li>
+      <li><strong>В библиотеках — <code>ConfigureAwait(false)</code></strong> после каждого
+        <code>await</code>.</li>
+      <li><code>async void</code> — только для обработчиков событий: исключение из него не попадает в
+        задачу (гл. 10).</li>
+    </ol>
+
+    <h2>Что спросят на интервью</h2>
+    <ul>
+      <li>Чем <code>Task</code> отличается от потока и почему <code>await</code> не блокирует?</li>
+      <li>Что такое стейт-машина <code>async</code>-метода и какие поля в ней есть?</li>
+      <li>Почему исключение из <code>async</code>-метода не ловится без <code>await</code>?</li>
+      <li>Когда <code>ValueTask</code> быстрее и какие у него ограничения?</li>
+      <li>Что произойдёт при повторном <code>await</code> одного <code>ValueTask</code>?</li>
+      <li>Зачем <code>ConfigureAwait(false)</code> и почему в ASP.NET Core он почти не влияет?</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>Task</code> — <strong>обещание результата</strong> (класс в куче), а не поток;
+          <code>await</code> освобождает поток, а не блокирует его.</li>
+        <li><code>ValueTask</code> — структура для <strong>одноразового</strong> ожидания; экономит
+          аллокацию только на синхронном пути.</li>
+        <li><code>ValueTask</code> нельзя ожидать дважды, блокировать и складывать в <code>WhenAll</code>;
+          нужен повтор — <code>AsTask()</code>.</li>
+        <li><code>async/await</code> — переписывание в стейт-машину: <code>state</code>, <code>builder</code>,
+          <code>awaiter</code>, локальные переменные как поля; при приостановке машина уходит в кучу.</li>
+        <li>Метод выполняется синхронно до первого незавершённого <code>await</code>; исключения складываются
+          в задачу и пробрасываются при <code>await</code>.</li>
+        <li><code>ConfigureAwait(false)</code> — «мне не нужен исходный контекст»; в библиотеках — всегда.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs08-class-modifiers.html">← <span class="sp">Глава 8. Модификаторы типов: sealed, abstract, static, record</span></a>
+      <a href="cs10-task-run.html"><span class="sp">Глава 10. Task.Run: когда нужен и когда вредит</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+

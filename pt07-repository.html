@@ -131,7 +131,7 @@ builder.Services.AddScoped&lt;PayOrderHandler&gt;();</code></pre>
         <code>MarkAsPaid()</code>, изменения сохраняются одним <code>SaveChangesAsync</code>». Как это уйдёт в
         базу — вопрос реализации репозитория.</p>
       <p>Кстати, <code>?? throw new NotFoundException(id)</code> — идиома «получить или упасть»: если репозиторий
-        вернул <code>null</code>, бросаем исключение (подробно — C#-книга, глава 10).</p>
+        вернул <code>null</code>, бросаем исключение (подробно — C#-книга, глава 11).</p>
     </div>
 
     <h2>Неприятная правда про EF Core</h2>
