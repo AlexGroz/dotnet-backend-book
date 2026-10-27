@@ -161,7 +161,61 @@ public readonly record struct Point(int X, int Y); // record struct (значи�
         по значениям. Для DTO и событий домена почти всегда подходит <code>record</code>.</p>
     </div>
 
+    <h3><code>struct</code> против <code>record struct</code>: что именно добавляется</h3>
+    <p>Разница не в памяти (оба — значимые типы, оба копируются), а в том, <strong>что компилятор пишет
+      за вас</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public struct S              { public int X { get; set; } public int Y { get; set; } }
+public record struct RS(int X, int Y);              // record struct
+public record class  RC(int X, int Y);              // record class
+
+// --- обычный struct ---
+var s1 = new S { X = 1, Y = 2 };
+var s2 = s1;                 // копия значения
+s2.X = 99;
+Console.WriteLine(s1.X);     // 1 — копия, как и ожидалось
+Console.WriteLine(s1.Equals(s2));        // False — но Equals() по умолчанию медленный (через рефлексию)
+// Console.WriteLine(s1 == s2);          // ✘ НЕ компилируется: оператора == у struct нет
+
+// --- record struct ---
+var r1 = new RS(1, 2);
+var r2 = r1;                 // тоже копия значения
+r2.X = 99;
+Console.WriteLine(r1.X);     // 1 — копия
+Console.WriteLine(r1 == r2); // False — оператор == уже есть (сравнение по значениям)
+Console.WriteLine(r1);       // RS { X = 1, Y = 2 } — ToString сгенерирован
+
+// --- record class ---
+var c1 = new RC(1, 2);
+var c2 = c1;                 // копируется ССЫЛКА, объект один
+Console.WriteLine(ReferenceEquals(c1, c2)); // True</code></pre>
+    </div>
+    <table>
+      <tr><th>Что есть у типа</th><th><code>struct</code></th><th><code>record struct</code></th>
+        <th><code>record class</code></th></tr>
+      <tr><td>Где живёт значение</td><td>в переменной (стек/внутри объекта)</td><td>там же</td>
+        <td>объект в куче, в переменной ссылка</td></tr>
+      <tr><td>Копирование</td><td>копия значения</td><td>копия значения</td><td>копия ссылки</td></tr>
+      <tr><td><code>Equals</code> по полям</td><td>есть, но медленный (рефлексия) — лучше реализовать
+        <code>IEquatable</code></td><td>сгенерирован, быстрый</td><td>сгенерирован</td></tr>
+      <tr><td><code>==</code> / <code>!=</code></td><td>нет, пока не напишете</td><td>сгенерированы</td>
+        <td>сгенерированы</td></tr>
+      <tr><td><code>ToString</code></td><td>имя типа</td><td>поля: <code>RS { X = 1, Y = 2 }</code></td>
+        <td>поля</td></tr>
+      <tr><td><code>with</code></td><td>есть с C# 10</td><td>есть (идиоматично)</td><td>есть</td></tr>
+      <tr><td>Наследование</td><td>нет</td><td>нет</td><td>только от record</td></tr>
+      <tr><td>Когда выбирать</td><td>маленькое значение без «равенства по данным»</td><td>DTO/значение,
+        где нужно равенство и <code>with</code>, но без аллокации</td><td>DTO/событие, где важна
+        ссылка и наследование</td></tr>
+    </table>
+
     <h2><code>with</code>: копия с изменением</h2>
+    <p>Почему <code>with</code> именно в этой главе: <code>record</code> — это <strong>один набор</strong>
+      «значение + равенство + копия с изменением». Он генерирует <code>Equals</code>, <code>GetHashCode</code>,
+      <code>==</code> <em>и</em> <code>with</code>; <code>with</code> умеет задавать только <code>init</code>
+      -свойства; а после <code>with</code> вы почти всегда сравниваете старый и новый объект
+      (<code>a == b</code>). Разрывать это на разные главы — значит заставлять искать половину темы в другом
+      месте.</p>
     <p><strong>Что делает:</strong> берёт объект (или значение), копирует <em>все</em> поля и заменяет те, что
       указаны в фигурных скобках. Исходный остаётся нетронутым:</p>
     <div class="codewrap">

@@ -85,15 +85,31 @@ string result = sb.ToString();     // одна итоговая строка</co
       загрузке попадают в специальную таблицу — <strong>пул интернированных строк</strong>
       (<em>string intern pool</em>). Поэтому два одинаковых литерала — это <strong>один и тот же объект</strong>:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">string a = "Алексей";
-string b = "Алексей";
-Console.WriteLine(ReferenceEquals(a, b));    // True — один объект из пула
+      <pre><code class="language-csharp">string a = "Алексей";                        // литерал → уже лежит в пуле
+string b = string.Concat("Алек", "сей");     // собрано в рантайме → НОВЫЙ объект
+Console.WriteLine(ReferenceEquals(a, b));    // False — объекты разные, хотя Equals = True
 
-string c = new string('А', 7);               // собрано в рантайме
-Console.WriteLine(ReferenceEquals(a, c));    // False — другой объект
+string c = string.Intern(b);                 // «положить в пул»: вернётся объект ИЗ пула
+Console.WriteLine(ReferenceEquals(a, c));    // True  — это тот же объект, что a
+Console.WriteLine(ReferenceEquals(b, c));    // False — сам b остался своим объектом
 
-string d = string.Intern(c);                 // явно «положить в пул»
-Console.WriteLine(ReferenceEquals(a, d));    // True</code></pre>
+string other = new string('А', 7);           // "ААААААА" — ДРУГОЕ содержимое
+string interned = string.Intern(other);      // интернирует именно "ААААААА"
+Console.WriteLine(ReferenceEquals(a, interned)); // False — строки разные</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Правило, которое снимает путаницу</span>
+      <p><code>ReferenceEquals</code> сравнивает <strong>адреса объектов</strong>. Два литерала с одинаковым
+        текстом — один объект, поэтому <code>true</code>. Но <code>string.Intern</code> <em>не делает разные
+        строки одной</em>: он лишь возвращает ссылку на объект из пула, <strong>если в пуле уже есть строка с
+        тем же содержимым</strong>. Поэтому:</p>
+      <ul>
+        <li><code>"Алексей"</code> и <code>"ААААААА"</code> — разное содержимое → <code>ReferenceEquals</code>
+          всегда <code>false</code>, сколько ни интернируй;</li>
+        <li>одинаковое содержимое + обе строки интернированы → <code>true</code>;</li>
+        <li><code>Intern(b)</code> не превращает <code>b</code> в интернированную строку — <code>b</code>
+          остаётся своим объектом, а пул хранит свою копию.</li>
+      </ul>
     </div>
     <ul>
       <li><strong>Литерал бесплатен по аллокации</strong> при обращении: объект уже создан один раз.</li>

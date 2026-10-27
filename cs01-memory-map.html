@@ -228,25 +228,141 @@
         который живёт всё время работы процесса.</p>
     </div>
 
-    <h2>Ещё два случая, которые удивляют: замыкания и <code>async</code></h2>
-    <p>Карта памяти объясняет и «невидимые» аллокации, которые делает компилятор.</p>
+    <h2>Замыкание: как локальная переменная «переезжает» в кучу</h2>
+    <p>Разберём на конкретном примере — здесь всё видно, если показать, что делает компилятор.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// 1) Лямбда захватила локальную переменную → появился объект-замыкание в куче
-Func&lt;int&gt; MakeCounter()
+      <pre><code class="language-csharp">static Func&lt;int&gt; MakeCounter()
 {
-    int counter = 0;            // сама переменная «переехала» в поле объекта
-    return () =&gt; ++counter;
+    int counter = 0;                    // обычная локальная переменная
+    Func&lt;int&gt; next = () =&gt; ++counter;   // лямбда ИСПОЛЬЗУЕТ counter
+    return next;                        // и мы возвращаем её наружу
 }
 
-// 2) async-метод после await → состояние метода живёт в объекте state machine
-async Task&lt;int&gt; LoadAsync(Guid id, CancellationToken ct)
+var c1 = MakeCounter();
+var c2 = MakeCounter();
+
+Console.WriteLine(c1());   // 1
+Console.WriteLine(c1());   // 2   ← помнит предыдущее значение
+Console.WriteLine(c1());   // 3
+Console.WriteLine(c2());   // 1   ← у второго счётчика своя переменная</code></pre>
+    </div>
+    <p><strong>В чём проблема.</strong> Локальная переменная живёт, пока выполняется метод: после
+      <code>return</code> кадр стека уничтожается, и <code>counter</code> должен исчезнуть. Но лямбда
+      вызывается <em>позже</em> — уже после выхода из <code>MakeCounter</code> — и продолжает видеть
+      <code>counter</code>. Значит, переменная должна жить дольше метода. Стек для этого не годится, поэтому
+      компилятор переносит её в <strong>объект в куче</strong>.</p>
+    <div class="codewrap">
+      <p class="cap">Во что это превращает компилятор (упрощённо)</p>
+      <pre><code class="language-csharp">// 1) скрытый класс: поле для каждой захваченной переменной
+sealed class Closure                    // реальное имя: &lt;&gt;c__DisplayClass0_0
 {
-    var order = await _db.Orders.FirstAsync(o =&gt; o.Id == id, ct);   // ← точка приостановки
-    return order.Total;         // после await продолжение берётся из состояния в куче
+    public int counter;                 // ← сюда «переехала» локальная переменная
+
+    public int Next() =&gt; ++counter;     // ← сюда переехало тело лямбды
+}
+
+// 2) метод теперь создаёт объект этого класса и делегат на его метод
+static Func&lt;int&gt; MakeCounter()
+{
+    var closure = new Closure();        // объект-замыкание в КУЧЕ
+    closure.counter = 0;                // начальное значение
+
+    return closure.Next;                // делегат запомнил объект closure
 }</code></pre>
     </div>
-    <p>Это не «плохо» — это плата за удобство. Но зная карту, вы понимаете, почему в горячем цикле лямбда с
-      захватом и лишний <code>async</code> стоят дороже, чем кажутся.</p>
+    <p>Пошагово — что именно произошло:</p>
+    <ol>
+      <li><strong>Какую переменную захватила лямбда?</strong> Локальную <code>counter</code> — ту, которую она
+        читает и меняет.</li>
+      <li><strong>Какой объект появился?</strong> Экземпляр скрытого класса <code>Closure</code> (в IL он
+        называется <code>&lt;&gt;c__DisplayClass…</code>). Он создаётся <strong>при каждом вызове</strong>
+        <code>MakeCounter</code> — поэтому <code>c1</code> и <code>c2</code> независимы.</li>
+      <li><strong>В какое поле переехала переменная?</strong> В поле <code>counter</code> этого объекта.
+        В стеке её больше нет: все обращения идут к полю.</li>
+      <li><strong>Кто держит объект живым?</strong> Делегат: он хранит ссылку на <code>closure</code>. Пока
+        жива лямбда, живы и захваченная переменная, и всё, что она держит.</li>
+    </ol>
+    <div class="box warn">
+      <span class="t">Что в этом «страшного»: три практических следствия</span>
+      <ul>
+        <li><strong>Аллокация на каждую лямбду с захватом.</strong> В горячем цикле это лишние объекты и мусор
+          для GC (гл. 6, 7 .NET-раздела). Лямбда без захвата (или <code>static</code>-лямбда) объект не
+          создаёт: захватывать нечего.</li>
+        <li><strong>Время жизни.</strong> Захваченная переменная — и всё, что она держит (например,
+          <code>DbContext</code>, соединение, большой массив) — живёт, пока жива лямбда, а не пока выполняется
+          метод. Отсюда «странные» утечки.</li>
+        <li><strong>Общая переменная у нескольких лямбд.</strong> Если захватить переменную цикла, все лямбды
+          увидят <em>одну</em> переменную — классический баг:</li>
+      </ul>
+      <div class="codewrap">
+        <pre><code class="language-csharp">// ✘ все три лямбды захватили ОДНУ переменную i
+var actions = new List&lt;Action&gt;();
+for (int i = 0; i &lt; 3; i++)
+    actions.Add(() =&gt; Console.WriteLine(i));
+actions.ForEach(a =&gt; a());          // 3 3 3
+
+// ✔ копия внутри тела цикла — у каждой лямбды своя переменная
+for (int i = 0; i &lt; 3; i++)
+{
+    int copy = i;
+    actions.Add(() =&gt; Console.WriteLine(copy));
+}
+// 0 1 2</code></pre>
+      </div>
+    </div>
+
+    <h2><code>async</code>: где живёт состояние после <code>await</code></h2>
+    <p>Вторая «невидимая» аллокация — машина состояний <code>async</code>-метода. Как именно компилятор её
+      строит — в C# гл. 9; здесь важна только сторона памяти.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">async Task&lt;int&gt; LoadAsync(Guid id, CancellationToken ct)
+{
+    var order = await _db.Orders.FirstAsync(o =&gt; o.Id == id, ct);   // ← точка приостановки
+    return order.Total;
+}</code></pre>
+    </div>
+    <p>Компилятор превращает метод в машину состояний, у которой:</p>
+    <ul>
+      <li><strong>поля</strong> — это всё, что нужно помнить между приостановками: <code>id</code>,
+        <code>ct</code>, локальная <code>order</code>, <code>this</code> и текущее состояние
+        (<code>_state</code>);</li>
+      <li><strong>метод</strong> <code>MoveNext()</code> — тело вашего метода, разбитое на части вокруг
+        <code>await</code>.</li>
+    </ul>
+    <div class="codewrap">
+      <p class="cap">Что происходит по шагам</p>
+      <pre><code class="language-text">1. Вы вызвали LoadAsync
+   → создана машина состояний (структура) и запущена синхронно
+   → она на стеке, в куче пока ничего нет
+
+2. Дошли до await, задача БД ещё не готова
+   → машина УПАКОВЫВАЕТСЯ в объект в куче (потому что должна пережить возврат из метода)
+   → метод возвращает вызывающему Task&lt;int&gt; («результат будет позже»)
+   → поток свободен и уходит обслуживать другие запросы
+
+3. БД ответила
+   → продолжение вызывает MoveNext() у той же машины из кучи
+   → order берётся из ПОЛЯ машины (в стеке его давно нет)
+
+4. Метод дошёл до return
+   → результат кладётся в Task, машина больше не нужна и становится мусором</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Отсюда — что это значит на практике</span>
+      <ul>
+        <li><strong>Платите один объект состояния</strong> за вызов, который реально чего-то ждал. Вызов,
+          завершившийся синхронно (всё уже в кэше), в кучу не уходит — поэтому в горячих местах кэш и
+          <code>ValueTask</code> заметно дешевле (C# гл. 9).</li>
+        <li><strong>Локальные переменные живут дольше метода:</strong> <code>order</code> останется в памяти
+          до завершения <code>await</code>. Большой массив или <code>MemoryStream</code>, захваченный перед
+          <code>await</code>, будет держаться всё время ожидания — а при параллельных запросах это умножается
+          на их число.</li>
+        <li><strong>Это не «плохо» и не повод убирать <code>async</code>:</strong> альтернатива —
+          блокировка потока — стоит дороже (гл. 9, 12 .NET-раздела). Просто знайте, за что платите.</li>
+      </ul>
+    </div>
+
+
 
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>

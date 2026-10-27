@@ -102,10 +102,40 @@ public async Task&lt;decimal&gt; GetTotalAsync(Guid id, CancellationToken ct)
     </ul>
     <div class="box danger">
       <span class="t">«Запустить и забыть» на сервере — нельзя</span>
-      <p><code>_ = Task.Run(() =&gt; DoWork())</code> выглядит безобидно, но: исключения теряются, при
-        перезапуске приложения работа обрывается, отменить её невозможно, а пул может быть перегружен. Для
-        фоновых задач есть <code>BackgroundService</code>/очереди (глава 26 .NET-раздела) и outbox
-        (глава 31).</p>
+      <p><code>_ = Task.Run(() =&gt; DoWork())</code> — это <strong>осознанный отказ от результата</strong>.
+        Разберём запись по частям:</p>
+      <ul>
+        <li><code>Task.Run(...)</code> возвращает <code>Task</code> — объект-обещание, за которым можно
+          следить.</li>
+        <li><code>_</code> — <strong>discard</strong> («выбрасываемая» переменная): «мне это значение не
+          нужно, я его не сохраняю». Так пишут, чтобы компилятор не выдавал предупреждение CS4014
+          («вызов не ожидается») — то есть это способ <em>явно</em> сказать «я не буду ждать».</li>
+        <li>Сама задача при этом выполняется в пуле и продолжает жить независимо от того, что ссылки на неё
+          у вас нет.</li>
+      </ul>
+      <p><strong>Почему это плохо на сервере:</strong></p>
+      <ol>
+        <li><strong>Исключение теряется.</strong> Оно сохраняется внутри <code>Task</code>, но никто его не
+          ждёт. В .NET Core такой «необработанный» отказ не роняет процесс — он тихо пропадает (увидеть
+          можно только через <code>TaskScheduler.UnobservedTaskException</code>, и то не сразу).</li>
+        <li><strong>Отменить нельзя.</strong> Токена у вызывающего нет — задача доработает даже при остановке
+          приложения.</li>
+        <li><strong>Остановка приложения.</strong> При <code>SIGTERM</code> хост не знает об этой работе: она
+          обрывается вместе с процессом, и никто не сообщил, что она не закончилась.</li>
+        <li><strong>Нет управления нагрузкой.</strong> Сотня таких вызовов = сотня задач в пуле без лимита
+          (гл. 9 .NET-раздела).</li>
+        <li><strong>Нельзя протестировать и дождаться</strong> в тесте: возвращать нечего.</li>
+      </ol>
+      <table>
+        <tr><th>Вариант</th><th>Кто ждёт</th><th>Куда уйдёт исключение</th><th>Отмена и остановка</th></tr>
+        <tr><td><code>_ = Task.Run(...)</code></td><td>никто</td><td>в никуда</td><td>нет</td></tr>
+        <tr><td><code>await Task.Run(...)</code></td><td>текущий запрос</td><td>в вызывающий код
+          (try/catch)</td><td>через <code>CancellationToken</code></td></tr>
+        <tr><td><code>BackgroundService</code> / очередь (гл. 26)</td><td>хост</td><td>в лог и в
+          метрики</td><td>через <code>StopAsync</code> и токен</td></tr>
+      </table>
+      <p>Для фоновой работы есть <code>BackgroundService</code>, <code>Channel</code>/очередь (гл. 26) и
+        outbox для гарантий доставки (гл. 31).</p>
     </div>
 
     <h2><code>Task.Run</code>, <code>Task.Factory.StartNew</code> и <code>async void</code></h2>
@@ -119,12 +149,54 @@ public async Task&lt;decimal&gt; GetTotalAsync(Guid id, CancellationToken ct)
       </tbody>
     </table>
     <div class="codewrap">
-      <pre><code class="language-csharp">// ✘ async void: исключение уйдёт в никуда (и уронит процесс)
-public async void SendAsync() { await _client.PostAsync(…); }
+      <pre><code class="language-csharp">// ✘ async void: вызывающий получает void — объекта задачи нет
+public async void SendAsync()
+{
+    await _client.PostAsync(url, default);   // если здесь исключение…
+}
 
-// ✔ async Task: вызывающий может дождаться и обработать ошибку
-public async Task SendAsync(CancellationToken ct) =&gt; await _client.PostAsync(…, ct);</code></pre>
+// ✔ async Task: вызывающему возвращается обещание
+public async Task SendAsync(CancellationToken ct)
+{
+    await _client.PostAsync(url, ct);
+}</code></pre>
     </div>
+    <p>Код выполняется в обоих случаях — разница в том, <strong>кто и когда узнаёт о результате</strong>.</p>
+    <div class="codewrap">
+      <p class="cap">Что происходит с исключением</p>
+      <pre><code class="language-csharp">// async Task: исключение складывается в задачу и пробрасывается при await
+try
+{
+    await sender.SendAsync(ct);                 // ← здесь ошибка «всплывёт»
+}
+catch (HttpRequestException ex)
+{
+    _logger.LogError(ex, "не отправлено");      // обработали, сервис жив
+}
+
+// async void: ловить нечего — вызывающий не получил объект
+sender.SendAsync();                             // вернулось void
+// исключение уйдёт в контекст вызова → необработанное → падение процесса</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>Task</code> не «возвращает Exception»</strong> и не «хранит токен». Исключение
+        <em>сохраняется внутри задачи</em> (видно как <code>Task.Exception</code>), а <code>await</code> его
+        <strong>перевыбрасывает</strong> в вашем коде — поэтому и работает <code>try/catch</code> вокруг
+        <code>await</code>. <code>CancellationToken</code> — это <strong>параметр</strong> метода, а не
+        результат: он нужен, чтобы работу можно было прервать.</li>
+      <li><strong><code>async void</code> нечего ожидать:</strong> метод возвращает <code>void</code>, объекта
+        задачи нет. Значит, нельзя ни дождаться завершения, ни поймать ошибку, ни отменить, ни положить в
+        <code>Task.WhenAll</code>.</li>
+      <li><strong>Исключение из <code>async void</code></strong> перебрасывается в контекст, из которого метод
+        вызван (UI-поток, пул). Дальше это необработанное исключение: в ASP.NET Core — критическая ошибка,
+        которая роняет процесс.</li>
+      <li><strong>Где <code>async void</code> допустим:</strong> обработчики событий UI — там сигнатура
+        навязана платформой (<code>void Button_Click(...)</code>). И даже там внутри нужен
+        <code>try/catch</code>.</li>
+      <li><strong>Отмена:</strong> чтобы «дождаться и отменить», нужен <code>async Task</code> +
+        <code>CancellationToken</code>, который передаётся <em>внутрь</em> метода, а не возвращается
+        наружу.</li>
+    </ul>
 
     <h2>Исключения, отмена и <code>ConfigureAwait</code></h2>
     <ul>
