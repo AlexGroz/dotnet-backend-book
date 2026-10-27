@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 28 · Масштабирование и отказоустойчивость</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,296 @@
   <div class="chapter">
     <div class="part">.NET · Часть VII · Эксплуатация</div>
     <h1>Глава 28. Масштабирование и отказоустойчивость</h1>
-    <p class="sublead">Rate limiting, health checks, горизонтальное масштабирование</p>
+    <p class="sublead">«Поднять вторую реплику» — это не копирование сервиса, а набор требований:
+      отсутствие состояния, три вида health-проб, корректная остановка и лимиты. Разберём каждый пункт и что
+      ломается, когда их забыть.</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Два способа масштабировать</h2>
+    <table>
+      <tr><th></th><th>Вертикально</th><th>Горизонтально</th></tr>
+      <tr><td>Что делаем</td><td>даём больше CPU/памяти одной машине</td><td>запускаем N копий сервиса</td></tr>
+      <tr><td>Предел</td><td>есть: дорого и конечно</td><td>почти нет</td></tr>
+      <tr><td>Отказоустойчивость</td><td>нет: одна машина = одна точка отказа</td><td>есть: реплики подменяют
+        друг друга</td></tr>
+      <tr><td>Условие</td><td>—</td><td><strong>сервис не хранит состояние в памяти</strong></td></tr>
+    </table>
+    <p>Горизонтальное масштабирование — это отказ от «помнить что-то у себя»: любая реплика должна уметь
+      обработать любой запрос.</p>
+
+    <h2>Что нельзя хранить в памяти</h2>
+    <table>
+      <tr><th>Если хранить в реплике</th><th>Что случится</th><th>Куда переносить</th></tr>
+      <tr><td>Сессии, токены, «корзина»</td><td>пользователь попадает на другую реплику и «теряет» себя</td>
+        <td>БД, Redis, подписанный cookie (см. ниже)</td></tr>
+      <tr><td>Кэш</td><td>реплики показывают разные данные, инвалидация не работает</td><td>общий кэш
+        (Redis) или TTL-кэш с допустимым расхождением (гл. 25)</td></tr>
+      <tr><td>Счётчики/лимиты</td><td>лимит «100 в минуту» превращается в «100 × число реплик»</td>
+        <td>общий счётчик или распределённый rate limiter (ниже — про отличие)</td></tr>
+      <tr><td>Файлы и логи на диск</td><td>файл есть только на одной реплике</td><td>объектное хранилище
+        (S3/Blob), stdout вместо файлов (гл. 20)</td></tr>
+      <tr><td>Фоновые задачи</td><td>одну и ту же job выполняют все реплики</td><td>отдельный воркер, очередь
+        (гл. 26) или выбор лидера</td></tr>
+    </table>
+    <div class="box warn">
+      <span class="t">Sticky sessions — не решение</span>
+      <p>Можно «прибить» пользователя к реплике на балансировщике, и часть проблем исчезнет. Но: при
+        выкатке реплику всё равно надо выключить, при отказе — сессия теряется, а нагрузка распределяется
+        неравномерно. Sticky — временная мера, а не архитектура.</p>
     </div>
+
+    <h2>Три health-пробы — и у каждой своя задача</h2>
+    <table>
+      <tr><th>Проба</th><th>Вопрос, на который отвечает</th><th>Что делает платформа</th><th>Что нельзя
+        проверять</th></tr>
+      <tr><td><strong>Liveness</strong> (живость)</td><td>«процесс завис или работает?»</td>
+        <td>перезапускает контейнер</td><td><strong>Зависимости</strong> (БД, чужой API): их сбой не лечится
+        перезапуском, зато вызовет лавину перезапусков</td></tr>
+      <tr><td><strong>Readiness</strong> (готовность)</td><td>«можно ли уже отправлять трафик?»</td>
+        <td>убирает/возвращает реплику из балансировки, не перезапуская</td><td>Тяжёлые операции: проба
+        вызывается часто, она должна быть дешёвой</td></tr>
+      <tr><td><strong>Startup</strong> (старт)</td><td>«приложение ещё запускается, не убивай»</td>
+        <td>даёт время на инициализацию (JIT, миграции, прогрев)</td><td>—</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddHealthChecks()
+    // «жив ли процесс»: ничего внешнего, иначе чужая авария перезапустит все наши реплики
+    .AddCheck("self", () =&gt; HealthCheckResult.Healthy(), tags: ["live"])
+    // «готов ли обслуживать»: зависимости, которые нужны для работы
+    .AddNpgSql(connectionString, name: "postgres", tags: ["ready"])   // пакет AspNetCore.HealthChecks.NpgSql
+    .AddRedis(redisConnection, name: "redis",  tags: ["ready"]);
+
+var app = builder.Build();
+
+app.MapHealthChecks("/health/live",  new HealthCheckOptions
+{
+    Predicate = r =&gt; r.Tags.Contains("live")        // только «процесс жив»
+});
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = r =&gt; r.Tags.Contains("ready"),      // только зависимости
+    ResponseWriter = async (ctx, report) =&gt;      // свой JSON: имя проверки, статус, длительность
+    {
+        ctx.Response.ContentType = "application/json";
+        await ctx.Response.WriteAsJsonAsync(new
+        {
+            status = report.Status.ToString(),
+            checks = report.Entries.Select(e =&gt; new { e.Key, status = e.Value.Status.ToString() })
+        });
+    }
+});</code></pre>
+    </div>
+    <ul>
+      <li><strong>Проба должна быть дешёвой:</strong> <code>SELECT 1</code> или проверка соединения из пула, а
+        не «посчитай заказы за месяц».</li>
+      <li><strong>Не открывайте новое соединение на каждую пробу</strong> — это лишняя нагрузка на БД при
+        100 репликах × 1 проба/5 с.</li>
+      <li><strong>Readiness может быть false при живом процессе</strong> — это нормальный способ вывести
+        реплику из трафика без убийства (используется при выкатке).</li>
+    </ul>
+
+    <h2>Прогрев: новая реплика не готова в первую секунду</h2>
+    <p>После старта процесс ещё «холодный»: JIT компилирует методы по мере вызова (гл. 3), пул соединений
+      пуст (гл. 23), EF Core строит модель и компилирует первые запросы, кэш пуст (гл. 25). Если трафик
+      придёт сразу, первые сотни запросов будут в разы медленнее — и попадут в p99.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// прогреваем пул и модель до того, как readiness станет true
+public sealed class WarmupService(
+    IServiceScopeFactory scopes,
+    ILogger&lt;WarmupService&gt; log) : BackgroundService
+{
+    public static volatile bool Ready;          // health-check смотрит на этот флаг
+
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        try
+        {
+            // открываем столько соединений, сколько понадобится под нагрузку
+            await Parallel.ForEachAsync(
+                Enumerable.Range(0, 10),
+                ct,
+                async (_, token) =&gt;
+                {
+                    await using var scope = scopes.CreateAsyncScope();
+                    var db = scope.ServiceProvider.GetRequiredService&lt;AppDbContext&gt;();
+                    await db.Database.ExecuteSqlRawAsync("SELECT 1", token);
+                });
+
+            Ready = true;                        // теперь readiness отдаёт 200
+            log.LogInformation("прогрев завершён");
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "прогрев не удался");   // readiness останется false → трафик не пойдёт
+        }
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><code>SELECT 1</code> через EF прогревает и пул, и модель: первый запрос строит метаданные, дальше
+        они кэшируются в процессе.</li>
+      <li>Health-проверка «ready» возвращает <code>Unhealthy</code>, пока <code>Ready == false</code>: трафик
+        не пойдёт.</li>
+      <li>В Kubernetes для этого есть <code>startupProbe</code> (даёт время, не убивая) и
+        <code>readinessProbe</code> (держит вне трафика до готовности).</li>
+    </ul>
+
+    <h2>Корректная остановка: как не порвать запросы при выкатке</h2>
+    <div class="codewrap">
+      <pre><code class="language-text">1. SIGTERM → приложение получает ApplicationStopping
+2. readiness становится false  → балансировщик перестаёт слать новое
+3. «дренаж»: текущие запросы доигрываются (обычно 5–10 с)
+4. StopAsync у BackgroundService → фоновые задачи отменяются по CancellationToken
+5. Dispose: пулы соединений, буферы, клиенты
+6. если не успели за ShutdownTimeout → SIGKILL (жёстко)</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// сколько времени даём на дренаж (по умолчанию 30 с)
+builder.Services.Configure&lt;HostOptions&gt;(o =&gt;
+    o.ShutdownTimeout = TimeSpan.FromSeconds(20));
+
+// фоновый сервис обязан слушать токен остановки
+public sealed class ImportWorker : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await ImportNextBatchAsync(ct);       // отмена дойдёт и внутрь
+        }
+    }
+}</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Почему запросы всё равно рвутся</span>
+      <ul>
+        <li><strong>Балансировщик узнаёт о завершении не мгновенно.</strong> Между «получили SIGTERM» и
+          «трафик перестал идти» проходят секунды. Решение: сначала readiness → false, подождать 5–10 с,
+          и только потом останавливаться (в Kubernetes — <code>preStop</code> с задержкой).</li>
+        <li><strong>Внешний таймаут меньше внутреннего.</strong> Правило:
+          <code>terminationGracePeriodSeconds</code> (например 45 с) должно быть <em>больше</em>
+          <code>ShutdownTimeout</code> (20 с), иначе платформа убьёт процесс раньше.</li>
+        <li><strong>Задача не слушает отмену.</strong> Если внутри цикл без проверки токена, работу всё равно
+          потеряют. Долгие операции должны быть возобновляемыми и идемпотентными (гл. 26, 31).</li>
+      </ul>
+    </div>
+
+    <h2>Rate limiting: защита от перегрузки</h2>
+    <p>Встроенный middleware (.NET 7+) ограничивает входящий трафик. Алгоритм выбирается по задаче:</p>
+    <table>
+      <tr><th>Алгоритм</th><th>Как работает</th><th>Когда брать</th></tr>
+      <tr><td>Fixed window</td><td>N запросов на окно (например, 100 в минуту)</td><td>Простые квоты,
+        биллинг</td></tr>
+      <tr><td>Sliding window</td><td>Окно «съезжает», без всплеска на границе</td><td>Плавные лимиты для
+        API</td></tr>
+      <tr><td>Token bucket</td><td>Копятся «токены», запрос тратит один: есть средняя скорость и запас</td>
+        <td>Разрешить короткие всплески</td></tr>
+      <tr><td>Concurrency</td><td>Не больше N одновременных запросов</td><td>Защита от медленных клиентов и
+        тяжёлых эндпоинтов</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddRateLimiter(o =&gt;
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    // лимит на выгрузку, ключ — пользователь (или IP, если аноним)
+    o.AddPolicy("export", ctx =&gt;
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.User.Identity?.Name
+                          ?? ctx.Connection.RemoteIpAddress?.ToString() ?? "anon",
+            factory: _ =&gt; new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,                       // 5 выгрузок…
+                Window      = TimeSpan.FromMinutes(1), // …в минуту
+                QueueLimit  = 0                        // не копим: сразу 429
+            }));
+});
+
+app.UseRateLimiter();
+app.MapGet("/export", ExportAsync).RequireRateLimiting("export");</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Лимитер в памяти ≠ общий лимит</span>
+      <p>Встроенный rate limiter считает <strong>на каждой реплике отдельно</strong>: при 5 репликах и лимите
+        «100 в минуту» клиент фактически получит до 500. Для общего лимита нужен счётчик вне процесса
+        (Redis, API-gateway, ingress). Внутри реплики лимитер полезен и так — он защищает конкретный процесс
+        от перегрузки.</p>
+    </div>
+
+    <h2>Что ломается, когда реплик становится больше одной</h2>
+    <table>
+      <tr><th>Что было нормально на одной реплике</th><th>Что происходит на трёх</th><th>Решение</th></tr>
+      <tr><td>Миграции EF Core при старте</td><td>три реплики одновременно применяют миграции → блокировки и
+        ошибки</td><td>миграции — отдельным шагом выкатки (job/init container), а не в старте приложения</td></tr>
+      <tr><td><code>BackgroundService</code> для периодической задачи</td><td>задача выполняется трижды</td>
+        <td>отдельный воркер, очередь (гл. 26) или выбор лидера</td></tr>
+      <tr><td><code>SemaphoreSlim</code> или <code>lock</code> для «не больше N»</td><td>лимит работает
+        внутри реплики, суммарно — N × реплики</td><td>лимит на входе (rate limiter, gateway) или
+        распределённый семафор</td></tr>
+      <tr><td>Локальный кэш</td><td>реплики отдают разные данные, инвалидация не доходит</td><td>общий кэш
+        или короткий TTL, когда расхождение допустимо (гл. 25)</td></tr>
+      <tr><td>Счётчик метрик в памяти</td><td>цифры «прыгают» между репликами, общая сумма не считается</td>
+        <td>сбор по каждой реплике и агрегация в системе мониторинга (гл. 21)</td></tr>
+      <tr><td>Файлы, записанные локально</td><td>файл доступен только с одной реплики</td><td>объектное
+        хранилище, БД, stdout (гл. 20)</td></tr>
+    </table>
+
+    <h2>По чему масштабировать и что считать</h2>
+    <ul>
+      <li><strong>CPU — плохой сигнал для I/O-bound сервиса:</strong> он может стоять на 20 %, пока всё
+        ждёт базу; масштабирование по CPU не поможет.</li>
+      <li><strong>Лучше масштабировать по RPS и задержке</strong> (p95) относительно SLO, а для воркеров — по
+        длине очереди.</li>
+      <li><strong>Держите запас:</strong> при 70 % CPU новый трафик уже не успевает — ориентир 50–70 %, а не
+        «пока не упадёт».</li>
+      <li><strong>Помните про общий ресурс:</strong> 20 реплик × пул 100 соединений = 2000 соединений к
+        PostgreSQL, а это может быть больше, чем <code>max_connections</code> (гл. 23).</li>
+      <li><strong>Kestrel-лимиты</strong> (<code>MaxConcurrentConnections</code>,
+        <code>MaxRequestBodySize</code>) — последняя линия защиты процесса, но не замена лимитеру.</li>
+    </ul>
+
+    <h2>Чек-лист готовности к двум репликам</h2>
+    <ol>
+      <li>Ничего важного не хранится в памяти процесса (сессии, кэш, счётчики, файлы).</li>
+      <li>Есть <code>/health/live</code> — без зависимостей, и <code>/health/ready</code> — с ними.</li>
+      <li>Readiness возвращает false, пока идёт прогрев пула/модели.</li>
+      <li>Graceful shutdown настроен: <code>ShutdownTimeout</code> меньше grace period платформы.</li>
+      <li>Фоновые задачи идемпотентны или выполняются одним экземпляром.</li>
+      <li>Миграции БД не запускаются из каждого экземпляра приложения.</li>
+      <li>Лимиты и счётчики не умножаются на число реплик (или это осознанное решение).</li>
+      <li>Логи в stdout, метрики с меткой реплики, трейсы сквозные (гл. 20, 21).</li>
+      <li>Повторные запросы клиента безопасны: ключ идемпотентности на изменяющих операциях (гл. 31).</li>
+      <li>У внешних зависимостей есть таймауты, повторы и предохранитель (гл. 27).</li>
+    </ol>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Горизонтальное масштабирование требует <strong>stateless</strong>-сервиса: всё «помнимое» — в
+          БД, Redis или подписанном токене.</li>
+        <li><strong>Liveness ≠ readiness:</strong> зависимости проверяем только в readiness, иначе чужая
+          авария перезапустит все реплики.</li>
+        <li>Новая реплика должна <strong>прогреться</strong> (пул, модель EF, JIT), прежде чем получать
+          трафик.</li>
+        <li>Корректная остановка: readiness → false, дренаж, отмена фоновых задач, dispose;
+          <code>ShutdownTimeout</code> меньше, чем grace period платформы.</li>
+        <li>Встроенный rate limiter считает <strong>в памяти реплики</strong>; общий лимит — на gateway или
+          в Redis.</li>
+        <li>Масштабируйте по RPS/задержке/очереди, а не по «среднему CPU», и следите за общими ресурсами
+          (соединения к БД).</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="ch27-resilience.html">← <span class="sp">Глава 27. Устойчивость внешних вызовов</span></a>
       <a href="ch29-grpc-rest-brokers.html"><span class="sp">Глава 29. REST, gRPC и брокеры сообщений</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
+
+
+

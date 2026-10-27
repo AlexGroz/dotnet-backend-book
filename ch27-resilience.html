@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 27 · Устойчивость внешних вызовов</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,357 @@
   <div class="chapter">
     <div class="part">.NET · Часть VII · Эксплуатация</div>
     <h1>Глава 27. Устойчивость внешних вызовов</h1>
-    <p class="sublead">Таймауты, retry, circuit breaker, IHttpClientFactory</p>
+    <p class="sublead">Свой сервис редко падает от своих ошибок — он падает от чужих. Разберём таймауты,
+      повторы, предохранитель, изоляцию и правильный <code>HttpClient</code>: что делать, когда зависимость
+      тормозит, отвечает 500 или исчезает совсем.</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Что именно ломается</h2>
+    <p>У внешнего вызова (чужой API, платёжный шлюз, брокер, база) четыре режима отказа, и они требуют
+      <em>разных</em> реакций:</p>
+    <table>
+      <tr><th>Режим</th><th>Как выглядит</th><th>Что происходит с нашим сервисом, если ничего не делать</th></tr>
+      <tr><td><strong>Медленно</strong></td><td>ответ за 5–30 с вместо 100 мс</td><td>запросы висят и занимают
+        потоки/соединения — растёт очередь, потом пул, потом отказывает весь сервис (гл. 9)</td></tr>
+      <tr><td><strong>Ошибки</strong></td><td><code>500</code>, <code>503</code>, обрывы TCP</td><td>каждый
+        клиентский запрос — ошибка; при повторах нагрузка на упавшую зависимость растёт (шторм повторов)</td></tr>
+      <tr><td><strong>Полный отказ</strong></td><td>DNS не резолвится, порт закрыт</td><td>быстрые ошибки — не так
+        страшно, но пользователь видит 500</td></tr>
+      <tr><td><strong>«Полуживой»</strong></td><td>часть запросов проходит, часть висит</td><td>самый опасный: без
+        таймаута и предохранителя сервис деградирует постепенно и незаметно</td></tr>
+    </table>
+    <div class="box note">
+      <span class="t">Главная мысль главы</span>
+      <p>Устойчивость — не «сделать так, чтобы зависимость не падала» (мы на неё не влияем), а
+        <strong>пережить её отказ предсказуемо</strong>: быстро отказать, не потратить все ресурсы,
+        восстановиться автоматически.</p>
     </div>
+
+    <h2>Правило №1: у каждого вызова есть таймаут</h2>
+    <p>Без таймаута «медленная зависимость» превращается в «наш сервис не отвечает»: запрос занимает поток
+      (гл. 8), соединение и место в пуле, а результата нет. <code>HttpClient</code> по умолчанию ждёт
+      <strong>100 секунд</strong> — для API это вечность.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ бесконечное ожидание: если зависимость «полуживая», запрос займёт до 100 с
+var response = await _client.GetAsync("/stock/42", ct);
+
+// ✔ дедлайн на конкретный вызов: не больше 2 секунд
+using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+cts.CancelAfter(TimeSpan.FromSeconds(2));
+
+try
+{
+    var response = await _client.GetAsync("/stock/42", cts.Token);
+}
+catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+{
+    // отменил таймаут, а не клиент → это ошибка зависимости, её можно повторить
+    _logger.LogWarning("inventory: таймаут 2 с");
+    throw new TimeoutException("inventory timeout");
+}</code></pre>
+    </div>
+    <ul>
+      <li><code>CreateLinkedTokenSource</code> — важно: таймаут должен <strong>дополнять</strong> клиентский
+        токен, а не заменять его. Иначе отмена запроса пользователем не остановит вызов.</li>
+      <li>Различайте причины: если <code>ct.IsCancellationRequested</code> — ушёл клиент (не ошибка), иначе —
+        таймаут зависимости (ошибка, её можно повторить).</li>
+      <li><strong>Таймаут на клиенте не отменяет работу на сервере</strong>: зависимость может продолжать
+        обрабатывать запрос. Поэтому для операций с побочными эффектами нужен ключ идемпотентности (гл. 31).</li>
+    </ul>
+
+    <h2>Повтор (retry): когда помогает, а когда добивает</h2>
+    <p>Повтор помогает только на <strong>временных</strong> сбоях. Правила, без которых retry делает хуже:</p>
+    <table>
+      <tr><th>Правило</th><th>Почему</th></tr>
+      <tr><td>Повторять только транзиентные ошибки: таймаут, обрыв соединения, <code>408</code>,
+        <code>429</code>, <code>500</code>, <code>502</code>, <code>503</code>, <code>504</code></td>
+        <td><code>400</code>, <code>401</code>, <code>403</code>, <code>404</code>, <code>409</code>,
+        <code>422</code> повтор не исправит — ответ будет тем же, только нагрузка вырастет</td></tr>
+      <tr><td>Повторять только <strong>идемпотентные</strong> операции (<code>GET</code>, <code>PUT</code>,
+        <code>DELETE</code>) или <code>POST</code> с ключом идемпотентности</td><td>иначе «повтор» создаст
+        второй платёж/заказ</td></tr>
+      <tr><td>Пауза растёт: 100 мс → 200 → 400 (экспонента) + <strong>jitter</strong></td><td>без jitter все
+        клиенты повторяют одновременно и добивают зависимость «волной»</td></tr>
+      <tr><td>Ограничить число попыток и общее время</td><td>3 попытки по 2 с при дедлайне 2 с — это не
+        retry, а гарантированный таймаут</td></tr>
+      <tr><td>Учитывать <code>Retry-After</code></td><td><code>429</code>/<code>503</code> часто говорят,
+        сколько ждать: игнорировать — значит нарушать лимит снова</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Polly v8: политика повторов для не-HTTP зависимости
+var pipeline = new ResiliencePipelineBuilder()
+    .AddRetry(new RetryStrategyOptions
+    {
+        MaxRetryAttempts = 3,                                   // всего 4 попытки
+        BackoffType = DelayBackoffType.Exponential,             // 100 мс, 200 мс, 400 мс…
+        UseJitter = true,                                       // ± случайный разброс
+        ShouldHandle = new PredicateBuilder()
+            .Handle&lt;TimeoutException&gt;()                         // таймаут — можно
+            .Handle&lt;HttpRequestException&gt;(e =&gt; IsTransient(e))  // сеть/5xx — можно
+    })
+    .Build();
+
+await pipeline.ExecuteAsync(async ct =&gt; await CallAsync(ct), ct);</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Три способа испортить retry</span>
+      <ul>
+        <li><strong>Повторять всё подряд,</strong> включая <code>400</code> и <code>404</code>: ошибка не
+          исчезнет, а запросов станет в 4 раза больше.</li>
+        <li><strong>Retry поверх retry:</strong> политика на <code>HttpClient</code> + своя в сервисе + ещё одна
+          в шлюзе → 3×3×3 = 27 запросов на один клиентский. Повтор должен быть <strong>в одном месте</strong>
+          (обычно — в HTTP-клиенте).</li>
+        <li><strong>Retry на <code>POST</code> без ключа идемпотентности:</strong> «попробуем ещё раз» = второй
+          заказ. Решение — <code>Idempotency-Key</code> и дедупликация на стороне получателя (гл. 31).</li>
+      </ul>
+    </div>
+
+    <h2>Предохранитель (circuit breaker): перестать биться в закрытую дверь</h2>
+    <p>Retry лечит <em>редкие</em> сбои. Если зависимость лежит целиком, повторы только тратят наши ресурсы:
+      каждый запрос ждёт таймаут, и клиенты нашего сервиса ждут вместе с ним. Предохранитель разрывает цепь:</p>
+    <table>
+      <tr><th>Состояние</th><th>Что делает</th><th>Как переходит дальше</th></tr>
+      <tr><td><strong>Closed</strong> (замкнут)</td><td>Пропускает вызовы и считает долю ошибок</td>
+        <td>Превышен порог ошибок → <strong>Open</strong></td></tr>
+      <tr><td><strong>Open</strong> (разомкнут)</td><td><strong>Сразу</strong> отвечает ошибкой, не вызывая
+        зависимость</td><td>Через <code>BreakDuration</code> → <strong>Half-Open</strong></td></tr>
+      <tr><td><strong>Half-Open</strong></td><td>Пропускает пробные вызовы</td><td>Успех → Closed;
+        ошибка → снова Open</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var breaker = new ResiliencePipelineBuilder()
+    .AddCircuitBreaker(new CircuitBreakerStrategyOptions
+    {
+        FailureRatio = 0.5,                          // 50 % ошибок…
+        MinimumThroughput = 20,                      // …минимум на 20 вызовах
+        SamplingDuration = TimeSpan.FromSeconds(30), // в окне 30 секунд
+        BreakDuration = TimeSpan.FromSeconds(10)     // разомкнут 10 секунд
+    })
+    .Build();</code></pre>
+    </div>
+    <p><strong>Что возвращать, когда цепь разомкнута:</strong> не «500 — всё плохо», а понятную деградацию:
+      <code>503</code> с <code>Retry-After</code>, данные из кэша, упрощённый ответ. Предохранитель существует
+      для того, чтобы <em>мы</em> пережили отказ соседа, а не чтобы красиво логировать исключения.</p>
+    <div class="box note">
+      <span class="t">Почему без half-open нельзя</span>
+      <p>Если после размыкания никогда не пробовать снова, сервис останется «сломанным» даже после того, как
+        зависимость восстановилась. Half-open — это и есть проверка «а вдруг уже можно».</p>
+    </div>
+
+    <h2>Изоляция (bulkhead): одна зависимость не должна съесть весь сервис</h2>
+    <p>Если платёжный шлюз «подвис», наши запросы к нему копятся и занимают все ресурсы — и сервис перестаёт
+      обслуживать <em>остальные</em> операции, хотя они ни в чём не виноваты. Изоляция — это лимит на каждую
+      зависимость отдельно:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class PaymentClient(HttpClient http)
+{
+    // не больше 10 одновременных вызовов к платёжному шлюзу
+    private static readonly SemaphoreSlim Gate = new(initialCount: 10, maxCount: 10);
+
+    public async Task&lt;PaymentResult&gt; PayAsync(Payment p, CancellationToken ct)
+    {
+        if (!await Gate.WaitAsync(TimeSpan.FromSeconds(1), ct))   // не ждём бесконечно место
+            throw new TimeoutException("payment: очередь переполнена");
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(2));             // и таймаут на сам вызов
+            return await http.PostAsJsonAsync("/pay", p, cts.Token) is var r
+                ? await r.Content.ReadFromJsonAsync&lt;PaymentResult&gt;(cts.Token)!
+                : throw new HttpRequestException();
+        }
+        finally
+        {
+            Gate.Release();                                        // обязательно в finally
+        }
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>Зачем:</strong> «медленный платёж» перестаёт забирать потоки у «быстрого каталога» — у каждой
+        зависимости свой бюджет.</li>
+      <li><strong>Сколько ставить:</strong> примерно столько, сколько зависимость обещает держать (её лимит
+        конкурентности) и сколько нужно, чтобы не копить очередь.</li>
+      <li><strong>Что вернуть при переполнении:</strong> <code>503</code>/<code>429</code> с понятным текстом, а
+        не «висим в ожидании освобождения слота».</li>
+    </ul>
+
+    <h2><code>HttpClient</code>: как не убить соединения и DNS</h2>
+    <p>Классическая ошибка — создавать клиент на каждый вызов:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ новый HttpClient на каждый запрос: каждый раз новый пул сокетов
+using var client = new HttpClient();
+await client.GetAsync(url);</code></pre>
+    </div>
+    <ul>
+      <li>Каждый <code>new HttpClient()</code> создаёт свой пул соединений. Сокеты после закрытия остаются в
+        состоянии <code>TIME_WAIT</code> (десятки секунд), и при сотнях запросов в секунду заканчиваются
+        эфемерные порты — падает <em>весь</em> исходящий трафик, а ошибка выглядит как «нет свободных
+        сокетов».</li>
+      <li>Один долгоживущий <code>HttpClient</code> — тоже не решение: он держит DNS-запись навсегда и не увидит
+        переезд зависимости на новый IP.</li>
+      <li><strong>Правильно — <code>IHttpClientFactory</code></strong> (гл. 4 паттернов): фабрика переиспользует
+        обработчики и периодически пересоздаёт их.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services
+    .AddHttpClient&lt;PaymentClient&gt;(c =&gt;
+    {
+        c.BaseAddress = new Uri("https://pay.internal");
+        c.Timeout = Timeout.InfiniteTimeSpan;   // таймауты задаёт resilience-пайплайн (гл. ниже)
+    })
+    .ConfigurePrimaryHttpMessageHandler(() =&gt; new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),  // перечитать DNS через 5 минут
+        MaxConnectionsPerServer  = 20,                       // не открывать бесконечно много
+        ConnectTimeout           = TimeSpan.FromSeconds(2)   // отдельно — установка соединения
+    });</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Три таймаута, которые надо различать</span>
+      <ul>
+        <li><code>ConnectTimeout</code> — сколько ждать TCP/TLS-соединение.</li>
+        <li>Таймаут попытки (<code>AttemptTimeout</code>) — сколько ждать ответ на один HTTP-запрос.</li>
+        <li>Общий таймаут (<code>TotalRequestTimeout</code>) — сколько времени есть на <em>все</em> попытки
+          вместе, включая паузы между ними.</li>
+      </ul>
+      <p>Если задать только <code>HttpClient.Timeout = 2s</code> и при этом 3 попытки — ретраи не успеют
+        начаться: первый же таймаут закроет весь вызов.</p>
+    </div>
+
+    <h2>Дедлайн на весь запрос, а не на каждый вызов</h2>
+    <p>Клиент ждёт ответ эндпоинта, скажем, не дольше 2 секунд (SLO). За это время мы успеваем сделать три
+      внешних вызова. Считаем бюджет:</p>
+    <table>
+      <tr><th>Что</th><th>Сколько</th><th>Итог</th></tr>
+      <tr><td>Проверка остатка на складе</td><td>до 700 мс (1 попытка)</td><td>0,7 с</td></tr>
+      <tr><td>Списание в платёжном шлюзе</td><td>до 900 мс (2 попытки по 400 мс)</td><td>1,6 с</td></tr>
+      <tr><td>Запись заказа в БД</td><td>до 300 мс</td><td>1,9 с</td></tr>
+      <tr><td><strong>Итого</strong></td><td></td><td><strong>1,9 с — влезает в 2 с</strong></td></tr>
+    </table>
+    <p>Если бы каждому вызову поставили «удобные» 2 секунды, худший случай был бы 6 секунд. Поэтому
+      <strong>дедлайн спускается сверху</strong>: остаток бюджета передаётся в зависимость (в gRPC — штатный
+      <code>grpc-timeout</code>, в HTTP — свой заголовок вроде <code>X-Request-Timeout-Ms</code>), а всё, что
+      не успевает, отменяется через <code>CancellationToken</code>, а не «дорабатывает в фоне».</p>
+
+    <h2>Собираем вместе: пайплайн для HTTP-клиента</h2>
+    <p>В .NET 8 есть готовая связка: <code>IHttpClientFactory</code> + <code>Microsoft.Extensions.Http.Resilience</code>.
+      Порядок слоёв не случайный — он идёт <strong>снаружи внутрь</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">запрос
+  │
+  ├─ Rate limiter        не больше N одновременных вызовов и M в секунду
+  ├─ Total timeout       весь вызов (все попытки) ≤ 3 с
+  │    ├─ Retry          до 3 попыток, экспонента + jitter
+  │    │    ├─ Breaker   50 % ошибок на 20 вызовах → пауза 10 с
+  │    │    │    └─ Attempt timeout    один запрос ≤ 1 с
+  │    │    │         └─ HTTP
+  ▼    ▼    ▼    ▼
+ответ или ошибка</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services
+    .AddHttpClient&lt;InventoryClient&gt;(c =&gt;
+    {
+        c.BaseAddress = new Uri("https://inventory.internal");
+        c.Timeout = Timeout.InfiniteTimeSpan;      // не дублировать общий таймаут
+    })
+    .AddStandardResilienceHandler(o =&gt;
+    {
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(3);   // весь вызов
+        o.AttemptTimeout.Timeout      = TimeSpan.FromSeconds(1);   // одна попытка
+        o.Retry.MaxRetryAttempts      = 3;
+        o.Retry.BackoffType           = DelayBackoffType.Exponential;
+        o.Retry.UseJitter             = true;
+        o.CircuitBreaker.FailureRatio      = 0.5;                  // 50 % ошибок
+        o.CircuitBreaker.MinimumThroughput = 20;                   // минимум на 20 вызовах
+        o.CircuitBreaker.SamplingDuration  = TimeSpan.FromSeconds(30);
+        o.CircuitBreaker.BreakDuration     = TimeSpan.FromSeconds(10);
+    });</code></pre>
+    </div>
+    <ul>
+      <li><strong>Total timeout снаружи retry</strong> — иначе каждая попытка получит полный бюджет и общий
+        вызов растянется втрое.</li>
+      <li><strong>Attempt timeout внутри</strong> — чтобы одна «зависшая» попытка не съела весь бюджет.</li>
+      <li><strong>Rate limiter снаружи</strong> — ограничивает число одновременных вызовов <em>до</em> того, как
+        начнут работать таймауты.</li>
+      <li>Для не-HTTP зависимостей (брокер, чужой SDK) то же собирается вручную через Polly:
+        <code>ResiliencePipelineBuilder</code> с retry → breaker → timeout.</li>
+    </ul>
+
+    <h2>Что должно быть видно в метриках и логах</h2>
+    <ul>
+      <li><strong>Задержка по каждой зависимости</strong> (гистограмма, p95/p99) — гл. 21. Средняя скрывает
+        «хвост», а именно он и валит сервис.</li>
+      <li><strong>Число попыток</strong> и доля запросов, завершившихся после повтора: рост = зависимость
+        деградирует.</li>
+      <li><strong>Состояние предохранителя</strong>: переход в Open — событие уровня warning, его надо видеть на
+        графике, а не в чате.</li>
+      <li><strong>Таймауты отдельно от отмены клиентом</strong> — иначе метрика ошибок врёт: ушедший клиент не
+        должен выглядеть как сбой зависимости.</li>
+      <li><strong>Насыщение</strong>: занятость слотов изоляции и пула соединений — это то, что превращает
+        «медленную зависимость» в «наш отказ» (гл. 23).</li>
+    </ul>
+
+    <h2>Частые ошибки</h2>
+    <table>
+      <tr><th>Ошибка</th><th>Чем оборачивается</th><th>Как правильно</th></tr>
+      <tr><td><code>new HttpClient()</code> на каждый вызов</td><td>исчерпание сокетов/портов, ошибки DNS и TLS
+        под нагрузкой</td><td><code>IHttpClientFactory</code> + <code>PooledConnectionLifetime</code></td></tr>
+      <tr><td>Нет таймаута (или 100 с по умолчанию)</td><td>зависшие запросы съедают пул и потоки</td>
+        <td>attempt + total timeout, дедлайн сверху</td></tr>
+      <tr><td>Retry на всё подряд</td><td>шторм повторов, второй заказ/платёж</td><td>только транзиентные +
+        ключ идемпотентности</td></tr>
+      <tr><td>Retry без jitter</td><td>синхронные «волны» повторов</td><td>экспонента + случайный разброс</td></tr>
+      <tr><td>Breaker без half-open</td><td>сервис остаётся «сломанным» после восстановления зависимости</td>
+        <td>half-open + пробные запросы</td></tr>
+      <tr><td>Проверка зависимостей в liveness</td><td>перезапуск всех подов из-за чужого сбоя</td>
+        <td>liveness — «процесс жив», зависимости — в readiness (гл. 28)</td></tr>
+      <tr><td>Синхронное ожидание (<code>.Result</code>)</td><td>блокировка потоков и голодание пула (гл. 9)</td>
+        <td><code>async</code> до конца (гл. 12)</td></tr>
+    </table>
+
+    <h2>Что спросят на интервью</h2>
+    <ol>
+      <li>Чем отличается таймаут на клиенте от отмены работы на сервере?</li>
+      <li>Почему нельзя ретраить любой <code>POST</code>?</li>
+      <li>Зачем нужен circuit breaker, если уже есть retry?</li>
+      <li>Какие состояния у предохранителя и что такое half-open?</li>
+      <li>Почему <code>new HttpClient()</code> в цикле — проблема и что делать?</li>
+      <li>Что такое дедлайн запроса и как передать его в зависимость?</li>
+      <li>Как ограничить параллелизм к одной зависимости, не задев остальные?</li>
+    </ol>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Таймаут есть у каждого вызова</strong>; таймаут попытки, общий таймаут и
+          <code>ConnectTimeout</code> — разные вещи.</li>
+        <li><strong>Retry</strong> — только транзиентные ошибки и идемпотентные операции, с экспонентой и
+          jitter, в одном месте.</li>
+        <li><strong>Breaker</strong> превращает медленный отказ в быстрый: closed → open → half-open →
+          closed.</li>
+        <li><strong>Изоляция</strong> (лимит параллелизма на зависимость) не даёт одному сбою съесть весь
+          сервис.</li>
+        <li><strong><code>IHttpClientFactory</code></strong>, <code>PooledConnectionLifetime</code>,
+          <code>MaxConnectionsPerServer</code> — минимум для <code>HttpClient</code>.</li>
+        <li>Дедлайн считается на весь запрос и спускается вниз; таймауты складываются, а не «выбираются
+          удобные».</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="ch26-channels.html">← <span class="sp">Глава 26. Очереди и фоновая обработка</span></a>
       <a href="ch28-scaling.html"><span class="sp">Глава 28. Масштабирование и отказоустойчивость</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
+
+
+
+
