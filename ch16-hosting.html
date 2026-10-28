@@ -99,6 +99,68 @@ app.Run();
     <p>Хост передаёт <code>CancellationToken</code>, по которому сервисы должны корректно завершиться
       (graceful shutdown): дописать данные, отпустить соединения. Это важно в контейнерах и при деплое.</p>
 
+    <h2>Фоновые сервисы: <code>IHostedService</code> и <code>BackgroundService</code></h2>
+    <p>Хост умеет не только «поднять веб-сервер»: он же запускает и останавливает <strong>фоновые сервисы</strong>.
+      Это любые классы, зарегистрированные как <code>AddHostedService&lt;T&gt;()</code>. Они запускаются после
+      старта хоста и останавливаются при его остановке.</p>
+    <table>
+      <tr><th></th><th><code>IHostedService</code></th><th><code>BackgroundService</code></th></tr>
+      <tr><td>Что это</td><td>Интерфейс из двух методов: <code>StartAsync</code> и <code>StopAsync</code></td>
+        <td>Базовый класс, который реализует <code>IHostedService</code> за вас и добавляет
+        <code>ExecuteAsync</code></td></tr>
+      <tr><td>Когда брать</td><td>Нужен полный контроль над стартом/остановкой</td><td>Обычный «цикл работы
+        приложения»: читать очередь, обрабатывать пачки</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class ImportWorker(
+    IServiceScopeFactory scopes,      // singleton → фабрика scope, а не DbContext (гл. 15)
+    ILogger&lt;ImportWorker&gt; log) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)     // токен остановки хоста
+        {
+            try
+            {
+                await using var scope = scopes.CreateAsyncScope();          // свой scope на итерацию
+                var db = scope.ServiceProvider.GetRequiredService&lt;AppDbContext&gt;();
+
+                await ImportNextBatchAsync(db, stoppingToken);              // отмена дойдёт внутрь
+                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);   // пауза, прерываемая отменой
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;                                                      // штатная остановка
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "итерация импорта упала — продолжаем");     // не роняем хост
+            }
+        }
+    }
+}
+
+// регистрация
+builder.Services.AddHostedService&lt;ImportWorker&gt;();</code></pre>
+    </div>
+    <ul>
+      <li><strong>Жизненный цикл:</strong> <code>StartAsync</code> вызывается при старте хоста,
+        <code>ExecuteAsync</code> работает в фоне, <code>StopAsync</code> — при остановке. Асинхронная часть
+        <code>StartAsync</code> завершается сразу после запуска задачи, поэтому «долгая инициализация» в
+        <code>ExecuteAsync</code> не блокирует старт приложения.</li>
+      <li><strong>Токен остановки</strong> (<code>stoppingToken</code>) приходит от хоста: в контейнере — по
+        <code>SIGTERM</code>. Пока задача его слушает, остановка происходит быстро; если игнорировать —
+        хост подождёт <code>ShutdownTimeout</code> и убьёт процесс (гл. 28).</li>
+      <li><strong>Исключение из <code>ExecuteAsync</code></strong> по умолчанию <strong>останавливает хост</strong>
+        (<code>BackgroundServiceExceptionBehavior.StopHost</code>): фоновый сервис не должен падать молча.
+        Поэтому «каждая итерация в своём try/catch», а не «весь цикл в одном».</li>
+      <li><strong>Scope:</strong> фоновый сервис — singleton, поэтому scoped-сервисы (<code>DbContext</code>)
+        берутся через <code>IServiceScopeFactory</code> на каждую единицу работы, иначе будет captive dependency
+        (гл. 15, паттерны гл. 4).</li>
+      <li><strong>Не <code>Task.Run</code> в контроллере</strong> и не <code>_ = …</code>: работа должна быть
+        зарегистрирована в хосте, чтобы её можно было остановить и увидеть её ошибки (C# гл. 10).</li>
+    </ul>
+
     <div class="box gold">
       <span class="t">★ Что запомнить</span>
       <p><code>Program.cs</code> — это «сборочный цех»: <strong>создать билдер → зарегистрировать сервисы →

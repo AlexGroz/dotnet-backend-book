@@ -98,11 +98,94 @@ app.MapGet("/orders/{id:int}", async (int id, OrderService svc, CancellationToke
         другой поток пула + добавляет аллокацию. Async оправдан там, где есть настоящее ожидание ввода-вывода.</p>
     </div>
 
-    <h2>Отмена операций</h2>
-    <p>Асинхронные методы принимают <code>CancellationToken</code> — это позволяет прекратить работу, если
-      клиент отключился или истёк таймаут. Не игнорируйте его: под нагрузкой это освобождает ресурсы.</p>
+    <h2>Отмена операций: <code>CancellationToken</code></h2>
+    <p><code>CancellationToken</code> — это <strong>структура-флаг</strong>: «работу пора прекратить».
+      Сам токен <em>ничего не отменяет</em> — он лишь сообщает об отмене, а код должен это заметить и
+      завершиться. Такая отмена называется <strong>кооперативной</strong>: никого нельзя убить снаружи, можно
+      только попросить.</p>
+
+    <h3>Кто создаёт токен</h3>
+    <table>
+      <tr><th>Где</th><th>Кто создаёт</th><th>Когда срабатывает</th></tr>
+      <tr><td>ASP.NET Core, обработчик запроса</td><td>фреймворк — у каждого запроса свой токен</td>
+        <td>клиент отключился; сервер останавливается (<code>SIGTERM</code>)</td></tr>
+      <tr><td>Фоновая задача (<code>BackgroundService</code>)</td><td>хост — токен остановки приложения</td>
+        <td><code>StopAsync</code> / завершение процесса</td></tr>
+      <tr><td>Свой таймаут</td><td>вы: <code>new CancellationTokenSource(TimeSpan)</code> или
+        <code>CancelAfter</code></td><td>истекло время</td></tr>
+      <tr><td>Объединение</td><td>вы: <code>CreateLinkedTokenSource(ct, cts.Token)</code></td>
+        <td>сработает любой из двух</td></tr>
+    </table>
+    <p><strong>Токен — не «магическая» переменная.</strong> Это обычный параметр метода; <code>ct</code> —
+      просто общепринятое сокращение от <code>cancellationToken</code>. Имя может быть любым, но менять его
+      без причины не стоит: <code>ct</code> узнаётся с первого взгляда.</p>
+
+    <h3>Как он передаётся</h3>
+    <p>Токен идёт <strong>по цепочке вызовов</strong>: контроллер → сервис → репозиторий → EF Core / Npgsql /
+      <code>HttpClient</code>. Каждый слой передаёт его дальше, а не создаёт свой:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await _repo.GetByIdAsync(id, ct); // ct пробрасываем во все вложенные вызовы</code></pre>
+      <pre><code class="language-csharp">[HttpGet("/orders/{id:guid}")]
+public async Task&lt;IActionResult&gt; Get(Guid id, CancellationToken ct)   // ← токен дал фреймворк
+{
+    var order = await _service.GetAsync(id, ct);                     // передали в сервис
+    return order is null ? NotFound() : Ok(order);
+}
+
+public Task&lt;Order?&gt; GetAsync(Guid id, CancellationToken ct) =&gt;
+    _db.Orders.AsNoTracking().FirstOrDefaultAsync(o =&gt; o.Id == id, ct);   // и в EF Core
+
+// наружу (HTTP-зависимость) — тоже с токеном
+var response = await _client.GetAsync(url, ct);</code></pre>
+    </div>
+    <ul>
+      <li><strong>Не храните токен в DI</strong> (singleton/scoped на всё приложение): токен относится к
+        <em>конкретной операции</em>, а не к сервису.</li>
+      <li><strong>Не используйте <code>CancellationToken.None</code></strong> в публичном API «по умолчанию, если
+        не передали» — так отмену молча теряют все вызывающие. Лучше требовать параметр (или помечать
+        <code>ct = default</code> только для удобства тестов).</li>
+      <li><strong>Проверяйте в длинных циклах:</strong> <code>ct.ThrowIfCancellationRequested()</code> на каждой
+        итерации — иначе «отмена» заметится только после завершения всей работы.</li>
+    </ul>
+
+    <h3>Что происходит при отмене</h3>
+    <ul>
+      <li>Операция, поддерживающая отмену (EF Core, Npgsql, <code>HttpClient</code>, <code>Task.Delay</code>),
+        прерывается и бросает <code>OperationCanceledException</code> (для задач —
+        <code>TaskCanceledException</code>).</li>
+      <li><code>await</code> пробрасывает это исключение в ваш код; задача переходит в состояние
+        <code>Canceled</code>.</li>
+      <li>Это <strong>не ошибка</strong> сервиса: в ASP.NET Core, если клиент отключился, писать 500 некому —
+        такие исключения обычно не логируют как ошибку.</li>
+      <li>Поток при этом не «убивается»: он просто перестаёт ждать и возвращается в пул (гл. 9).</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// свой таймаут поверх клиентского токена: сработает то, что раньше
+using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+cts.CancelAfter(TimeSpan.FromSeconds(2));      // «не дольше 2 секунд»
+
+try
+{
+    return await _client.GetStringAsync(url, cts.Token);
+}
+catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+{
+    // отменил таймаут, а не клиент → это ошибка зависимости, её можно повторить (гл. 27)
+    throw new TimeoutException("зависимость не ответила за 2 с");
+}</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Две тонкости, на которых ошибаются</span>
+      <ul>
+        <li><strong><code>IsCancellationRequested</code> против <code>ThrowIfCancellationRequested</code>:</strong>
+          первое — «спросить флаг» (когда нужно аккуратно завершиться), второе — «бросить исключение» (когда
+          можно прерваться).</li>
+        <li><strong><code>CancellationTokenSource</code> нужно освобождать</strong> (<code>using</code>), но
+          <em>не раньше</em>, чем закончатся операции, которые им пользуются. И отменённый источник повторно не
+          используют — создают новый.</li>
+        <li><strong>Отмена ≠ немедленная остановка:</strong> код может ещё какое-то время доигрывать текущую
+          порцию (например, коммит транзакции). Поэтому в обработчиках отмену проверяют на границах шагов, а не
+          посреди критической секции.</li>
+      </ul>
     </div>
 
     <div class="box gold">

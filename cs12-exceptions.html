@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 12 · Исключения: try/catch/finally, фильтры when, свои исключения</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="csharp.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы и асинхронность</div>
+    <h1>Глава 12. Исключения: try/catch/finally, фильтры when, свои исключения</h1>
+    <p class="sublead"><code>try/catch</code> знают все, но <code>finally</code>, <code>throw;</code> против
+      <code>throw ex;</code>, фильтры <code>when (…)</code> и «когда своё исключение не нужно» — уже нет.
+      Разберём на реальных случаях из бэкенда.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что такое исключение и когда оно уместно</h2>
+    <p>Исключение — сигнал «здесь что-то пошло не так, и я не могу это исправить на месте». Оно раскручивает
+      стек до ближайшего <code>catch</code>.</p>
+    <table>
+      <tr><th>Уместно</th><th>Неуместно</th></tr>
+      <tr><td>нет строки в БД, а по контракту она должна быть</td><td>«поиск ничего не нашёл» в обычном
+        сценарии — верните <code>null</code>/<code>false</code></td></tr>
+      <tr><td>сеть/диск отказали, данные не сохранились</td><td>проверка валидации, которую и так делает
+        код</td></tr>
+      <tr><td>нарушен инвариант («сумма отрицательная»)</td><td>ожидаемый конец цикла или выход из
+        поиска</td></tr>
+    </table>
+    <div class="box note">
+      <span class="t">Почему «исключения вместо if» — плохо</span>
+      <p>Выброс исключения стоит дорого: создаётся объект, снимается <em>stack trace</em>. В горячем пути такое
+        «управление потоком» съедает больше, чем сам алгоритм.</p>
+    </div>
+
+    <h2><code>try</code> / <code>catch</code> / <code>finally</code></h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">try
+{
+    var order = await repository.GetAsync(id, ct);   // опасная часть
+    return Ok(order);
+}
+catch (TimeoutException ex)          // 1) конкретный тип — первым
+{
+    _logger.LogWarning(ex, "таймаут зависимости");
+    return StatusCode(504);
+}
+catch (Exception ex)                  // 2) общий — последним
+{
+    _logger.LogError(ex, "непредвиденная ошибка");
+    throw;                            // 3) throw; — сохраняет исходный стек
+}
+finally
+{
+    // выполнится всегда: при успехе, при исключении и при return внутри try
+    _metrics.Dec("in_flight");
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>Порядок важен:</strong> <code>catch</code> проверяются сверху вниз, поэтому конкретные типы
+        идут раньше общего — иначе общий «съест» всё.</li>
+      <li><strong><code>finally</code> выполняется всегда</strong>, в том числе при <code>return</code> внутри
+        <code>try</code>. Для ресурсов предпочтительнее <code>using</code>/<code>await using</code> — это тот же
+        <code>finally</code>, только короче.</li>
+      <li><strong><code>throw;</code> против <code>throw ex;</code></strong>: <code>throw ex;</code> обнуляет
+        стек и вы теряете место, где ошибка случилась. Внутри <code>catch</code> — только
+        <code>throw;</code>.</li>
+      <li><strong>Не логируйте и не пробрасывайте одновременно</strong> на каждом уровне: один и тот же стек
+        окажется в логе трижды. Логирует тот, кто обрабатывает, либо один раз на границе запроса.</li>
+    </ul>
+
+    <h2>Фильтры <code>when</code>: поймать не «всё такое», а «именно это»</h2>
+    <p><code>catch (Тип e) when (условие)</code> — обработчик срабатывает, только если условие истинно.
+      Главное отличие от <code>if</code> внутри <code>catch</code>: <strong>фильтр проверяется до раскрутки
+      стека</strong>. Если условие ложно, исключение выглядит так, будто этого <code>catch</code> не было:
+      стек не портится, отладчик останавливается в исходной точке.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1) различаем «отменил клиент» и «истёк наш таймаут»
+try
+{
+    return await _client.GetStringAsync(url, cts.Token);
+}
+catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+{
+    // клиент НЕ отменял → это наш таймаут, ошибку можно повторить (гл. 27 .NET-раздела)
+    throw new TimeoutException("зависимость не ответила");
+}
+// если клиент отменил — фильтр ложен, и исключение идёт дальше как обычная отмена
+
+// 2) разные HTTP-коды — разные реакции, без вложенных if
+catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
+{
+    await Task.Delay(TimeSpan.FromSeconds(1), ct);   // 429: подождать и повторить
+}
+catch (HttpRequestException ex) when (ex.StatusCode >= HttpStatusCode.InternalServerError)
+{
+    throw;                                           // 5xx: отдать наверх как есть
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>Зачем фильтр, а не <code>if</code>:</strong> с <code>if</code> исключение уже поймано, и чтобы
+        «не обрабатывать», придётся писать <code>throw;</code> — обработчик уже сработал. Фильтр просто не даёт
+        ему сработать.</li>
+      <li><strong>Проверка дешёвая и без побочных эффектов:</strong> фильтр выполняется в момент исключения.</li>
+      <li><strong>Классика бэкенда:</strong> <code>when (!ct.IsCancellationRequested)</code> отделяет «клиент
+        ушёл» (не ошибка, не логируем) от «мы не успели» (ошибка зависимости).</li>
+    </ul>
+
+    <h2>Свои исключения: когда нужны, а когда нет</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class OrderNotFoundException(Guid orderId)
+    : Exception($"Заказ {orderId} не найден")
+{
+    public Guid OrderId { get; } = orderId;          // полезные данные — в свойство
+}
+
+// обёртка чужой ошибки: сохраняем причину
+throw new PaymentFailedException("платёж отклонён", innerException: ex);</code></pre>
+    </div>
+    <ul>
+      <li><strong>Имя заканчивается на <code>Exception</code></strong> — соглашение, на нём держатся анализаторы
+        и обработчики.</li>
+      <li><strong>Наследуйтесь от <code>Exception</code></strong>, добавьте конструкторы с
+        <code>innerException</code> и, если нужно, данные (например, <code>OrderId</code>).</li>
+      <li><strong>Оправдано:</strong> вызывающий должен <em>различать</em> ситуации
+        (<code>catch (OrderNotFoundException)</code> → 404); иначе хватает стандартных
+        (<code>ArgumentNullException</code>, <code>InvalidOperationException</code>).</li>
+      <li><strong>Не заменяйте исключением результат:</strong> «не найдено» — нормальный сценарий поиска,
+        верните <code>null</code>/<code>bool</code>.</li>
+      <li><strong>Оборачивая, передавайте причину</strong> в <code>innerException</code> — иначе она потеряется
+        в логах.</li>
+    </ul>
+
+    <h2>Исключения и <code>async</code></h2>
+    <ul>
+      <li>Исключение внутри <code>async</code>-метода <strong>складывается в задачу</strong>, а не вылетает при
+        вызове: поймать его можно только через <code>await</code> (C# гл. 9).</li>
+      <li><code>await</code> пробрасывает <em>первое</em> исключение как есть; <code>AggregateException</code>
+        появляется при <code>Task.Wait()</code>/<code>Task.Result</code> — ещё одна причина их не
+        использовать (гл. 10).</li>
+      <li>При <code>Task.WhenAll</code> задача падает с первым исключением, остальные доступны через
+        <code>task.Exception</code> — если нужно, разбирайте их отдельно.</li>
+      <li><code>async void</code> — исключение некуда положить: оно уходит в контекст и роняет процесс
+        (гл. 10).</li>
+    </ul>
+
+    <h2>Что не делать</h2>
+    <table>
+      <tr><th>Антипаттерн</th><th>Чем плохо</th></tr>
+      <tr><td><code>catch (Exception) { }</code></td><td>ошибка исчезает бесследно; сервис «работает», но
+        неправильно</td></tr>
+      <tr><td><code>catch (Exception ex) { throw ex; }</code></td><td>теряется исходный стек</td></tr>
+      <tr><td>try/catch в цикле на каждую итерацию</td><td>дорого и маскирует причину; ловите снаружи
+        пачки</td></tr>
+      <tr><td><code>catch</code> только чтобы залогировать и пробросить</td><td>дубли в логах; логируйте на
+        границе</td></tr>
+      <tr><td>исключения вместо <code>if</code></td><td>дорого, и логика становится неявной</td></tr>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>catch</code> — от конкретного к общему; <code>finally</code> выполняется всегда (для ресурсов
+          есть <code>using</code>).</li>
+        <li><code>throw;</code> сохраняет стек, <code>throw ex;</code> — нет.</li>
+        <li><code>when</code> — фильтр, который проверяется <strong>до</strong> раскрытия стека; так различают
+          «отменил клиент» и «наш таймаут», 429 и 5xx.</li>
+        <li>Своё исключение — когда вызывающий должен различать ситуации; имя — <code>…Exception</code>,
+          причина — в <code>innerException</code>.</li>
+        <li>Исключение в <code>async</code> живёт в задаче и всплывает при <code>await</code>;
+          <code>async void</code> роняет процесс.</li>
+        <li>Не глотать, не дублировать логи, не использовать исключения как <code>if</code>.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs11-null-and-self-reference.html">← <span class="sp">Глава 11. null, ?. и ссылка на самого себя</span></a>
+      <a href="csharp.html"><span class="sp">Оглавление раздела</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

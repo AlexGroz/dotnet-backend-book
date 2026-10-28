@@ -76,6 +76,17 @@ catch (OperationCanceledException) when (!ct.IsCancellationRequested)
       <li><strong>Таймаут на клиенте не отменяет работу на сервере</strong>: зависимость может продолжать
         обрабатывать запрос. Поэтому для операций с побочными эффектами нужен ключ идемпотентности (гл. 31).</li>
     </ul>
+    <div class="box note">
+      <span class="t">Идемпотентность — что это (первое упоминание)</span>
+      <p><strong>Идемпотентная операция</strong> — та, которую можно выполнить дважды с тем же результатом, что и
+        один раз. <code>GET</code>, <code>PUT</code>, <code>DELETE</code> идемпотентны по определению HTTP:
+        «получить заказ 42» или «установить статус = paid» можно повторять. <code>POST</code> — нет: «создай
+        заказ» при повторе создаст второй.</p>
+      <p>Чтобы <code>POST</code> стал безопасным для повторов, клиент присылает <strong>ключ идемпотентности</strong>
+        (обычно заголовок <code>Idempotency-Key</code> — уникальный идентификатор <em>попытки</em> операции).
+        Сервер сохраняет ключ вместе с результатом: повторный запрос с тем же ключом не выполняется заново, а
+        получает сохранённый ответ. Подробно — гл. 31.</p>
+    </div>
 
     <h2>Повтор (retry): когда помогает, а когда добивает</h2>
     <p>Повтор помогает только на <strong>временных</strong> сбоях. Правила, без которых retry делает хуже:</p>
@@ -187,6 +198,16 @@ await pipeline.ExecuteAsync(async ct =&gt; await CallAsync(ct), ct);</code></pre
 }</code></pre>
     </div>
     <ul>
+      <li><strong>Что такое <code>SemaphoreSlim</code></strong> (это он и есть — переменная <code>Gate</code>):
+        «счётчик разрешений». <code>new(initialCount: 10, maxCount: 10)</code> — «свободно 10 слотов, больше 10
+        одновременно не пускать». <code>WaitAsync</code> — «займи слот»: ждёт до указанного времени и возвращает
+        <code>bool</code> (<code>true</code> — слот занят, <code>false</code> — не дождался). Перед ним ничего
+        указывать не нужно: это обычный вызов метода у объекта <code>Gate</code> (аналог <code>lock</code>, но
+        асинхронный).</li>
+      <li><strong>Почему <code>!await</code>:</strong> нам нужен случай «слот не достался» →
+        <code>!true == false</code> (заняли, идём дальше), <code>!false == true</code> (не заняли → ошибка).</li>
+      <li><strong><code>Gate.Release()</code></strong> — вернуть слот. Обязательно в <code>finally</code>,
+        иначе после первой ошибки слот утечёт и лимит будет уменьшаться с каждым запросом.</li>
       <li><strong>Зачем:</strong> «медленный платёж» перестаёт забирать потоки у «быстрого каталога» — у каждой
         зависимости свой бюджет.</li>
       <li><strong>Сколько ставить:</strong> примерно столько, сколько зависимость обещает держать (её лимит
@@ -235,7 +256,9 @@ await client.GetAsync(url);</code></pre>
           вместе, включая паузы между ними.</li>
       </ul>
       <p>Если задать только <code>HttpClient.Timeout = 2s</code> и при этом 3 попытки — ретраи не успеют
-        начаться: первый же таймаут закроет весь вызов.</p>
+        начаться: первый же таймаут закроет весь вызов. <strong>Где это в коде:</strong> два первых таймаута —
+        строки <code>o.TotalRequestTimeout.Timeout</code> и <code>o.AttemptTimeout.Timeout</code> в блоке ниже;
+        <code>ConnectTimeout</code> — в <code>SocketsHttpHandler</code> чуть выше.</p>
     </div>
 
     <h2>Дедлайн на весь запрос, а не на каждый вызов</h2>
@@ -270,22 +293,24 @@ await client.GetAsync(url);</code></pre>
     </div>
     <div class="codewrap">
       <pre><code class="language-csharp">builder.Services
-    .AddHttpClient&lt;InventoryClient&gt;(c =&gt;
+    .AddHttpClient&lt;InventoryClient&gt;(c =&gt;                      // типизированный клиент: внедряется как InventoryClient
     {
-        c.BaseAddress = new Uri("https://inventory.internal");
-        c.Timeout = Timeout.InfiniteTimeSpan;      // не дублировать общий таймаут
+        c.BaseAddress = new Uri("https://inventory.internal"); // базовый адрес: пути в коде клиента — относительные
+        c.Timeout = Timeout.InfiniteTimeSpan;                  // ВЫКЛЮЧАЕМ таймаут HttpClient:
+                                                               // иначе он сработает раньше пайплайна и ретраи не начнутся
     })
-    .AddStandardResilienceHandler(o =&gt;
+    .AddStandardResilienceHandler(o =&gt;                         // стандартный конвейер:
+                                                               // rate limiter → total timeout → retry → breaker → attempt timeout
     {
-        o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(3);   // весь вызов
-        o.AttemptTimeout.Timeout      = TimeSpan.FromSeconds(1);   // одна попытка
-        o.Retry.MaxRetryAttempts      = 3;
-        o.Retry.BackoffType           = DelayBackoffType.Exponential;
-        o.Retry.UseJitter             = true;
-        o.CircuitBreaker.FailureRatio      = 0.5;                  // 50 % ошибок
-        o.CircuitBreaker.MinimumThroughput = 20;                   // минимум на 20 вызовах
-        o.CircuitBreaker.SamplingDuration  = TimeSpan.FromSeconds(30);
-        o.CircuitBreaker.BreakDuration     = TimeSpan.FromSeconds(10);
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(3);   // 3 с на ВЕСЬ вызов: все попытки + паузы между ними
+        o.AttemptTimeout.Timeout      = TimeSpan.FromSeconds(1);   // 1 с на ОДНУ попытку (внутренний таймаут)
+        o.Retry.MaxRetryAttempts      = 3;                        // 3 повтора → максимум 4 попытки
+        o.Retry.BackoffType           = DelayBackoffType.Exponential; // паузы 100 → 200 → 400 мс (растут)
+        o.Retry.UseJitter             = true;                     // случайный разброс пауз: клиенты не бьют одновременно
+        o.CircuitBreaker.FailureRatio      = 0.5;                 // открывать цепь при 50 % ошибок…
+        o.CircuitBreaker.MinimumThroughput = 20;                  // …но только если было не меньше 20 вызовов…
+        o.CircuitBreaker.SamplingDuration  = TimeSpan.FromSeconds(30); // …в окне 30 секунд
+        o.CircuitBreaker.BreakDuration     = TimeSpan.FromSeconds(10); // цепь остаётся разомкнутой 10 секунд
     });</code></pre>
     </div>
     <ul>
