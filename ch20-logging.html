@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 20 · Логирование и наблюдаемость</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,231 @@
   <div class="chapter">
     <div class="part">.NET · Часть V · Путь запроса</div>
     <h1>Глава 20. Логирование и наблюдаемость</h1>
-    <p class="sublead">Структурные логи, метрики, трейсы, OpenTelemetry</p>
+    <p class="sublead">В проде нельзя подключиться отладчиком. Остаются три инструмента — <strong>логи,
+      метрики и трейсы</strong> — и умение связать их между собой. Разберём, что и как писать, чтобы по
+      инциденту можно было ответить «что случилось с заказом 42».</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Три столпа и на какой вопрос отвечает каждый</h2>
+    <table>
+      <tr><th></th><th>Что это</th><th>Вопрос</th><th>Стоимость</th></tr>
+      <tr><td><strong>Логи</strong></td><td>записи о событиях: «что произошло» с контекстом</td><td>«почему у
+        этого заказа ошибка?»</td><td>дорого по объёму — их надо хранить и индексировать</td></tr>
+      <tr><td><strong>Метрики</strong></td><td>числа во времени: RPS, задержка, ошибки, память</td><td>«когда и
+        насколько стало плохо?»</td><td>дёшево (гл. 21)</td></tr>
+      <tr><td><strong>Трейсы</strong></td><td>цепочка вызовов одного запроса по сервисам</td><td>«где именно
+        ушло время?»</td><td>средне: сэмплирование обязательно</td></tr>
+    </table>
+    <p>Они дополняют друг друга: метрика показывает <em>что</em> сломалось, трейс — <em>где</em>, лог —
+      <em>почему</em>. Связывает их <strong>идентификатор запроса</strong> (см. ниже).</p>
+
+    <h2>Структурные логи: сообщение — шаблон, а не строка</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ интерполяция: строка уже склеена, полей для поиска нет
+_logger.LogInformation($"Заказ {orderId} оплачен на {total}");
+
+// ✔ шаблон: {OrderId} и {Total} сохраняются как отдельные поля
+_logger.LogInformation("Заказ {OrderId} оплачен на {Total}", orderId, total);</code></pre>
     </div>
+    <ul>
+      <li><strong>Почему шаблон:</strong> в хранилище попадают поля <code>OrderId=42</code>,
+        <code>Total=1500</code> — по ним можно искать и строить графики, а не парсить текст регулярками.</li>
+      <li><strong>Почему не интерполяция:</strong> строка собирается <em>всегда</em>, даже если уровень
+        логирования выключен (лишние аллокации — гл. 7). Шаблон форматируется только при записи.</li>
+      <li><strong>Исключение передавайте объектом:</strong> <code>_logger.LogError(ex, "…")</code> — тогда
+        сохранится стек и <code>innerException</code>; <code>ex.ToString()</code> в сообщении этого не даст.</li>
+    </ul>
+    <h3>Уровни: когда какой</h3>
+    <table>
+      <tr><th>Уровень</th><th>Когда</th><th>В проде</th></tr>
+      <tr><td><code>Trace</code></td><td>очень подробно, для отладки конкретной проблемы</td><td>выключен</td></tr>
+      <tr><td><code>Debug</code></td><td>диагностика: вход/выход методов, параметры</td><td>обычно выключен,
+        включается точечно</td></tr>
+      <tr><td><code>Information</code></td><td>бизнес-события: заказ создан, платёж прошёл</td><td>включён</td></tr>
+      <tr><td><code>Warning</code></td><td>подозрительно, но сервис работает: повтор, деградация, медленный
+        ответ</td><td>включён</td></tr>
+      <tr><td><code>Error</code></td><td>операция не выполнена, нужна реакция</td><td>включён + алерт</td></tr>
+      <tr><td><code>Critical</code></td><td>сервис не может работать</td><td>включён + будит дежурного</td></tr>
+    </table>
+    <p>Категория — <code>ILogger&lt;OrderService&gt;</code>: имя типа попадает в лог, и можно включать
+      подробности только для одного класса через конфигурацию:</p>
+    <div class="codewrap">
+      <pre><code class="language-json">{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",          // не логировать каждый запрос Kestrel
+      "Microsoft.EntityFrameworkCore.Database.Command": "Information",
+      "Orders.Infrastructure.Payments": "Debug"  // только этот namespace — подробно
+    }
+  }
+}</code></pre>
+    </div>
+
+    <h2>Что логировать и чего не логировать</h2>
+    <table>
+      <tr><th>Нужно</th><th>Нельзя (или только с маскированием)</th></tr>
+      <tr><td>бизнес-события: «заказ 42 оплачен», «импорт завершён, 1200 строк»</td><td>пароли, токены,
+        номера карт, коды подтверждения</td></tr>
+      <tr><td>идентификаторы: <code>OrderId</code>, <code>UserId</code>, <code>RequestId</code>,
+        <code>TenantId</code></td><td>персональные данные целиком (ФИО + адрес + телефон — это уже утечка)</td></tr>
+      <tr><td>ошибки с контекстом: что делали, с какими параметрами, что ответила зависимость</td>
+        <td>тела запросов/ответов целиком (объём + PII)</td></tr>
+      <tr><td>начало/конец внешних вызовов — на уровне <code>Debug</code></td><td>логи в цикле на каждую строку
+        (объём растёт линейно)</td></tr>
+    </table>
+    <div class="box note">
+      <span class="t">Правило «одна запись — одно событие»</span>
+      <p>Не склеивайте в одно сообщение пять событий через запятую: по такому логу нельзя фильтровать. Лучше
+        пять записей с общими полями (их свяжет <code>RequestId</code>) — и хранилище позволит построить по ним
+        выборку.</p>
+    </div>
+
+    <h2>Scope и корреляция: связать логи одного запроса</h2>
+    <p>В логе должны быть поля, по которым записи одного запроса собираются вместе: <code>RequestId</code> /
+      <code>TraceId</code>, а также <code>TenantId</code>, <code>UserId</code>, если они есть. В ASP.NET Core это
+      делается один раз в middleware:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.Use(async (ctx, next) =&gt;
+{
+    // идентификатор запроса: уже есть (от прокси) или сгенерирован
+    var requestId = ctx.Request.Headers["X-Request-Id"].FirstOrDefault() ?? ctx.TraceIdentifier;
+
+    // всё, что залогировано внутри, получит эти поля автоматически
+    using (_logger.BeginScope(new Dictionary&lt;string, object&gt;
+    {
+        ["RequestId"] = requestId,
+        ["Path"]      = ctx.Request.Path.Value ?? ""
+    }))
+    {
+        ctx.Response.Headers["X-Request-Id"] = requestId;   // вернуть клиенту для поддержки
+        await next();
+    }
+});</code></pre>
+    </div>
+    <ul>
+      <li><strong>Зачем возвращать <code>X-Request-Id</code>:</strong> клиент/поддержка присылают его в
+        обращении, и вы находите все логи этого запроса одной строкой поиска.</li>
+      <li><strong>Сквозная корреляция между сервисами</strong> идёт не через вашу переменную, а через стандарт
+        <strong>W3C Trace Context</strong> (<code>traceparent</code>): его автоматически пробрасывают
+        <code>HttpClient</code>/gRPC и читает OpenTelemetry. Поэтому <code>TraceId</code> одинаков у всех
+        участников цепочки.</li>
+      <li><strong><code>BeginScope</code> не «приклеивает» поля к тексту:</strong> провайдер логирования сам
+        добавляет их к каждой записи (у JSON-логов это отдельные свойства).</li>
+    </ul>
+
+    <h2>Куда писать: провайдеры</h2>
+    <table>
+      <tr><th>Куда</th><th>Когда</th><th>Особенность</th></tr>
+      <tr><td><strong>stdout (консоль)</strong></td><td>контейнеры, Kubernetes</td><td>платформа собирает и
+        перевозит логи; в файл внутри контейнера писать нельзя — он исчезнет вместе с контейнером
+        (Docker-раздел)</td></tr>
+      <tr><td><strong>OpenTelemetry (OTLP)</strong></td><td>современный стандарт</td><td>один экспортёр для логов,
+        метрик и трейсов; принимают Seq, Jaeger, Tempo, Loki, облачные сервисы</td></tr>
+      <tr><td><strong>Serilog / NLog</strong></td><td>нужны форматтеры, файлы, маршрутизация по
+        уровням</td><td>богатая экосистема «sink»-ов; структура полей сохраняется</td></tr>
+      <tr><td><strong>Файл на диске</strong></td><td>legacy, не контейнеры</td><td>нужна ротация и место; в
+        контейнере — антипаттерн</td></tr>
+    </table>
+    <p>Формат — <strong>JSON</strong> (по строке на запись): его читают машины, и в нём сохраняются поля
+      (<code>OrderId</code>, <code>RequestId</code>). Текстовый формат годится для локальной разработки.</p>
+
+    <h2>Метрики: что считать</h2>
+    <p>Метрики — числа, по которым строят графики и алерты. Подробно инструменты — в главе 21, здесь — что именно
+      считать у сервиса:</p>
+    <ul>
+      <li><strong>RED</strong> для эндпоинтов: <em>Rate</em> (RPS), <em>Errors</em> (доля ошибок),
+        <em>Duration</em> (гистограмма задержки — p95/p99, не среднее).</li>
+      <li><strong>Насыщение:</strong> занятость пула соединений, длина очереди, число задач в пуле, память и CPU
+        (в контейнере — относительно лимита, Docker-раздел).</li>
+      <li><strong>Бизнес-метрики:</strong> заказов в минуту, отказов платежей, размер outbox-очереди. Они
+        первыми показывают проблему, которую технические метрики ещё не видят.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// счётчик и гистограмма через System.Diagnostics.Metrics
+private static readonly Meter Meter = new("Orders");
+
+private static readonly Counter&lt;long&gt; OrdersPaid =
+    Meter.CreateCounter&lt;long&gt;("orders.paid");
+
+private static readonly Histogram&lt;double&gt; PayDuration =
+    Meter.CreateHistogram&lt;double&gt;("orders.pay.duration", unit: "ms");</code></pre>
+    </div>
+
+    <h2>Трейсы: один запрос через все сервисы</h2>
+    <p>Трейс — дерево <strong>спанов</strong>: «HTTP-запрос → SELECT в БД → вызов платёжного API». У каждого
+      спана есть длительность и атрибуты, а у всего трейса — общий <code>TraceId</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">TraceId 4bf92f3577b34da6
+├─ POST /api/orders               120 мс   ← наш эндпоинт
+│  ├─ SELECT orders …              3 мс    ← EF Core (спан создаётся автоматически)
+│  ├─ POST https://pay.internal   110 мс  ← внешний вызов (спан от HttpClient)
+│  └─ INSERT order + outbox        5 мс
+└─ (в другом сервисе) обработка события outbox   — тот же TraceId</code></pre>
+    </div>
+    <ul>
+      <li><strong>Как включить:</strong> <code>AddOpenTelemetry().WithTracing(...)</code> + инструментирование
+        ASP.NET Core, HttpClient, EF Core/Npgsql. Свои спаны — через <code>ActivitySource</code>.</li>
+      <li><strong>Сэмплирование обязательно:</strong> хранить все трейсы дорого; обычно 1–10 % + все «медленные»
+        и все с ошибкой (tail-based sampling).</li>
+      <li><strong>Зачем:</strong> именно трейс отвечает «где ушло время» — и часто показывает, что виноват не
+        ваш код, а внешний сервис.</li>
+    </ul>
+
+    <h2>Частые ошибки</h2>
+    <table>
+      <tr><th>Ошибка</th><th>Чем плохо</th><th>Как правильно</th></tr>
+      <tr><td>Интерполяция в сообщении</td><td>нет полей для поиска + лишние аллокации</td><td>шаблон
+        <code>{OrderId}</code> + аргументы</td></tr>
+      <tr><td><code>catch</code> + лог + <code>throw</code> на каждом уровне</td><td>один стек в логе трижды</td>
+        <td>логировать один раз — на границе</td></tr>
+      <tr><td>Пароли/токены/тела целиком</td><td>утечка, нарушение требований</td><td>маскировать, логировать
+        только идентификаторы</td></tr>
+      <tr><td>Всё на уровне <code>Information</code></td><td>шум; в логе тонет важное</td><td>уровни по
+        смыслу + фильтры по namespace</td></tr>
+      <tr><td>Логи без <code>RequestId</code></td><td>нельзя собрать историю одного запроса</td><td>scope в
+        middleware</td></tr>
+      <tr><td>Логи в файл внутри контейнера</td><td>исчезают вместе с контейнером, нет ротации</td><td>stdout</td></tr>
+      <tr><td><code>ex.ToString()</code> в сообщении</td><td>стек превращается в текст, теряется
+        <code>innerException</code></td><td><code>LogError(ex, …)</code></td></tr>
+      <tr><td>Лог внутри горячего цикла</td><td>объём и I/O растут линейно</td><td><code>Debug</code> +
+        агрегированный итог</td></tr>
+    </table>
+
+    <h2>Чек-лист «сервис готов к разбору инцидента»</h2>
+    <ol>
+      <li>Логи — в stdout, в JSON, с шаблонными полями и уровнями по смыслу.</li>
+      <li>В каждой записи есть <code>RequestId</code>/<code>TraceId</code>; он возвращается клиенту.</li>
+      <li>Ошибки логируются объектом исключения, один раз — на границе запроса.</li>
+      <li>Есть метрики RED + насыщение (пул, очередь) + хотя бы одна бизнес-метрика.</li>
+      <li>Трейсинг включён и пробрасывается через HTTP/gRPC; сэмплирование настроено.</li>
+      <li>Секретов и ПДн в логах нет — проверяется на ревью и сканером.</li>
+      <li>Есть алерты: доля ошибок, p95, насыщение пула; и они не шумят.</li>
+    </ol>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Логи отвечают «почему», метрики — «что и когда», трейсы — «где»; связывает их
+          <strong>идентификатор запроса</strong>.</li>
+        <li>Логи <strong>структурные</strong>: шаблон + поля, а не склеенная строка.</li>
+        <li>Уровни по смыслу; <code>Information</code> — для бизнес-событий, а не для всего подряд.</li>
+        <li>Не логируйте секреты и ПДн; исключение передавайте объектом.</li>
+        <li>В контейнере — stdout + JSON, а не файлы; для трейсов — OpenTelemetry и
+          <code>traceparent</code>.</li>
+        <li>Метрики: RED, насыщение и бизнес-показатели; инструменты — глава 21.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="ch19-middleware.html">← <span class="sp">Глава 19. Конвейер: middleware и маршрутизация</span></a>
       <a href="ch21-measurements.html"><span class="sp">Глава 21. Измерения и профилирование</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
+
+

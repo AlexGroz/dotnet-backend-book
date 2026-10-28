@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 25 · Кэширование</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,271 @@
   <div class="chapter">
     <div class="part">.NET · Часть VI · Данные и интеграции</div>
     <h1>Глава 25. Кэширование</h1>
-    <p class="sublead">L1/L2, инвалидация, cache stampede</p>
+    <p class="sublead">Кэш — самый быстрый способ ускорить сервис и самый быстрый способ отдать
+      неправильные данные. Разберём уровни, паттерны, инвалидацию и главную аварию — «cache stampede».</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Зачем кэш и когда он не нужен</h2>
+    <p>Кэш обменивает <strong>свежесть</strong> данных на <strong>скорость</strong>. Он уместен, когда:</p>
+    <ul>
+      <li>данные читают часто, а меняют редко (справочники, тарифы, конфигурация);</li>
+      <li>вычисление дорого: тяжёлый агрегат, несколько соединений, вызов внешнего API;</li>
+      <li>источник плохо масштабируется: одна база на десять реплик сервиса.</li>
+    </ul>
+    <p>И <strong>не нужен</strong>, когда:</p>
+    <ul>
+      <li>данные обязаны быть точными в момент чтения (баланс, остаток, статус платежа) — здесь кэш только
+        добавит ошибок;</li>
+      <li>источник и так быстрый (индексный запрос за 1 мс) — кэш будет <em>медленнее</em>: сеть до Redis,
+        сериализация;</li>
+      <li>нет способа корректно инвалидировать: «мёртвые» данные хуже медленных.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Правило, которое экономит нервы</span>
+      <p>Кэш никогда не должен быть <strong>единственным</strong> источником данных. Если Redis очистили,
+        сервис обязан продолжить работать (медленнее), а не отдать 500.</p>
     </div>
+
+    <h2>Уровни: где именно живёт кэш</h2>
+    <table>
+      <tr><th>Уровень</th><th>Где</th><th>Скорость / объём</th><th>Особенность</th></tr>
+      <tr><td><strong>L1 — в процессе</strong> (<code>IMemoryCache</code>)</td><td>память вашего сервиса</td>
+        <td>наносекунды, мегабайты</td><td>у каждой реплики <em>свой</em> кэш: инвалидация не доходит до
+        других (гл. 28)</td></tr>
+      <tr><td><strong>L2 — общий</strong> (Redis, Memcached)</td><td>отдельный сервис</td><td>доли
+        миллисекунды, гигабайты</td><td>общий для всех реплик; сеть и сериализация — плата</td></tr>
+      <tr><td><strong>HTTP-кэш</strong> (CDN, прокси)</td><td>между клиентом и сервисом</td>
+        <td>очень быстро для клиента</td><td>управляется заголовками: <code>Cache-Control</code>,
+        <code>ETag</code>, <code>Vary</code></td></tr>
+      <tr><td><strong>Кэш в БД</strong></td><td>материализованные представления, кэш планов</td>
+        <td>быстро, но это БД</td><td>обновляется по расписанию (<code>REFRESH</code>) — SQL-раздел</td></tr>
+    </table>
+    <p>Типичная схема «на вырост»: L1 перед L2, оба с коротким TTL. L1 снимает нагрузку с Redis, L2 делает
+      данные общими для реплик.</p>
+
+    <h2>Три паттерна работы с кэшем</h2>
+    <table>
+      <tr><th>Паттерн</th><th>Как работает</th><th>Когда брать</th></tr>
+      <tr><td><strong>Cache-aside</strong> (самый частый)</td><td>код сначала спрашивает кэш; промах → читаем
+        источник и кладём в кэш</td><td>чтение с БД/внешнего API; вы контролируете и чтение, и запись</td></tr>
+      <tr><td><strong>Read-through</strong></td><td>кэш сам ходит в источник при промахе (библиотека/прокси)</td>
+        <td>когда источник инкапсулирован в кэш-слое</td></tr>
+      <tr><td><strong>Write-through / write-behind</strong></td><td>пишем в кэш и в источник (или сначала в кэш,
+        потом асинхронно в источник)</td><td>нужна запись через кэш; write-behind рискован — можно потерять
+        данные</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// cache-aside: классическая схема «прочитай кэш → промах → источник → положи»
+public async Task&lt;Tariff&gt; GetTariffAsync(int id, CancellationToken ct)
+{
+    var key = $"tariff:v3:{id}";                       // v3 — версия формата ключа (см. ниже)
+
+    if (_cache.TryGetValue(key, out Tariff? cached))    // 1) пробуем кэш
+        return cached!;
+
+    var tariff = await _db.Tariffs.AsNoTracking()       // 2) промах: читаем источник
+        .FirstAsync(t =&gt; t.Id == id, ct);
+
+    _cache.Set(key, tariff, TimeSpan.FromMinutes(5));   // 3) кладём с TTL
+    return tariff;
+}</code></pre>
+    </div>
+
+    <h2>Код: <code>IMemoryCache</code> и <code>IDistributedCache</code></h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// L1: в памяти процесса. Регистрируется как singleton
+builder.Services.AddMemoryCache();
+
+public sealed class TariffCache(IMemoryCache cache)
+{
+    public Tariff? Get(int id) =&gt;
+        cache.TryGetValue($"tariff:v3:{id}", out Tariff? t) ? t : null;
+
+    public void Put(int id, Tariff tariff)
+    {
+        // AbsoluteExpirationRelativeToNow — умрёт через 5 минут
+        // SlidingExpiration — умрёт через 2 минуты ПОСЛЕ последнего обращения
+        // Size + SizeLimit — чтобы кэш не съел всю память процесса
+        cache.Set($"tariff:v3:{id}", tariff, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5),
+            SlidingExpiration = TimeSpan.FromMinutes(2),
+            Size = 1
+        });
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// L2: Redis через IDistributedCache (пакет Microsoft.Extensions.Caching.StackExchangeRedis)
+builder.Services.AddStackExchangeRedisCache(o =&gt;
+{
+    o.Configuration = "redis:6379";            // адрес Redis (в compose/k8s — имя сервиса)
+    o.InstanceName = "orders:";                 // префикс ключей: один Redis на несколько сервисов
+});
+
+public sealed class TariffStore(IDistributedCache cache)
+{
+    public async Task&lt;Tariff?&gt; GetAsync(int id, CancellationToken ct)
+    {
+        var json = await cache.GetStringAsync($"tariff:v3:{id}", ct);   // байты → строка
+        return json is null ? null : JsonSerializer.Deserialize&lt;Tariff&gt;(json);
+    }
+
+    public Task SetAsync(int id, Tariff tariff, CancellationToken ct) =&gt;
+        cache.SetStringAsync($"tariff:v3:{id}", JsonSerializer.Serialize(tariff), ct,
+            new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
+            });
+}</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">L1 перед L2: как не удвоить сложность</span>
+      <p>Если кэшей два, порядок всегда один и тот же: <strong>L1 → L2 → источник</strong>, а запись — в оба.
+        Проблема: у каждой реплики свой L1, поэтому инвалидация должна либо рассылаться (pub/sub в Redis), либо
+        быть не нужной — за счёт <strong>очень короткого TTL</strong> в L1 (5–30 секунд). Второй вариант проще и
+        почти всегда достаточен.</p>
+    </div>
+
+    <h2>Инвалидация: три способа не отдавать вчерашние данные</h2>
+    <ol>
+      <li><strong>TTL (время жизни).</strong> Самый простой и надёжный: данные «просрочились» — перечитали. Плата —
+        до TTL вы можете отдавать старое значение. Для справочников это нормально; для остатков — нет.</li>
+      <li><strong>Версия в ключе.</strong> Меняется формат/логика — меняйте <code>v3</code> на <code>v4</code>:
+        старые ключи просто перестанут читаться и умрут по TTL. Это спасает от «после деплоя в кэше лежит объект
+        старой структуры».</li>
+      <li><strong>Событийная инвалидация.</strong> При записи в БД удаляем/обновляем ключ (в той же транзакции —
+        нельзя: кэш не транзакционный; поэтому делают после коммита или через outbox, гл. 31).</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// запись: сначала БД, потом кэш (и только после успешного коммита)
+await _db.SaveChangesAsync(ct);
+await _cache.RemoveAsync($"tariff:v3:{tariff.Id}", ct);   // или PutAsync с новым значением</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Порядок «кэш → БД» — источник расхождений</span>
+      <p>Если удалить кэш <em>до</em> коммита, параллельное чтение успеет положить туда старое значение, и оно
+        останется до TTL. Поэтому: <strong>сначала БД, затем сброс кэша</strong>. А между этими шагами всё равно
+        есть окно — поэтому TTL обязателен даже при событийной инвалидации.</p>
+    </div>
+
+    <h2>Cache stampede: когда кэш «кончился» у всех одновременно</h2>
+    <p>Классический сценарий: популярный ключ истёк, и <strong>все</strong> запросы одновременно пошли в базу.
+      Тысяча запросов вместо одного — база ложится именно в тот момент, когда кэш должен был её спасать.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// «single flight»: источник читает ТОЛЬКО первый запрос, остальные ждут его результата
+private static readonly ConcurrentDictionary&lt;string, SemaphoreSlim&gt; Locks = new();
+
+public async Task&lt;Tariff&gt; GetAsync(int id, CancellationToken ct)
+{
+    var key = $"tariff:v3:{id}";
+    if (_memory.TryGetValue(key, out Tariff? hit)) return hit!;
+
+    var gate = Locks.GetOrAdd(key, _ =&gt; new SemaphoreSlim(1, 1));
+    await gate.WaitAsync(ct);
+    try
+    {
+        if (_memory.TryGetValue(key, out hit)) return hit!;      // второй раз: мог положить «первый»
+
+        var tariff = await LoadFromDbAsync(id, ct);              // в базу идёт один запрос
+        _memory.Set(key, tariff, TimeSpan.FromMinutes(5));
+        return tariff;
+    }
+    finally
+    {
+        gate.Release();
+        Locks.TryRemove(key, out _);                             // не копим семафоры по ключам
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>Jitter в TTL</strong> (5 мин ± 30 с) — ключи не истекают синхронно.</li>
+      <li><strong>Stale-while-revalidate</strong>: отдаём старое значение, пока в фоне обновляем. Свежесть
+        «догоняет» без всплеска.</li>
+      <li><strong>Прогрев</strong> после деплоя: заранее положить горячие ключи (гл. 28 — прогрев реплики).</li>
+    </ul>
+
+    <h2>Что кэшировать и что нельзя</h2>
+    <table>
+      <tr><th>Кэшируем</th><th>Не кэшируем (или только с оговорками)</th></tr>
+      <tr><td>справочники, тарифы, конфигурация, категории</td><td>баланс, остаток на складе, статус платежа —
+        нужны точные данные</td></tr>
+      <tr><td>результаты тяжёлых агрегатов (отчёты за день)</td><td>персональные данные без изоляции ключа по
+        пользователю/тенанту</td></tr>
+      <tr><td>ответы внешних API с известным TTL</td><td>секреты, токены, содержимое, которое нельзя терять</td></tr>
+      <tr><td>«горячие» товары/страницы — общие для всех</td><td>результаты, зависящие от прав доступа, если ключ не
+        учитывает пользователя</td></tr>
+    </table>
+    <div class="box warn">
+      <span class="t">Кэш — не хранилище</span>
+      <p>Всё, что лежит в кэше, должно восстанавливаться из источника. Если данные существуют <em>только</em> в
+        Redis, то очистка Redis (или вытеснение по памяти) — это потеря данных, а не «замедление».</p>
+    </div>
+
+    <h2>Ключи, сериализация, размер</h2>
+    <ul>
+      <li><strong>Ключ — стабильный и полный:</strong> <code>tariff:v3:{id}</code>, а не
+        <code>"tariff" + id</code> в разных местах по-разному. Всё, что влияет на результат (язык, tenant,
+        валюта), должно быть в ключе.</li>
+      <li><strong>Версия в ключе</strong> (<code>v3</code>) — бесплатная защита от несовместимого формата после
+        деплоя.</li>
+      <li><strong>Сериализация:</strong> JSON — читаемо и совместимо; для больших значений — сжатие
+        (gzip/brotli) или более компактный формат. Помните: сериализация тоже стоит CPU.</li>
+      <li><strong>Размер значения:</strong> кэшируйте проекцию (нужные поля), а не всю сущность с
+        навигациями — иначе получите мегабайты на ключ и медленный десериализатор.</li>
+      <li><strong>Кэширование «пусто»:</strong> если результата нет, кэшируйте маркер (например,
+        <code>null</code> как <code>"__none__"</code>), иначе промахи будут бить в базу каждый раз.</li>
+    </ul>
+
+    <h2>Как понять, что кэш работает</h2>
+    <ul>
+      <li><strong>Hit ratio</strong> — доля попаданий. 0,9 для справочника — норма; 0,3 значит, что вы кэшируете
+        то, что почти всегда разное.</li>
+      <li><strong>Задержка p95 с кэшем и без</strong> (гл. 21): если «с кэшем» не быстрее — кэш не нужен или
+        неправильно выбран уровень.</li>
+      <li><strong>Нагрузка на источник</strong> (QPS к БД, к внешнему API): упала в разы — работает.</li>
+      <li><strong>Ошибки Redis</strong> и время ответа: кэш, который тормозит, хуже отсутствия кэша — поэтому
+        у него тоже нужны таймауты (гл. 27).</li>
+    </ul>
+
+    <h2>Частые ошибки</h2>
+    <table>
+      <tr><th>Ошибка</th><th>Чем оборачивается</th><th>Как правильно</th></tr>
+      <tr><td>Кэш без TTL</td><td>данные «залипают» навсегда</td><td>всегда TTL, пусть и длинный</td></tr>
+      <tr><td>Инвалидация до коммита</td><td>старое значение возвращается в кэш и живёт до TTL</td><td>сначала
+        БД, потом сброс</td></tr>
+      <tr><td>Только L1 на нескольких репликах</td><td>реплики показывают разные данные</td><td>L2 или очень
+        короткий TTL в L1</td></tr>
+      <tr><td>Нет защиты от stampede</td><td>всплеск в базу при истечении горячего ключа</td><td>single-flight,
+        jitter, stale-while-revalidate</td></tr>
+      <tr><td>Ключ без tenant/языка</td><td>пользователь видит чужие данные</td><td>всё, что влияет на
+        результат, — в ключ</td></tr>
+      <tr><td>Кэш как единственный источник</td><td>потеря данных при очистке</td><td>источник истины — БД</td></tr>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Кэш меняет свежесть на скорость; он не нужен для точных в момент чтения данных и для быстрых
+          источников.</li>
+        <li>Уровни: <strong>L1</strong> (память процесса, свой у каждой реплики), <strong>L2</strong> (Redis,
+          общий), HTTP/CDN, кэш в БД.</li>
+        <li><strong>Cache-aside</strong> — базовая схема: кэш → промах → источник → кэш.</li>
+        <li>Инвалидация: TTL обязателен, версия в ключе — дёшево, событийная — после коммита.</li>
+        <li><strong>Cache stampede</strong> лечится single-flight, jitter и stale-while-revalidate.</li>
+        <li>Кэш никогда не единственный источник; hit ratio и p95 показывают, полезен ли он.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="ch24-ef-core.html">← <span class="sp">Глава 24. ORM и EF Core эффективно</span></a>
       <a href="ch26-channels.html"><span class="sp">Глава 26. Очереди и фоновая обработка</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
+
+
