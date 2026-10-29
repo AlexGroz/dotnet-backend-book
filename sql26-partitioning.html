@@ -180,6 +180,189 @@ ALTER TABLE orders ATTACH PARTITION orders_2026_02_old
     FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');</code></pre>
     </div>
 
+    <h2>Вопросы, которые возникают всегда</h2>
+
+    <h3>1. Секции создаются — а что происходит с самой таблицей <code>orders</code>?</h3>
+    <p>Родительская таблица после <code>PARTITION BY</code> — <strong>не хранилище данных, а описание</strong>:
+      у неё есть колонки, ключ секционирования и ограничения, но <strong>своих строк в ней нет и быть не
+      может</strong>. Все строки лежат в секциях. Поэтому:</p>
+    <ul>
+      <li><code>SELECT … FROM orders</code> — это обращение к «виртуальной» таблице: PostgreSQL подставляет
+        вместо неё список секций (узел <code>Append</code> в плане) и читает только нужные.</li>
+      <li><code>INSERT INTO orders …</code> — строка уезжает в ту секцию, чей диапазон подходит.</li>
+      <li>Размер родителя — <code>0 bytes</code>: места она не занимает. Это легко проверить:
+        <div class="codewrap">
+          <pre><code class="language-sql">SELECT relname, relkind, pg_size_pretty(pg_total_relation_size(oid)) AS size
+FROM   pg_class
+WHERE  relname LIKE 'orders%'
+ORDER  BY relname;
+
+--  relname     | relkind | size      ← relkind: 'p' = секционированная (родитель), 'r' = обычная таблица
+-- -------------+---------+-------
+--  orders      | p       | 0 bytes   ← у родителя нет своих данных
+--  orders_2026_01 | r    | 812 MB    ← данные лежат здесь
+--  orders_2026_02 | r    | 798 MB
+
+SELECT count(*) FROM ONLY orders;   -- ONLY = «только сама таблица, без секций» → 0</code></pre>
+        </div></li>
+      <li><strong>Что делать с данными, которые уже были в таблице до секционирования.</strong> Превратить
+        обычную таблицу в секционированную «на месте» нельзя — создают новую с <code>PARTITION BY</code>, а
+        данные переносят. Два безопасных способа:
+        <div class="codewrap">
+          <pre><code class="language-sql">-- (а) через секцию: создали таблицу-«близнеца», наполнили, присоединили
+CREATE TABLE orders_2025_12 (LIKE orders_old INCLUDING ALL);
+INSERT INTO orders_2025_12 SELECT * FROM orders_old
+WHERE  created_at &gt;= '2025-12-01' AND created_at &lt; '2026-01-01';
+ALTER TABLE orders ATTACH PARTITION orders_2025_12
+    FOR VALUES FROM ('2025-12-01') TO ('2026-01-01');   -- ATTACH проверит диапазон
+
+-- (б) через родителя (проще, но медленнее на миллионах строк)
+INSERT INTO orders SELECT * FROM orders_old;</code></pre>
+        </div>
+      </li>
+    </ul>
+
+    <h3>2. «Данные нужны через 100 лет» — значит, <code>DROP</code> не нужен</h3>
+    <p>Верно: <code>DROP</code> — это последний шаг, и он допустим только когда данные <strong>уже
+      скопированы</strong> в архив. Секционирование как раз и даёт возможность <strong>отделить</strong> старую
+      секцию от рабочей таблицы, ничего не удаляя: <code>DETACH PARTITION</code> превращает её в
+      <em>обычную самостоятельную таблицу</em> со всеми строками. Дальше решаете, что с ней делать:</p>
+    <table>
+      <thead><tr><th>Что нужно</th><th>Действие</th><th>Что происходит с данными</th></tr></thead>
+      <tbody>
+        <tr><td>Данные должны остаться в базе, но не мешать</td><td><code>ALTER TABLE orders DETACH PARTITION
+          orders_2024_01;</code></td><td>Таблица <code>orders_2024_01</code> остаётся, просто перестаёт быть
+          секцией: запросы к <code>orders</code> её больше не читают</td></tr>
+        <tr><td>Холодный архив без нагрузки на «горячий» диск</td><td><code>ALTER TABLE orders_2024_01 SET
+          TABLESPACE archive;</code></td><td>Файлы физически переезжают на другой диск</td></tr>
+        <tr><td>Данные нужны «навсегда», но не в OLTP</td><td><code>pg_dump -t orders_2024_01</code> →
+          DWH / объектное хранилище (S3)</td><td>Копия уезжает наружу; в базе можно удалять</td></tr>
+        <tr><td>Данные больше не нужны</td><td><code>DROP TABLE orders_2024_01;</code></td><td>Удаление файла
+          целиком: секунды, без bloat и без <code>DELETE</code></td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- полный безопасный цикл «архивируем старый месяц»
+-- 1) вывели из рабочей таблицы (с версии 14 — без длительной блокировки)
+ALTER TABLE orders DETACH PARTITION orders_2024_01 CONCURRENTLY;
+
+-- 2) данные остались в базе как отдельная таблица: проверяем объём и что они читаются
+SELECT count(*) FROM orders_2024_01;
+
+-- 3) копируем в архив (внешняя команда, не SQL)
+--    pg_dump -Fc -t orders_2024_01 appdb &gt; orders_2024_01.dump
+
+-- 4) только после проверки копии — удаляем
+DROP TABLE orders_2024_01;
+
+-- 5) старую секцию можно и сохранить, но увести на медленный диск:
+--    ALTER TABLE orders_2024_01 SET TABLESPACE archive;</code></pre>
+    </div>
+    <p><strong>Важно:</strong> <code>DETACH PARTITION</code> требует <code>ACCESS EXCLUSIVE</code> на
+      родителя; вариант <code>CONCURRENTLY</code> (PostgreSQL 14+) этого избегает и <strong>не может</strong>
+      выполняться внутри транзакции — запускайте его отдельной командой.</p>
+    <h3>3. «Секция на месяц вперёд — данные попадут туда сами?»</h3>
+    <p>Да, автоматически. Вставка идёт в <strong>родительскую</strong> таблицу, а PostgreSQL сам выбирает
+      секцию по значению ключа. Приложение не знает и не должно знать имён секций:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">INSERT INTO orders (id, created_at, user_id, status, total)
+VALUES (1, '2026-03-15 10:00+00', '…', 'NEW', 100);   -- → уедет в orders_2026_03, хотя её нет в тексте
+
+-- а если подходящей секции НЕТ, вставка падает целиком:
+-- ERROR:  no partition of relation "orders" found for row
+-- DETAIL:  Partition key of the failing row contains (created_at) = (2026-03-15 10:00:00+00).</code></pre>
+    </div>
+    <ul>
+      <li><strong>«Месяц вперёд» — это запас по времени, а не магия.</strong> Кончился запас — приложение
+        получает ошибку на <code>INSERT</code> (и это лучше, чем тихо уехать в <code>DEFAULT</code>).</li>
+      <li><strong>Секция на год вперёд — это нормально</strong> и не дорого: пустая секция занимает единицы
+        килобайт в каталоге. Проблемой становятся не «лишние» секции, а <em>тысячи</em> секций (слишком мелкая
+        гранулярность «на годы»), поэтому запас делают на 3–12 периодов.</li>
+      <li><strong><code>DEFAULT</code>-секция</strong> ошибку скрывает: строки попадают в неё, но потом её
+        читают <em>все</em> запросы к таблице (она «накрывает» любой диапазон), а присоединить новую секцию на
+        тот же диапазон нельзя, пока в <code>DEFAULT</code> есть подходящие строки. Для горячих данных это
+        скрытая деградация — поэтому алерт «в <code>DEFAULT</code> появились строки» полезнее самого
+        <code>DEFAULT</code>.</li>
+    </ul>
+
+    <h3>4. «Создавать секции руками на год вперёд? А автоматизировать?»</h3>
+    <p>Руками — не надо: это регламентная задача. Скрипт запускается раз в сутки, работает
+      <strong>идемпотентно</strong> (существующую секцию не трогает) и держит запас на N месяцев вперёд.
+      Минимальный вариант — функция на PL/pgSQL:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE OR REPLACE FUNCTION create_order_partitions(p_months int DEFAULT 12)
+RETURNS int                              -- вернёт, сколько секций реально создали
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_month date := date_trunc('month', now())::date;   -- начало текущего месяца
+    v_from  date;                                       -- граница FROM (включается)
+    v_to    date;                                       -- граница TO   (не включается)
+    v_name  text;                                       -- имя секции
+    v_made  int := 0;
+BEGIN
+    FOR i IN 0 .. p_months LOOP                          -- текущий месяц и N следующих
+        v_from := (v_month + make_interval(months =&gt; i))::date;
+        v_to   := (v_month + make_interval(months =&gt; i + 1))::date;
+        v_name := format('orders_%s', to_char(v_from, 'YYYY_MM'));   -- orders_2026_03
+
+        IF to_regclass(v_name) IS NULL THEN              -- идемпотентность: есть — пропускаем
+            EXECUTE format(
+                'CREATE TABLE %I PARTITION OF orders FOR VALUES FROM (%L) TO (%L)',
+                v_name, v_from, v_to);                   -- %I — идентификатор, %L — литерал
+            v_made := v_made + 1;
+        END IF;
+    END LOOP;
+    RETURN v_made;
+END $$;
+
+-- дозаполнить запас на год: создаст только недостающие секции
+SELECT create_order_partitions(12);      -- → 12 (или меньше, если часть уже была)</code></pre>
+    </div>
+
+    <p><strong>Когда запускать.</strong> Подойдёт любой планировщик, умеющий выполнить SQL-запрос:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- (а) pg_cron: планировщик внутри PostgreSQL
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+SELECT cron.schedule(
+    'orders-partitions',                       -- имя задания (по нему же можно изменить/удалить)
+    '0 3 * * *',                               -- cron-выражение: каждый день в 03:00
+    $$SELECT create_order_partitions(3)$$      -- держим запас 3 месяца и не разрастаемся
+);
+
+-- посмотреть задания и историю запусков
+SELECT jobid, schedule, command, active FROM cron.job;
+SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5;</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">-- (б) снаружи: systemd-таймер, Kubernetes CronJob, Airflow — тот же вызов одной командой
+psql "host=db dbname=app" -c "SELECT create_order_partitions(3);"</code></pre>
+    </div>
+    <p><strong>Или готовое расширение</strong> — <code>pg_partman</code>: оно и создаёт будущие секции, и
+      обслуживает их, и умеет отсоединять/удалять старые по политике хранения:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- один раз: отдать таблицу под управление (native = обычное декларативное секционирование)
+SELECT partman.create_parent(
+    p_parent_table =&gt; 'public.orders',
+    p_control      =&gt; 'created_at',
+    p_interval     =&gt; '1 month',
+    p_premake      =&gt; 4                       -- всегда держать 4 будущие секции
+);
+
+-- по расписанию (тем же pg_cron) — создать недостающие и обслужить старые
+CALL partman.run_maintenance();</code></pre>
+    </div>
+    <ul>
+      <li><strong>Почему <code>format()</code> с <code>%I</code>/<code>%L</code>:</strong> это единственный
+        безопасный способ собрать динамический SQL: <code>%I</code> экранирует <em>идентификатор</em>,
+        <code>%L</code> — <em>литерал</em>. Ручная склейка строки здесь была бы SQL-инъекцией.</li>
+      <li><strong>Что мониторить:</strong> (1) задание отработало — в <code>cron.job_run_details</code> нет
+        <code>failed</code>; (2) секция на следующий месяц существует:
+        <code>SELECT to_regclass('orders_2026_04') IS NOT NULL;</code> Если нет — алерт, иначе ошибку на
+        <code>INSERT</code> получите ровно в полночь первого числа.</li>
+      <li><strong>Сколько держать:</strong> запас 1–3 месяца плюс алерт — достаточно. Год вперёд тоже можно:
+        цена — записи в каталоге, а не место на диске.</li>
+    </ul>
+
     <h2>Частые ошибки</h2>
     <ol>
       <li><strong>Ключ выбран не по рабочим фильтрам.</strong> Тогда отсечения нет, а накладные расходы есть.</li>

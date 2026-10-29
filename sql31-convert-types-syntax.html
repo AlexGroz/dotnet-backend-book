@@ -27,12 +27,66 @@
       <thead><tr><th>Oracle</th><th>PostgreSQL</th><th>Подводный камень</th></tr></thead>
       <tbody>
         <tr><td><code>NUMBER</code></td><td><code>int</code> / <code>bigint</code> / <code>numeric</code></td><td>Выбор зависит от точности и диапазона</td></tr>
-        <tr><td><code>VARCHAR2</code></td><td><code>varchar</code> / <code>text</code></td><td>В PostgreSQL <code>text</code> практически без ограничений и без потери производительности</td></tr>
+        <tr><td><code>VARCHAR2</code></td><td><code>text</code> (рекомендуется) или <code>varchar(n)</code></td><td>Оба варианта работают одинаково быстро; <code>varchar(n)</code> добавляет только проверку длины — см. врезку ниже</td></tr>
         <tr><td><code>DATE</code></td><td><code>timestamp</code> / <code>timestamptz</code></td><td><strong>Классическая ловушка:</strong> в Oracle <code>DATE</code> хранит и дату, и время; в PostgreSQL <code>date</code> — только дату</td></tr>
         <tr><td><code>CLOB</code> / <code>BLOB</code></td><td><code>text</code> / <code>bytea</code></td><td>Работа с большими объектами устроена иначе</td></tr>
         <tr><td><code>ROWID</code></td><td><code>ctid</code></td><td><code>ctid</code> <strong>не стабилен</strong> (меняется при UPDATE/vacuum) — как ключ не годится</td></tr>
       </tbody>
     </table>
+
+    <div class="box note">
+      <span class="t">«Можно смело брать <code>text</code> вместо <code>varchar</code>?» — да, с одной оговоркой</span>
+      <p>В PostgreSQL <code>text</code> и <code>varchar</code> — <strong>один и тот же способ хранения</strong>:
+        оба переменной длины, строка занимает «столько, сколько нужно» плюс маленький заголовок. Никакого
+        «резерва под 255 символов» нет. Разница ровно одна: у <code>varchar(n)</code> есть
+        <strong>проверка длины</strong>.</p>
+      <table>
+        <tr><th></th><th><code>text</code></th><th><code>varchar(n)</code></th><th><code>char(n)</code></th></tr>
+        <tr><td>Место на диске</td><td>по факту</td><td>по факту (n — не резерв)</td><td>всегда n, добивается
+          пробелами</td></tr>
+        <tr><td>Ограничение длины</td><td>нет (технический предел — 1 ГБ)</td><td><code>n</code>; при
+          превышении — ошибка <code>22001 value too long</code></td><td><code>n</code> + пробелы</td></tr>
+        <tr><td>Скорость, индексы, план запроса</td><td colspan="2">идентичны — планировщик не различает эти
+          типы по стоимости</td><td>медленнее: пробелы участвуют в сравнениях</td></tr>
+        <tr><td>Когда выбирать</td><td>по умолчанию для строк</td><td>когда лимит — бизнес-правило
+          («код страны = 2»)</td><td>почти никогда (наследие Oracle)</td></tr>
+      </table>
+      <div class="codewrap">
+        <pre><code class="language-sql">-- эти два объявления эквивалентны по хранению и скорости
+CREATE TABLE t1 (name text);
+CREATE TABLE t2 (name varchar);              -- varchar без (n) — это буквально text
+
+-- а это — text + проверка длины (то же, что varchar(100), но лимит можно менять отдельно)
+CREATE TABLE t3 (name text CONSTRAINT name_len CHECK (length(name) &lt;= 100));</code></pre>
+      </div>
+      <p><strong>Когда всё-таки <code>varchar(n)</code>:</strong></p>
+      <ul>
+        <li>ограничение — <em>часть модели данных</em>, и вы хотите, чтобы база отвергала «слишком длинное»
+          значение сама (код региона, ISO-код валюты, ИНН);</li>
+        <li>миграция из Oracle: <code>VARCHAR2(4000)</code> → <code>varchar(4000)</code> сохраняет привычную
+          семантику и ловит те же ошибки;</li>
+        <li>внешний контракт (интеграция, чужой API) явно ограничивает длину.</li>
+      </ul>
+      <p><strong>Когда <code>text</code>:</strong> во всех остальных случаях — имена, адреса, комментарии,
+        JSON-фрагменты, произвольный пользовательский ввод. Лимит, если он нужен, ставят
+        <code>CHECK (length(x) &lt;= n)</code>: его можно изменить одной командой, не меняя тип колонки.</p>
+      <ul>
+        <li><strong>Про «изменить длину»:</strong> в <code>varchar(n)</code> увеличение <code>n</code> в
+          PostgreSQL 9.2+ — операция только по каталогу (таблица не перезаписывается), а уменьшение требует
+          проверки всех строк. С <code>text</code> + <code>CHECK</code> таких операций с типом вообще нет.</li>
+        <li><strong>Про «без ограничений»:</strong> предел всё же есть — 1 ГБ на значение. Длинные значения
+          (обычно больше ~2 КБ) PostgreSQL автоматически выносит в отдельное хранилище TOAST и сжимает; это
+          работает одинаково для <code>text</code> и <code>varchar</code>, поэтому «text медленнее на больших
+          строках» — миф.</li>
+        <li><strong>Единственная реальная ловушка:</strong> длинную строку <em>нельзя</em> положить в обычный
+          B-tree индекс — есть лимит на размер записи индекса (≈2704 байта). Это ограничение не типа, а
+          индекса: для длинных значений индексируют префикс (<code>left(x, 200)</code>) или хеш
+          (<code>md5(x)</code>), либо используют <code>hash</code>-индекс.</li>
+        <li><strong>Осторожно с <code>char(n)</code>:</strong> он <em>дополняет</em> значение пробелами до
+          <code>n</code>, из-за чего сравнения и <code>length()</code> ведут себя неожиданно. Из Oracle его
+          почти всегда надо переводить в <code>text</code>/<code>varchar</code>, а не в <code>char</code>.</li>
+      </ul>
+    </div>
 
     <h2>Функции и синтаксис</h2>
     <table>

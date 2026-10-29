@@ -47,17 +47,22 @@ WHERE  created_at &gt;= $1 AND created_at &lt; $2;
 
     <h2>Три разных «двоеточия»: не перепутать</h2>
     <p>Синтаксис зависит от того, <strong>кто</strong> подставляет значение. Одно и то же место в книге
-      может выглядеть по-разному:</p>
+      может выглядеть по-разному. Порядок строк в таблице — тот же, что и в примерах ниже (1 → 4), чтобы
+      не приходилось каждый раз сверяться:</p>
     <table>
-      <tr><th>Где пишете</th><th>Как выглядит</th><th>Кто подставляет</th></tr>
-      <tr><td><strong>Протокол PostgreSQL</strong></td><td><code>$1</code>, <code>$2</code></td>
-        <td>Сервер: значения приходят отдельным сообщением <code>Bind</code></td></tr>
-      <tr><td><strong>Драйвер .NET (Npgsql, Dapper)</strong></td><td><code>@from</code></td>
+      <tr><th>№</th><th>Где пишете</th><th>Как выглядит</th><th>Кто подставляет</th></tr>
+      <tr><td>1</td><td><strong>psql (консоль)</strong></td><td><code>:from</code>, <code>:'from'</code>,
+        <code>:"from"</code></td><td><strong>psql</strong>: подставляет текст <em>до</em> отправки на
+        сервер</td></tr>
+      <tr><td>2</td><td><strong>Драйвер .NET (Npgsql, Dapper)</strong></td><td><code>@from</code></td>
         <td>Драйвер: превращает <code>@from</code> в <code>$1</code> и отправляет значения</td></tr>
-      <tr><td><strong>EF Core</strong></td><td><code>@__from_0</code> (генерируется само)</td>
+      <tr><td>3</td><td><strong>EF Core</strong></td><td><code>@__from_0</code> (генерируется само)</td>
         <td>EF: строит SQL с параметрами, вы их обычно не пишете</td></tr>
-      <tr><td><strong>psql (консоль)</strong></td><td><code>:from</code></td>
-        <td><strong>psql</strong>: подставляет текст <em>до</em> отправки на сервер</td></tr>
+      <tr><td>4</td><td><strong>PL/pgSQL (тело функции)</strong></td><td><code>$1</code>, <code>$2</code></td>
+        <td>Сервер: аргументы функции подставляются по номеру</td></tr>
+      <tr><td>—</td><td><strong>Протокол PostgreSQL</strong> («на проводе»)</td><td><code>$1</code>,
+        <code>$2</code></td><td>Сервер: значения приходят отдельным сообщением <code>Bind</code>.
+        В этот вид превращаются варианты 2 и 4</td></tr>
     </table>
     <div class="box warn">
       <span class="t">Главное различие</span>
@@ -71,18 +76,49 @@ WHERE  created_at &gt;= $1 AND created_at &lt; $2;
     <h2>Примеры для каждого инструмента</h2>
 
     <h3>1. psql: переменные <code>:имя</code></h3>
-    <div class="codewrap">
-      <pre><code class="language-sql">-- \set задаёт переменную psql (это команда самого psql, а не SQL)
-\set from '2026-01-01'
-
--- :'from' — подставить как строковый литерал: psql сам поставит кавычки
-SELECT count(*) FROM orders WHERE created_at &gt;= :'from';
-
--- :"from" — подставить как ИДЕНТИФИКАТОР (имя таблицы или колонки)
-SELECT 1 AS :"column_name";
-
--- без кавычек :from подставляется «как есть» — легко получить ошибку синтаксиса</code></pre>
+    <div class="box note">
+      <span class="t">Что за обратный слеш в <code>\set</code></span>
+      <p>Команды, которые начинаются с обратного слеша (<code>\</code>), — это <strong>мета-команды самого
+        <code>psql</code></strong>, а не SQL. Их выполняет <em>клиент</em>: на сервер такая строка не уходит
+        вообще, сервер про неё ничего не знает. Отсюда четыре следствия:</p>
+      <ul>
+        <li>работают <strong>только в <code>psql</code></strong> — в Npgsql/Dapper, DBeaver, pgAdmin или в
+          миграции из кода <code>\set</code> даст синтаксическую ошибку;</li>
+        <li>точка с запятой в конце не нужна: <code>\</code>-команда заканчивается на переводе строки;</li>
+        <li><strong>регистр и слеш важны:</strong> <code>\set</code> — команда клиента, а <code>SET</code>
+          (без слеша) — <em>SQL-команда сервера</em>, которая меняет параметр сессии. Написав
+          <code>\set work_mem = '64MB'</code>, вы заведёте переменную psql с именем <code>work_mem</code>, а
+          не измените память сервера — для этого нужен <code>SET work_mem = '64MB'</code>;</li>
+        <li>полезные «соседи»: <code>\?</code> — список всех мета-команд, <code>\d orders</code> — описание
+          таблицы, <code>\dt</code> — список таблиц, <code>\x</code> — вывод «колонка: значение» (удобно для
+          широких строк), <code>\timing</code> — показывать время выполнения, <code>\q</code> — выход.</li>
+      </ul>
+      <p>Сама команда <code>\set имя значение</code> заводит переменную <em>внутри текущей сессии
+        <code>psql</code></em>. Значение — это текст; кавычки, которые вы напечатали, тоже станут частью
+        текста (поэтому ниже <code>'2026-01-01'</code> пишут в кавычках вручную либо используют
+        <code>:'from'</code>, который сам их добавит).</p>
     </div>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- \set задаёт переменную psql (команда самого psql, а не SQL)
+\set from 2026-01-01
+
+-- :'from' — подставить как СТРОКОВЫЙ ЛИТЕРАЛ: psql сам поставит кавычки
+SELECT count(*) FROM orders WHERE created_at &gt;= :'from';
+--   на сервер уйдёт: ... WHERE created_at &gt;= '2026-01-01'
+
+-- без кавычек :from подставляется «как есть» → текст без кавычек ломает синтаксис
+SELECT count(*) FROM orders WHERE created_at &gt;= :from;
+--   на сервер уйдёт: ... WHERE created_at &gt;= 2026-01-01   → ERROR: syntax error
+
+-- :"…" — подставить как ИДЕНТИФИКАТОР (имя таблицы или колонки), psql поставит двойные кавычки
+\set tbl orders
+SELECT count(*) FROM :"tbl";          -- → SELECT count(*) FROM "orders"
+\set col total
+SELECT sum(total) AS :"col" FROM orders;   -- → SELECT sum(total) AS "total" FROM orders</code></pre>
+    </div>
+    <p>Идентификатор через <code>:"…"</code> — единственный способ «параметризовать» имя таблицы или
+      колонки, но в приложении так делать <strong>нельзя</strong> (см. «Ловушки» в конце главы): имя
+      подставляется текстом, поэтому его берут только из «белого списка».</p>
     <div class="codewrap">
       <pre><code class="language-sql">-- удобный приём: взять значение из запроса и использовать дальше
 SELECT min(created_at) AS from_date FROM orders \gset

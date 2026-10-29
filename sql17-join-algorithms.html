@@ -26,49 +26,206 @@
     <p><code>JOIN</code> сопоставляет строки двух наборов по условию (обычно по равенству ключей: «заказы и их
       клиенты»). Способов это сделать несколько, и у каждого — своя цена в зависимости от объёмов данных.
       Планировщик выбирает способ по <strong>оценке числа строк</strong> (глава 14).</p>
+    <p>Дальше для каждого способа одинаковый порядок: <strong>как работает → как выглядит в плане (с выводом)
+      → что делать, если план плохой</strong>. Правильный ответ на собеседовании — не «нужен Hash Join», а
+      «вот сигнал в плане, вот причина, вот что я меняю и как проверяю».</p>
 
     <h2>Nested Loop (вложенный цикл)</h2>
     <p>Для каждой строки внешнего набора делается поиск во внутреннем.</p>
-    <ul>
-      <li><strong>Хорош, когда:</strong> внешних строк мало, а внутренний поиск идёт <em>по индексу</em>
-        (глава 10) — тогда он отзывчив и быстр, особенно при <code>LIMIT</code>.</li>
-      <li><strong>Узкое место, когда:</strong> внешних строк <strong>много</strong> — получаем тысячи циклов
-        и сложность порядка N×M. Частая причина — недооценка числа строк или отсутствие индекса на
-        внутренней стороне.</li>
-      <li><strong>Сигнал в плане:</strong> большое <code>loops</code> и/или <code>rows</code> на внешнем узле
-        в разы меньше <code>actual rows</code>.</li>
-    </ul>
+    <div class="codewrap">
+      <p class="cap">Хороший план: внешняя строка одна, внутренний поиск по индексу</p>
+      <pre><code class="language-sql">EXPLAIN (ANALYZE)
+SELECT o.id, i.sku
+FROM   orders o
+JOIN   order_items i ON i.order_id = o.id
+WHERE  o.id = 42;
+
+Nested Loop  (actual time=0.031..0.094 rows=3 loops=1)
+  -&gt;  Index Scan using orders_pkey on orders o  (actual time=0.020..0.021 rows=1 loops=1)
+        Index Cond: (id = 42)
+  -&gt;  Index Scan using order_items_order_id_idx on order_items i
+        (actual time=0.008..0.015 rows=3 loops=3)      ← 3 цикла по 1 индексу ≈ 3×0.015 мс
+        Index Cond: (order_id = 42)
+
+-- ВЫВОД: внешних строк 1, циклов 3, время в микросекундах.
+-- Это лучший возможный план: ровно то, для чего Nested Loop существует.</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Плохой план: внешних строк полмиллиона, а внутренняя сторона — Seq Scan</p>
+      <pre><code class="language-sql">Nested Loop  (actual time=812.4..48213.5 rows=480000 loops=1)   ← 48 секунд
+  -&gt;  Seq Scan on orders o  (actual time=0.02..120.4 rows=480000 loops=1)
+        Filter: (status = 'NEW'::text)
+  -&gt;  Seq Scan on order_items i  (actual time=0.01..0.06 rows=4 loops=480000)
+        Filter: (order_id = o.id)                              ← 480 000 полных сканов!
+
+-- ВЫВОД: 480 000 × (полное чтение order_items) — это O(N×M).
+-- «rows=4 loops=480000» = 1 920 000 строк, проверенных ради 480 000 результата.</code></pre>
+    </div>
+    <h3>Что делать, если Nested Loop плохой</h3>
+    <ol>
+      <li><strong>Проверить оценку</strong> внешнего узла: если <code>rows=10</code>, а
+        <code>actual rows=480000</code> — планировщик выбрал Nested Loop «по ошибке». Лечится
+        <code>ANALYZE orders;</code> (или поднятием <code>default_statistics_target</code>, глава 13) — после
+        этого план перестроится сам.</li>
+      <li><strong>Индекс на внутренней стороне</strong> по колонке соединения:
+        <code>CREATE INDEX ON order_items (order_id);</code> — тогда каждый цикл станет дешёвым (и часто этого
+        достаточно, даже при многих тысячах циклов).</li>
+      <li><strong>Уменьшить число внешних строк</strong> — чтобы фильтр стал индексным:
+        <code>CREATE INDEX ON orders (status, created_at DESC);</code> Тогда внешних строк будет не 480 000, а
+        сотни.</li>
+      <li><strong>Проверить, не лучше ли Hash</strong> (только для диагностики, не как постоянное решение):
+        <code>SET LOCAL enable_nestloop = off;</code> и снова <code>EXPLAIN</code>. Если с Hash в разы
+        быстрее — значит оценка кардинальности врёт, и правим статистику, а не план.</li>
+      <li><strong>Не «чинить» его там, где он хорош:</strong> при <code>LIMIT 20</code> Nested Loop выигрывает
+        у Hash, потому что умеет остановиться на двадцатой строке, а Hash обязан построить хеш целиком.</li>
+    </ol>
 
     <h2>Hash Join (соединение по хешу)</h2>
-    <p>Строится хеш-таблица по меньшему набору, затем по ней «пробивается» больший.</p>
-    <ul>
-      <li><strong>Хорош, когда:</strong> соединяются <strong>большие наборы по равенству</strong> — обычно
-        лучший выбор для «тяжёлых» запросов.</li>
-      <li><strong>Узкое место, когда:</strong> хеш <strong>не влезает в память</strong> — тогда он идёт на
-        диск батчами. Работает только по равенству (не для диапазонов).</li>
-      <li><strong>Сигнал в плане:</strong> <code>Batches</code> больше 1, рост <code>Memory Usage</code> и
-        <code>temp written</code> → мало <code>work_mem</code>.</li>
-    </ul>
+    <p>Строится хеш-таблица по меньшему набору, затем по ней «пробивается» больший. Работает только по
+      равенству: хеш отвечает на вопрос «есть ли такой ключ», а не «больше/меньше».</p>
+    <div class="codewrap">
+      <p class="cap">Хороший план: хеш целиком в памяти</p>
+      <pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS)
+SELECT c.name, count(*)
+FROM   orders o
+JOIN   customers c ON c.id = o.customer_id
+GROUP  BY c.name;
+
+HashAggregate  (actual time=920.4..930.1 rows=200 loops=1)
+  -&gt;  Hash Join  (actual time=8.3..812.4 rows=480000 loops=1)
+        Hash Cond: (o.customer_id = c.id)
+        -&gt;  Seq Scan on orders o        (rows=480000)     ← большая сторона «пробивается»
+        -&gt;  Hash  (actual time=8.1..8.1 rows=200 loops=1)  ← хеш по МЕНЬШЕЙ стороне
+              Buckets: 1024  Batches: 1  Memory Usage: 1024kB   ← Batches=1 — всё в памяти
+              -&gt;  Seq Scan on customers c  (rows=200)
+
+-- ВЫВОД: Batches = 1 → ни одного временного файла. Дёшево и предсказуемо.</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Плохой план: хеш не влез в work_mem и пошёл на диск батчами</p>
+      <pre><code class="language-sql">Hash Join  (actual time=1204.8..93412.6 rows=960000 loops=1)
+  Hash Cond: (i.order_id = o.id)
+  -&gt;  Seq Scan on order_items i  (rows=960000)
+  -&gt;  Hash  (actual time=702.1..702.1 rows=480000 loops=1)
+        Buckets: 524288  Batches: 8  Memory Usage: 4096kB   ← в памяти только 1/8 хеша
+        Buffers: shared hit=12040, temp read=18422 written=18440   ← 144 МБ на диск
+
+-- ВЫВОД: Batches = 8 значит «8 проходов»: хеш порезан на 8 частей, и order_items
+-- перечитывается для каждой части. Время выросло в 100 раз из-за диска, а не из-за CPU.</code></pre>
+    </div>
+    <h3>Что делать, если Hash Join плохой</h3>
+    <ol>
+      <li><strong>Дать памяти этому запросу</strong> — самое прямое лечение, если
+        <code>Batches &gt; 1</code>:
+        <code>SET LOCAL work_mem = '256MB';</code> внутри транзакции (или в сессии отчёта), затем снова
+        <code>EXPLAIN</code> — <code>Batches</code> должен стать <code>1</code>. Глобально поднимать нельзя:
+        <code>work_mem</code> выделяется <em>на операцию</em> сортировки/хеша, и при 200 соединениях это
+        гигабайты.</li>
+      <li><strong>Уменьшить «строящуюся» сторону</strong> — хеш по меньшему набору. Часто помогает отфильтровать
+        заранее: <code>WHERE o.created_at &gt;= :from</code> вместо фильтра после соединения, или
+        предварительная агрегация в подзапросе (<code>LEFT JOIN (SELECT … GROUP BY …)</code>).</li>
+      <li><strong>Убрать лишние колонки</strong> из <code>SELECT</code>: чем уже строки, тем меньше хеш
+        (<code>Memory Usage</code> падает).</li>
+      <li><strong>Индекс вместо соединения</strong>, если строк на выходе мало: индекс на
+        <code>order_items (order_id)</code> даёт Nested Loop с 20 циклами вместо хеширования 960 000 строк.</li>
+      <li><strong>Проверить статистику</strong>, если Hash выбран там, где данных мало:
+        <code>rows</code> на узлах сильно больше <code>actual rows</code> → <code>ANALYZE</code>.</li>
+    </ol>
 
     <h2>Merge Join (соединение слиянием)</h2>
-    <p>Обе стороны сортируются и «сливаются» за один проход.</p>
-    <ul>
-      <li><strong>Хорош, когда:</strong> обе стороны <strong>уже отсортированы</strong> (например, индексами)
-        — тогда очень эффективен и на больших наборах.</li>
-      <li><strong>Узкое место, когда:</strong> сортировка больших наборов выполняется «с нуля» — дорого, а при
-        нехватке памяти уходит на диск.</li>
-      <li><strong>Сигнал в плане:</strong> узлы <code>Sort</code> с <code>external merge Disk</code> перед
-        <code>Merge Join</code>.</li>
-    </ul>
+    <p>Обе стороны должны быть отсортированы по ключу соединения, после чего они «сливаются» за один проход —
+      как две колоды карт, которые раскладывают в одну.</p>
+    <div class="codewrap">
+      <p class="cap">Плохой план: сортировки «с нуля» ради самого слияния</p>
+      <pre><code class="language-sql">EXPLAIN (ANALYZE, BUFFERS)
+SELECT o.id, c.name
+FROM   orders o
+JOIN   customers c ON c.id = o.customer_id;
 
+Merge Join  (actual time=812.4..1204.9 rows=480000 loops=1)
+  Merge Cond: (o.customer_id = c.id)
+  -&gt;  Sort  (actual time=402.1..601.2 rows=480000 loops=1)      ← сортируем 480 000 строк
+        Sort Key: o.customer_id
+        Sort Method: external merge  Disk: 25120kB                ← и ещё на диск
+        Buffers: shared hit=20114 read=5832, temp read=3140 written=3144
+        -&gt;  Seq Scan on orders o  (rows=480000)
+  -&gt;  Index Scan using customers_pkey on customers c  (rows=200)   ← эта сторона уже отсортирована
+
+-- ВЫВОД: слияние тут дешевле не стало — мы заплатили за сортировку 480 000 строк (с выгрузкой на
+-- диск). Индекс по customers дал порядок только по одной стороне; вторая сторона сортируется «с нуля».</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Хороший план: обе стороны берут порядок из индексов</p>
+      <pre><code class="language-sql">CREATE INDEX ON orders (customer_id);   -- теперь order по customer_id «бесплатен»
+
+Merge Join  (actual time=0.043..812.5 rows=480000 loops=1)
+  Merge Cond: (o.customer_id = c.id)
+  -&gt;  Index Only Scan using orders_customer_id_idx on orders o  (rows=480000)
+        Heap Fetches: 0                          ← ни таблицы, ни сортировки
+  -&gt;  Index Scan using customers_pkey on customers c  (rows=200)
+
+-- ВЫВОД: узлы Sort исчезли, temp read/written исчезли: слияние стало одним проходом
+-- по двум отсортированным индексам. Вот это и есть «Merge Join в своей стихии».</code></pre>
+    </div>
+    <h3>Что делать, если Merge Join плохой</h3>
+    <ol>
+      <li><strong>Убрать сортировку, дав порядок индексу</strong> — главное лечение. Индекс по колонке
+        соединения (или по <code>(col1, col2)</code> в нужном порядке) превращает <code>Sort</code> в
+        <code>Index Scan</code>. После этого Merge Join становится дешёвым — либо планировщик сам выберет
+        Nested Loop, и это тоже нормально.</li>
+      <li><strong>Проверить, нужна ли сортировка вообще:</strong> если в запросе есть
+        <code>ORDER BY</code> по тому же ключу, что и соединение, — Merge Join «бесплатно» отдаёт нужный
+        порядок. Если <code>ORDER BY</code> в запросе нет, merge join почти всегда лишний: Hash сделает то же
+        без сортировки.</li>
+      <li><strong>Сократить набор до сортировки:</strong> фильтр
+        (<code>WHERE o.created_at &gt;= :from</code>) или <code>LIMIT</code> в подзапросе — сортировать
+        10 000 строк дешевле, чем 480 000.</li>
+      <li><strong>Проверить память:</strong> <code>external merge Disk</code> перед Merge Join — тот же симптом
+        нехватки <code>work_mem</code>; <code>SET LOCAL work_mem = '256MB';</code> уберёт диск.</li>
+      <li><strong>Диагностика переключателем:</strong> <code>SET LOCAL enable_mergejoin = off;</code> — если
+        Hash-план заметно быстрее, значит merge выбран из-за завышенной оценки строк → <code>ANALYZE</code>.
+        Оставлять переключатель включённым нельзя: он «ломает» другие запросы в этой сессии.</li>
+    </ol>
+
+    <h3>Сводка: сигнал → причина → решение</h3>
     <table>
-      <thead><tr><th>Тип</th><th>Лучше всего подходит</th><th>Становится проблемой</th></tr></thead>
+      <thead><tr><th>Тип</th><th>Лучше всего подходит</th><th>Становится проблемой</th><th>Что делать</th></tr></thead>
       <tbody>
-        <tr><td><strong>Nested Loop</strong></td><td>Внешних строк мало, внутренний поиск по индексу</td><td>Много внешних строк → тысячи циклов, O(N×M)</td></tr>
-        <tr><td><strong>Hash Join</strong></td><td>Большие наборы, соединение по равенству</td><td>Хеш не влезает в <code>work_mem</code> → батчи на диск</td></tr>
-        <tr><td><strong>Merge Join</strong></td><td>Обе стороны уже отсортированы</td><td>Нужна дорогая сортировка больших наборов</td></tr>
+        <tr><td><strong>Nested Loop</strong></td><td>Внешних строк мало, внутренний поиск по индексу</td>
+          <td>Много внешних строк → тысячи циклов, O(N×M)</td><td>Индекс на внутренней стороне; индекс под
+          фильтр внешней стороны; <code>ANALYZE</code>; проверить план с <code>enable_nestloop = off</code></td></tr>
+        <tr><td><strong>Hash Join</strong></td><td>Большие наборы, соединение по равенству</td>
+          <td>Хеш не влезает в <code>work_mem</code> → батчи на диск</td>
+          <td><code>SET LOCAL work_mem</code>; уменьшить строящуюся сторону (фильтр/агрегация заранее);
+          убрать лишние колонки; индекс, если строк на выходе мало</td></tr>
+        <tr><td><strong>Merge Join</strong></td><td>Обе стороны уже отсортированы</td>
+          <td>Нужна дорогая сортировка больших наборов</td><td>Индекс по ключу соединения (убрать
+          <code>Sort</code>); фильтр до сортировки; <code>work_mem</code>; проверить с
+          <code>enable_mergejoin = off</code></td></tr>
       </tbody>
     </table>
+    <div class="box note">
+      <span class="t">Переключатели <code>enable_*</code> — только для диагностики</span>
+      <p><code>SET LOCAL enable_hashjoin / enable_mergejoin / enable_nestloop = off</code> не «запрещают» способ
+        навсегда: PostgreSQL использует их как огромный штраф к стоимости. Это инструмент, чтобы <em>увидеть
+        альтернативный план и сравнить время</em>. Если альтернатива лучше — значит виновата не «магия
+        планировщика», а оценка строк или отсутствие индекса; правим это, а переключатель снимаем.</p>
+    </div>
+
+    <h2>Если план плохой: порядок действий</h2>
+    <ol>
+      <li><strong>Найти узел соединения</strong> и посчитать его время: <code>actual time × loops</code>. Именно
+        он, а не «весь запрос», съедает секунды (глава 19).</li>
+      <li><strong>Сравнить <code>rows</code> и <code>actual rows</code></strong> на входах этого узла. Расхождение
+        в разы → виновата статистика (<code>ANALYZE</code>), а не выбор алгоритма.</li>
+      <li><strong>Посмотреть, что лежит под узлом:</strong> <code>Sort</code> с диском или
+        <code>Seq Scan</code> на большой таблице → лечится индексом; <code>Index Scan</code> на внутренней
+        стороне с большим <code>loops</code> → индекса мало, нужен другой способ соединения.</li>
+      <li><strong>Проверить память:</strong> <code>Batches</code>, <code>Disk:</code>,
+        <code>temp read/written</code> → <code>work_mem</code>.</li>
+      <li><strong>Менять по одному</strong> и каждый раз снимать новый <code>EXPLAIN</code>: иначе непонятно,
+        что именно помогло (глава 20).</li>
+    </ol>
 
     <div class="box gold">
       <span class="t">★ Ключевая мысль</span>

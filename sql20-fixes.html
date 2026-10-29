@@ -66,17 +66,108 @@ SELECT id, created_at, total FROM orders ORDER BY created_at DESC LIMIT 20 OFFSE
       запрос — время растёт линейно. Индекс здесь не спасает: он помогает найти <em>начало</em> диапазона,
       а не «двадцатитысячную» строку.</p>
     <p><strong>Keyset-пагинация</strong> («пагинация по ключу», seek method) — вместо номера страницы
-      клиент присылает <em>значения последней увиденной строки</em>, и запрос продолжает с этого места:</p>
+      клиент присылает <em>значения последней увиденной строки</em>, и запрос продолжает с этого места.
+      Разберём это на маленькой таблице, потому что именно здесь обычно возникает вопрос «а откуда я знаю
+      этот <code>id</code>?».</p>
+    <p>Пусть в <code>orders</code> шесть строк, и у трёх из них <strong>одинаковое</strong>
+      <code>created_at</code> — так почти всегда и бывает в реальности:</p>
+    <table>
+      <tr><th><code>id</code></th><th><code>created_at</code></th></tr>
+      <tr><td>102</td><td>2026-01-05 10:00</td></tr>
+      <tr><td>101</td><td>2026-01-05 10:00</td></tr>
+      <tr><td>100</td><td>2026-01-05 10:00</td></tr>
+      <tr><td>99</td><td>2026-01-05 09:00</td></tr>
+      <tr><td>98</td><td>2026-01-05 09:00</td></tr>
+      <tr><td>97</td><td>2026-01-05 08:00</td></tr>
+    </table>
+    <p><strong>Шаг 1. Первая страница.</strong> Курсора ещё нет, поэтому запрос обычный:</p>
     <div class="codewrap">
-      <pre><code class="language-sql">-- клиент передал курсор: created_at и id последней строки предыдущей страницы
-SELECT id, created_at, total
+      <pre><code class="language-sql">SELECT id, created_at, total
 FROM   orders
-WHERE  (created_at, id) &lt; (:'last_created_at', :'last_id')   -- «после неё»
 ORDER  BY created_at DESC, id DESC
-LIMIT  20;</code></pre>
+LIMIT  2;
+
+-- результат (страница 1):
+--   id  |      created_at
+--  -----+---------------------
+--   102 | 2026-01-05 10:00:00
+--   101 | 2026-01-05 10:00:00     ← последняя строка страницы</code></pre>
     </div>
-    <p>Здесь работает индекс по <code>(created_at DESC, id DESC)</code>: база делает seek сразу к нужному
-      месту и читает ровно 20 строк — стоимость страницы не зависит от её номера. Пара
+    <p><strong>Шаг 2. Сервер запоминает последнюю строку.</strong> «Курсор» — это просто <em>два значения из
+      последней отданной строки</em>: <code>created_at = '2026-01-05 10:00:00'</code> и <code>id = 101</code>.
+      Приложение возвращает их клиенту, обычно одной непрозрачной строкой:</p>
+    <div class="codewrap">
+      <pre><code class="language-json">{
+  "items": [ { "id": 102, ... }, { "id": 101, ... } ],
+  "nextCursor": "MjAyNi0wMS0wNVQxMDowMDowMHwxMDE="   // base64 от "2026-01-05T10:00:00|101"
+}</code></pre>
+    </div>
+    <p>Клиент <strong>не придумывает</strong> эти значения и не собирает их из даты — он просто возвращает то,
+      что получил. Поэтому «откуда я знаю, какой <code>id</code>» — вопрос снимается: это <code>id</code> той
+      строки, которую клиент уже показал пользователю.</p>
+    <p><strong>Шаг 3. Вторая страница.</strong> Запрос продолжает с курсора:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT id, created_at, total
+FROM   orders
+WHERE  (created_at, id) &lt; (:'last_created_at', :'last_id')    -- ('2026-01-05 10:00:00', 101)
+ORDER  BY created_at DESC, id DESC
+LIMIT  2;
+
+-- результат (страница 2): ровно то, что идёт ПОСЛЕ строки (10:00, 101)
+--   id  |      created_at
+--  -----+---------------------
+--   100 | 2026-01-05 10:00:00     ← та же дата, но id меньше
+--    99 | 2026-01-05 09:00:00</code></pre>
+    </div>
+    <p><strong>Как читается <code>(created_at, id) &lt; (…, …)</code>.</strong> Это <em>сравнение кортежей</em>:
+      оно идёт <strong>по порядку</strong> — сначала сравнивается дата, и только если даты <em>равны</em>,
+      сравнивается <code>id</code>. Поэтому «id сам по себе» здесь не участвует в решении: строка с датой
+      <code>09:00</code> проходит по первому признаку, независимо от её <code>id</code>. Для наглядности тот же
+      смысл можно записать через <code>OR</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WHERE created_at &lt; :'last_created_at'                       -- дата раньше — точно «после неё»
+   OR (created_at = :'last_created_at' AND id &lt; :'last_id')  -- дата та же → решает id</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Что будет, если взять только дату</span>
+      <p>Кажется, что <code>id</code> не нужен: «фильтра по <code>created_at &lt; :last</code> достаточно».
+        Но граница страницы почти никогда не совпадает с границей одинаковых дат:</p>
+      <div class="codewrap">
+        <pre><code class="language-sql">-- ✘ только дата: строка с id=100 (10:00) ПОТЕРЯНА — она не попала ни на первую, ни на вторую страницу
+WHERE created_at &lt; '2026-01-05 10:00:00'
+-- → 99, 98   (а 100 пропала)
+
+-- ✘ нестрогое сравнение: строки 102 и 101 придут ВТОРОЙ раз
+WHERE created_at &lt;= '2026-01-05 10:00:00'
+-- → 102, 101, 100 …
+
+-- ✔ кортеж: и без потерь, и без дублей
+WHERE (created_at, id) &lt; ('2026-01-05 10:00:00', 101)
+-- → 100, 99</code></pre>
+      </div>
+      <p>Именно поэтому <code>id</code> называется <strong>tie-breaker</strong> («разруливающий ничьи»): он делает
+        порядок строк <em>однозначным</em>, а значит «следующая страница» определена без вариантов.</p>
+    </div>
+    <p><strong>Что нужно на стороне базы.</strong> Индекс в точности по тому же порядку, что и
+      <code>ORDER BY</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE INDEX ON orders (created_at DESC, id DESC);
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, created_at FROM orders
+WHERE  (created_at, id) &lt; ('2026-01-05 10:00:00', 101)
+ORDER  BY created_at DESC, id DESC
+LIMIT  2;
+
+Limit  (actual time=0.021..0.028 rows=2 loops=1)
+  -&gt;  Index Only Scan using orders_created_at_id_idx on orders
+        Index Cond: (ROW(created_at, id) &lt; ROW('2026-01-05 10:00:00+00'::timestamptz, 101))
+        Heap Fetches: 0
+
+-- ВЫВОД: база «прыгает» по индексу сразу в нужное место (Index Cond) и читает ровно 2 записи.
+-- Глубина страницы на стоимость не влияет: страница №1 и страница №5000 стоят одинаково.</code></pre>
+    </div>
+    <p>Стоимость страницы не зависит от её номера — в этом и выигрыш. Пара
       <code>(created_at, id)</code> сравнивается целиком, и <code>ORDER BY</code> должен идти по тем же
       колонкам: иначе порядок неоднозначен (у двух заказов может совпасть <code>created_at</code>).</p>
     <table>

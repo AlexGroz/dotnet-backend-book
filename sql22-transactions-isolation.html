@@ -127,6 +127,23 @@ SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</code></pre>
         <tr><td><strong>Serializable</strong></td><td>Как RR + отслеживание конфликтов (SSI)</td><td>Только откат с <code>40001</code> — это нормально, транзакцию повторяют</td></tr>
       </tbody>
     </table>
+    <div class="box note">
+      <span class="t">«Сериализация» в «конфликте сериализации» — это не про JSON</span>
+      <p><strong>Сериализация транзакций</strong> (от <em>series</em> — «ряд, последовательность») — это режим, в
+        котором база гарантирует: результат параллельных транзакций такой же, как если бы они выполнялись
+        <strong>строго по очереди, одна за другой</strong>. Транзакции при этом идут одновременно — «очередь»
+        существует только в смысле результата.</p>
+      <p>Чтобы так вышло, PostgreSQL (механизм SSI) запоминает, кто что прочитал и кто что записал, и ищет
+        <strong>циклы зависимостей</strong>: «A прочитала данные, которые изменила B, а B — данные, которые
+        изменила A». При таком цикле <em>никакой</em> последовательный порядок не даёт правильного результата.
+        Это и есть <strong>сериализационный конфликт</strong> (аномалия сериализации).</p>
+      <p>Разрешить его «на лету» нельзя, поэтому одна из транзакций откатывается с кодом
+        <code>40001</code> (<code>serialization_failure</code>). Это не сбой: база <em>защитила</em> данные, а
+        приложение должно <strong>повторить транзакцию целиком</strong> — при повторе она увидит уже новое
+        состояние, и цикла не будет.</p>
+      <p>И не путайте с <strong>сериализацией данных</strong> (объект → JSON/XML/байты): слово то же, смысл
+        совсем другой.</p>
+    </div>
     <div class="box tip">
       <span class="t">Что выбирать</span>
       <ul>
@@ -138,26 +155,110 @@ SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</code></pre>
     </div>
 
     <h2><code>SAVEPOINT</code>: откатить часть транзакции</h2>
-    <p>Иногда нужно отменить не всё, а только последний шаг:</p>
+    <p><code>SAVEPOINT имя</code> ставит «закладку» внутри транзакции, а
+      <code>ROLLBACK TO SAVEPOINT имя</code> отменяет всё, что сделано <em>после</em> неё, оставляя более ранние
+      изменения. Транзакция при этом остаётся живой — работу можно продолжать.</p>
+    <div class="box warn">
+      <span class="t">Сначала — как это НЕ работает</span>
+      <p>Соблазнительно записать команды подряд, «на всякий случай»:</p>
+      <div class="codewrap">
+        <pre><code class="language-sql">SAVEPOINT sp;
+UPDATE payments SET status = 'sent' WHERE id = 42;     -- шаг, который может упасть
+ROLLBACK TO SAVEPOINT sp;                              -- ✘ выполнится ВСЕГДА, а не «если ошибка»
+UPDATE payments SET status = 'retry' WHERE id = 42;</code></pre>
+      </div>
+      <p><code>ROLLBACK TO SAVEPOINT</code> — это обычная команда, а не конструкция «если ошибка». Поэтому в
+        такой записи итог <strong>всегда один и тот же</strong>: <code>sent</code> отменён,
+        <code>retry</code> применён. Даже если шаг прошёл успешно. Откат «по факту неудачи» так не
+        получится — нужно <em>ветвление</em>, которого в чистом SQL нет.</p>
+    </div>
+    <p><strong>Сценарий 1: шаг упал.</strong> Так это выглядит в интерактивной сессии <code>psql</code> (шаг
+      падает, потому что <code>external_ref</code> уже занят другой строкой):</p>
     <div class="codewrap">
-      <pre><code class="language-sql">BEGIN;
+      <pre><code class="language-sql">BEGIN;                                                   -- BEGIN
+UPDATE accounts SET balance = balance - 100 WHERE id = 1; -- UPDATE 1  (деньги списаны)
+SAVEPOINT sp;                                            -- SAVEPOINT
 
-UPDATE accounts SET balance = balance - 100 WHERE id = 1;   -- списали
+UPDATE payments SET external_ref = 'pay_777', status = 'sent'
+WHERE  id = 42;
+-- ERROR:  duplicate key value violates unique constraint "payments_external_ref_key"
+-- DETAIL:  Key (external_ref)=(pay_777) already exists.
+--   ↑ транзакция помечена прерванной: любая следующая команда, КРОМЕ отката, упадёт
 
-SAVEPOINT after_debit;                                      -- точка сохранения
+ROLLBACK TO SAVEPOINT sp;                                -- ROLLBACK — «сняли аварию», списание цело
+UPDATE payments SET external_ref = 'pay_778', status = 'retry'
+WHERE  id = 42;                                          -- UPDATE 1  — пробуем иначе
+COMMIT;                                                  -- COMMIT — списание + retry сохранены</code></pre>
+    </div>
+    <p><strong>Сценарий 2: шаг прошёл.</strong> Тогда откатываться не к чему — закладку просто убирают, а
+      <code>retry</code> <strong>не выполняется</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN;                                                   -- BEGIN
+UPDATE accounts SET balance = balance - 100 WHERE id = 1; -- UPDATE 1
+SAVEPOINT sp;                                            -- SAVEPOINT
 
-UPDATE payments SET status = 'sent' WHERE id = 42;          -- шаг, который может не получиться
-ROLLBACK TO SAVEPOINT after_debit;                          -- откатили ТОЛЬКО его
+UPDATE payments SET external_ref = 'pay_777', status = 'sent'
+WHERE  id = 42;                                          -- UPDATE 1  (ошибки нет)
 
-UPDATE payments SET status = 'retry' WHERE id = 42;         -- пробуем иначе
-COMMIT;                                                     -- списание осталось</code></pre>
+RELEASE SAVEPOINT sp;                                    -- RELEASE — закладка больше не нужна
+COMMIT;                                                  -- COMMIT — сохранены sent, а не retry</code></pre>
     </div>
     <div class="box warn">
       <span class="t">Ошибка внутри транзакции «отравляет» её</span>
       <p>После любой ошибки PostgreSQL помечает транзакцию как прерванную: следующие команды падают с
         <code>current transaction is aborted</code>. Помогает либо <code>ROLLBACK</code> целиком, либо откат к
-        <code>SAVEPOINT</code>, если он был поставлен заранее.</p>
+        <code>SAVEPOINT</code>, если он был поставлен заранее. Именно поэтому savepoint — не «удобство», а
+        единственный способ продолжить работу после ошибки внутри транзакции.</p>
     </div>
+    <p><strong>Прямые ответы на два вопроса.</strong> Сравните «безусловную» запись из начала раздела и
+      правильную схему:</p>
+    <table>
+      <thead><tr><th>Что произошло с шагом <code>sent</code></th><th>Выполнится ли <code>retry</code>?</th>
+        <th>Как должно быть</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Ошибка</strong> (шаг откатился)</td><td>да — сразу после
+          <code>ROLLBACK TO SAVEPOINT</code></td><td>да: это и есть обработка неудачи, после неё —
+          <code>COMMIT</code></td></tr>
+        <tr><td><strong>Успех</strong> (шаг не откатился)</td><td>в безусловной записи — <strong>да</strong>,
+          и это ошибка: успешный <code>sent</code> будет стёрт</td><td>нет: нужен <code>RELEASE
+          SAVEPOINT</code> и <code>COMMIT</code>, ветки <code>retry</code> не должно быть вовсе</td></tr>
+        <tr><td><strong>Ошибка, а savepoint не ставили</strong></td><td>не выполнится ничего: транзакция уже
+          прервана</td><td>остаётся <code>ROLLBACK</code> всей транзакции — списание тоже пропадёт</td></tr>
+      </tbody>
+    </table>
+    <p>Короткая формула: <strong><code>retry</code> — это ветка «если упало», а не следующий шаг</strong>. Значит
+      нужен код с ветвлением — PL/pgSQL или C#.</p>
+    <h3>Ветвление в PL/pgSQL: блок с <code>EXCEPTION</code></h3>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE OR REPLACE FUNCTION pay(p_id bigint, p_ref text)
+RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+    -- шаг, который может упасть (например, дубликат external_ref)
+    UPDATE payments SET external_ref = p_ref, status = 'sent' WHERE id = p_id;
+    RETURN 'sent';                                  -- ошибки не было → выходим здесь
+EXCEPTION
+    WHEN unique_violation THEN                      -- сработал unique-индекс по external_ref
+        -- сюда управление приходит уже ПОСЛЕ автоматического отката этого блока:
+        -- для блоков с обработчиком PostgreSQL сам ставит savepoint на входе
+        UPDATE payments SET status = 'retry' WHERE id = p_id;   -- ветка «если упало»
+        RETURN 'retry';
+END $$;</code></pre>
+    </div>
+    <ul>
+      <li><strong>Ключевая деталь:</strong> блок <code>BEGIN … EXCEPTION … END</code> — это <em>неявный</em>
+        <code>SAVEPOINT</code>. Поэтому после ошибки откатывается только тело блока, а внешняя транзакция
+        (со списанием денег) продолжает жить.</li>
+      <li><strong>Ловушка:</strong> обработчик ловит <em>любую</em> ошибку указанного класса. Проверяйте
+        <code>SQLSTATE</code>/условие (<code>WHEN unique_violation</code>, а не <code>WHEN others</code>),
+        иначе «проглотите» и настоящую аварию.</li>
+      <li><strong>В C#</strong> то же самое делается явно: <code>SaveAsync("sp")</code> →
+        <code>try { … } catch { await tx.RollbackAsync("sp"); … }</code> (пример — в .NET-разделе, глава про
+        транзакции и HTTP-вызовы).</li>
+      <li><strong>Мелочи, которые спрашивают:</strong> после <code>ROLLBACK TO SAVEPOINT</code> сама закладка
+        <em>остаётся</em> (к ней можно откатиться снова), <code>RELEASE SAVEPOINT</code> её удаляет, а
+        <code>COMMIT</code>/<code>ROLLBACK</code> убирают все закладки.</li>
+    </ul>
 
     <h2>Ошибки, которые надо повторять</h2>
     <p>Что такое <code>40001</code> и <code>40P01</code>: это <strong><code>SQLSTATE</code></strong> —

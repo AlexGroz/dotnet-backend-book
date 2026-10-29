@@ -33,6 +33,55 @@ WHERE status = 'NEW'
 ORDER BY created_at DESC
 LIMIT 50;</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">Зачем <code>DESC</code> в индексе, если строки в таблице не отсортированы</span>
+      <p>Сомнение правильное: <strong>строки таблицы ни в каком порядке не лежат</strong> — новая строка
+        пишется туда, где нашлось место. Сортирован не файл таблицы, а <strong>сам индекс</strong>: B-tree —
+        отдельная структура, все записи которой физически упорядочены по ключу. Запись
+        <code>(status, created_at DESC)</code> означает буквально: «сначала группировка по
+        <code>status</code> (по возрастанию), внутри каждой группы — <code>created_at</code> по
+        убыванию».</p>
+      <p>Дальше работает главное свойство B-tree: по нему можно идти <strong>в обе стороны</strong>. Порядок
+        записей в индексе + направление чтения = порядок, в котором строки выходят наружу:</p>
+      <table>
+        <tr><th>Индекс</th><th>Читаем вперёд (Index Scan)</th><th>Читаем назад (Backward)</th></tr>
+        <tr><td><code>(status, created_at)</code></td><td>дата ↑ ASC</td><td>дата ↓ DESC</td></tr>
+        <tr><td><code>(status, created_at DESC)</code></td><td>дата ↓ DESC</td><td>дата ↑ ASC</td></tr>
+      </table>
+      <p>Поэтому для <em>одной</em> сортируемой колонки <code>DESC</code> часто не обязателен: PostgreSQL
+        возьмёт обычный индекс и прочитает его «задом наперёд» (в плане —
+        <code>Index Scan Backward</code>). <code>DESC</code> становится <strong>обязательным, когда
+        направления в <code>ORDER BY</code> разные</strong> — тогда «обратный ход» уже даёт не тот
+        порядок:</p>
+      <div class="codewrap">
+        <pre><code class="language-sql">-- нужно: статусы по убыванию, внутри — свежие заказы первыми
+ORDER BY status DESC, created_at DESC
+
+-- индекс (status, created_at), прочитанный НАЗАД, даёт: status ASC, created_at ASC — не то → Sort
+-- индекс (status DESC, created_at DESC), прочитанный ВПЕРЁД, даёт ровно нужное → Sort не нужен
+CREATE INDEX ON orders (status DESC, created_at DESC);</code></pre>
+      </div>
+      <p>И второе, из-за чего это вообще важно. Когда порядок индекса совпал с <code>ORDER BY</code>, база
+        <strong>вообще не сортирует</strong> — узла <code>Sort</code> в плане нет, а с
+        <code>LIMIT 50</code> чтение останавливается на 50-й записи:</p>
+      <div class="codewrap">
+        <pre><code class="language-sql">-- с индексом (status, created_at DESC): ни Sort, ни чтения всей таблицы
+Limit  (actual time=0.041..0.402 rows=50 loops=1)          ← взяли 50 и остановились
+  -&gt;  Index Scan using orders_status_created_at_idx on orders
+        Index Cond: (status = 'NEW'::text)
+        (actual time=0.038..0.395 rows=50 loops=1)         ← прочитано ровно 50 записей
+
+-- без индекса: сначала прочитать и отсортировать ВСЁ, только потом взять 50
+Limit  (actual time=402.1..402.2 rows=50 loops=1)
+  -&gt;  Sort  (Sort Method: external merge  Disk: 25120kB)  ← платим за все 480 000 строк
+        Sort Key: created_at DESC
+        -&gt;  Seq Scan on orders  (rows=480000)
+              Filter: (status = 'NEW'::text)</code></pre>
+      </div>
+      <p>Итог: <code>DESC</code> — не «ускоритель сам по себе», а <strong>описание того порядка, который уже
+        есть у индекса</strong>. Совпал с <code>ORDER BY</code> (с учётом направления чтения) — сортировка
+        исчезает из плана; не совпал — база отсортирует результат отдельно и заплатит за это.</p>
+    </div>
     <p><strong>Помните правило «слева направо»</strong> (глава 10): условие должно быть на первых колонках.
       Индекс <code>(status, created_at)</code> не поможет запросу только по <code>created_at</code>.</p>
 

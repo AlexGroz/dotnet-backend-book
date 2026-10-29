@@ -61,6 +61,45 @@ Execution Time: 405.771 ms</code></pre>
       (читаем миллионы строк, чтобы оставить часть), <code>Batches: 4</code> у Hash (не хватило памяти) и
       сортировка на диск (<code>external merge Disk</code>).</p>
 
+    <h2><code>Sort Method</code>: почему сортировка уходит на диск</h2>
+    <p>В плане есть строка <code>Sort Method: external merge  Disk: 25120kB</code>. Разберём её по частям —
+      этой темы мы раньше не касались.</p>
+    <p><strong>1. У каждой операции есть бюджет памяти.</strong> Сортировки, хеши, <code>DISTINCT</code>,
+      <code>GROUP BY</code> и материализация работают в памяти, размер которой задаёт параметр
+      <code>work_mem</code> (по умолчанию 4 МБ). Это бюджет <em>на одну операцию в одном запросе</em>, а не на
+      сервер: в плане из пяти сортировок каждая получит свои <code>work_mem</code>.</p>
+    <p><strong>2. Если данные в бюджет не влезли, PostgreSQL не падает, а использует диск</strong> — и в плане
+      меняется метод:</p>
+    <table>
+      <thead><tr><th><code>Sort Method</code></th><th>Что делает</th><th>Когда выбирается</th></tr></thead>
+      <tbody>
+        <tr><td><code>quicksort</code></td><td>Обычная быстрая сортировка в памяти</td><td>Всё влезло в
+          <code>work_mem</code></td></tr>
+        <tr><td><code>top-N heapsort</code></td><td>Держит в памяти только N строк (кучу)</td><td>Есть
+          <code>LIMIT N</code> — сортировать миллион строк целиком не нужно</td></tr>
+        <tr><td><code>external merge&nbsp;&nbsp;Disk: 25120kB</code></td><td>Режет данные на части, сортирует
+          каждую, пишет во <strong>временные файлы</strong>, затем сливает</td><td>Не влезло в
+          <code>work_mem</code></td></tr>
+      </tbody>
+    </table>
+    <p><strong>3. Как работает external merge.</strong> В память берётся порция, которая помещается в
+      <code>work_mem</code>; она сортируется и сбрасывается в файл (это называется <em>run</em>). Так
+      обрабатываются все данные, после чего отсортированные куски <strong>сливаются</strong> (merge) в один
+      поток. Поэтому в плане две цены: запись кусков и их повторное чтение — именно это и показывают счётчики
+      <code>temp written</code> и <code>temp read</code> ниже.</p>
+    <p><strong>4. Что означает <code>Disk: 25120kB</code>.</strong> Это суммарный размер временных файлов,
+      которые создала <em>эта</em> операция (≈24,5 МБ). Сравните с <code>work_mem</code>: если он 4 МБ, значит
+      данных примерно в шесть раз больше бюджета. Поле печатается только у метода
+      <code>external merge</code>.</p>
+    <div class="box note">
+      <span class="t">Почему это «красный флаг», даже когда запрос быстрый</span>
+      <p>Диск на порядок медленнее памяти, и такие сортировки <strong>одновременно</strong> пишут во
+        временные файлы со всех соединений: десять тяжёлых отчётов = десять наборов временных файлов. Плюс
+        появляется зависимость от свободного места. Лечится точечным
+        <code>SET LOCAL work_mem = '64MB';</code> для конкретного запроса (глава 20) — не глобальным
+        увеличением: <code>work_mem × число операций × число соединений</code> легко съедает всю RAM.</p>
+    </div>
+
     <h2><code>temp read/written</code>: где это в нашем плане</h2>
     <p>Это поле — часть строки <code>Buffers</code>, и появляется оно <strong>только у того узла, который
       использовал временные файлы</strong>. В примере выше оно есть ровно в одном месте — на верхнем узле
@@ -73,12 +112,23 @@ Execution Time: 405.771 ms</code></pre>
   Buffers: shared hit=20114 read=5832, temp read=3140 written=3144   ← вот оно
                            └─ обычные буферы ─┘  └─ temp: временные файлы ─┘</code></pre>
     </div>
+    <p><strong>Что такое «временный файл».</strong> Это обычный файл на диске, который backend создаёт на время
+      запроса и удаляет сразу после него. PostgreSQL использует их как «продолжение памяти» для операций,
+      которым не хватило <code>work_mem</code>: сортировка, хеш-соединение (батчи), <code>DISTINCT</code>,
+      <code>GROUP BY</code>, материализация CTE, а также <code>CREATE INDEX</code> и <code>VACUUM</code>. Лежат
+      они в каталоге данных (<code>$PGDATA/base/pgsql_tmp/</code>, либо в <code>temp_tablespaces</code>, если
+      его настроили) и к вашим таблицам отношения не имеют.</p>
     <ul>
-      <li><code>temp read=3140</code> — сколько 8-килобайтных блоков прочитано из временных файлов
-        (≈25 МБ); <code>written=3144</code> — сколько записано.</li>
+      <li><code>temp read=3140</code> — сколько <strong>8-килобайтных блоков</strong> прочитано из временных
+        файлов (<code>3140 × 8 КБ ≈ 25 МБ</code>); <code>written=3144</code> — сколько записано. Единица та же,
+        что и у <code>shared</code>: блоки, а не строки и не байты.</li>
       <li>Причина — сортировка не влезла в <code>work_mem</code>, PostgreSQL слил её на диск
-        (<code>external merge</code>). Именно поэтому на этом узле есть и <code>Sort Method: external merge
-        Disk</code>, и <code>temp</code>.</li>
+        (<code>external merge</code>). Поэтому на этом узле есть <em>оба</em> поля: <code>Sort Method: external
+        merge Disk</code> и <code>temp …</code> — первое объясняет, <em>почему</em>, второе показывает
+        <em>сколько</em>.</li>
+      <li><code>read</code> и <code>written</code> почти равны, и это нормально: куски сначала записали, а
+        потом прочитали для слияния. Если <code>written</code> сильно больше <code>read</code> — файлы писались
+        «впустую» (например, операция прервалась по <code>statement_timeout</code>).</li>
       <li><strong>Если бы временных файлов не было</strong>, в строке <code>Buffers</code> не было бы части
         <code>temp …</code> вообще: <code>Buffers: shared hit=… read=…</code> и всё. Поле не печатается
         нулём — оно просто отсутствует. Поэтому «ищу temp и не нахожу» чаще всего значит «сортировки и
@@ -88,6 +138,22 @@ Execution Time: 405.771 ms</code></pre>
         <code>MATERIALIZED</code>. Правило чтения: <em>temp есть → узел работал через диск → смотреть
         <code>work_mem</code></em>.</li>
     </ul>
+    <div class="box tip">
+      <span class="t">Как увидеть временные файлы не в одном плане, а по всей базе</span>
+      <div class="codewrap">
+        <pre><code class="language-sql">-- сколько временных файлов создано и сколько на них ушло (накопительно с последнего сброса)
+SELECT datname,
+       temp_files,                            -- количество файлов
+       pg_size_pretty(temp_bytes) AS temp     -- суммарный объём
+FROM   pg_stat_database
+ORDER  BY temp_bytes DESC;
+
+-- предохранитель: лимит временных файлов на одну сессию (по умолчанию -1 = без лимита)
+SHOW temp_file_limit;      -- например, '10GB' — запрос упадёт, а не забьёт диск</code></pre>
+      </div>
+      <p>Если <code>temp_bytes</code> растёт каждый час — где-то регулярно не хватает <code>work_mem</code>,
+        и это стоит найти (обычно это отчёты и <code>ORDER BY</code> без подходящего индекса).</p>
+    </div>
 
     <h2><code>Heap Fetches</code>: почему его нет в нашем плане</h2>
     <p><code>Heap Fetches</code> печатается <strong>только у узла <code>Index Only Scan</code></strong>.

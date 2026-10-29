@@ -31,13 +31,36 @@
     <p>По <code>pg_stat_statements</code> видно, что этот запрос лидирует по <code>total_exec_time</code>.
       «Видно» — это буквально такой запрос к представлению (цифры условные, структура — настоящая):</p>
     <div class="codewrap">
-      <pre><code class="language-sql">SELECT left(query, 55)                AS query,
-       calls,
-       round(total_exec_time::numeric, 1) AS total_ms,   -- суммарно по всем вызовам
-       round(mean_exec_time::numeric, 2)  AS mean_ms     -- в среднем на вызов
+      <pre><code class="language-sql">SELECT left(query, 55)                   AS query,     -- первые 55 СИМВОЛОВ текста запроса
+       calls,                                             -- сколько раз запрос вызывали
+       round(total_exec_time::numeric, 1) AS total_ms,    -- суммарное время по всем вызовам, мс
+       round(mean_exec_time::numeric, 2)  AS mean_ms      -- среднее время на один вызов, мс
 FROM   pg_stat_statements
-ORDER  BY total_exec_time DESC
+ORDER  BY total_exec_time DESC                          -- сначала самые «дорогие» суммарно
 LIMIT  5;</code></pre>
+    </div>
+    <p><code>left(query, 55)</code> — обычная строковая функция PostgreSQL: <code>left(строка, N)</code>
+      возвращает <strong>первые N символов</strong> (есть и зеркальная <code>right(query, 55)</code>). Нужна она
+      здесь только для читаемости вывода: в <code>query</code> лежит весь текст запроса, включая переносы строк
+      и подзапросы, — в консоли такая строка растягивается на экран. Полный эквивалент —
+      <code>substring(query, 1, 55)</code>.</p>
+    <p>Обрезка <strong>не влияет на анализ</strong>: мы всё равно видим начало запроса, а полный текст в любой
+      момент достаётся так:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- полный текст нужного запроса (по его queryid из pg_stat_statements)
+SELECT query FROM pg_stat_statements WHERE queryid = 1234567890123456789;
+
+-- или в psql: включить «широкий» вывод и посмотреть всю строку без обрезки
+\x on
+SELECT query, calls, total_exec_time FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 5;</code></pre>
+    </div>
+    <p>Если <code>left()</code> не использовать вовсе, результат будет тот же — просто неудобный для глаз:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">query
+----------------------------------------------------------------------------------------
+SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = $1
+ORDER BY o.created_at DESC LIMIT $2
+(1 row)                                  ← одна «страшная» строка на весь экран</code></pre>
     </div>
     <p>Результат в нашем случае:</p>
     <table>
