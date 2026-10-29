@@ -71,13 +71,98 @@ CREATE INDEX ON articles USING gin (to_tsvector('russian', body));</code></pre>
 -- 'быстр':2 'доставк':1 'заказ':3   ← слова приведены к основе, с позициями</code></pre>
       <p>Именно по такой «карте» GIN-индекс и умеет быстро отвечать на вопрос «встречается ли слово».</p>
     </div>
-    <p>Ещё GIN (через расширение <code>pg_trgm</code>) — единственный способ ускорить
-      <code>LIKE '%фрагмент%'</code>, который B-tree не тянет (глава 10).</p>
+    <p>Отдельно — про <strong>поиск по тексту</strong>, потому что здесь чаще всего «индекс есть, а он не
+      работает». Всё решает форма условия:</p>
+    <table>
+      <thead><tr><th>Условие в запросе</th><th>Индекс сработает?</th><th>Что нужно</th></tr></thead>
+      <tbody>
+        <tr><td><code>name = 'Иван'</code></td><td>да</td><td>обычный B-tree</td></tr>
+        <tr><td><code>name LIKE 'Иван%'</code> (префикс)</td><td>да</td><td>B-tree; при не-C-коллации —
+          <code>text_pattern_ops</code></td></tr>
+        <tr><td><code>name LIKE '%Иван%'</code> (внутри)</td><td><strong>нет</strong></td><td>GIN +
+          <code>pg_trgm</code></td></tr>
+        <tr><td><code>name ILIKE '%иван%'</code></td><td><strong>нет</strong></td><td>GIN +
+          <code>pg_trgm</code> (регистр учитывается уже внутри триграмм)</td></tr>
+        <tr><td><code>name ~ 'иван'</code> (regex)</td><td><strong>нет</strong></td><td>GIN +
+          <code>pg_trgm</code> (он умеет и регулярные выражения)</td></tr>
+        <tr><td><code>lower(name) = 'иван'</code></td><td>нет</td><td>функциональный индекс
+          <code>(lower(name))</code> — глава 11</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE EXTENSION IF NOT EXISTS pg_trgm;                        -- «триграммы»: разбивает текст на 3-символьные куски
+
+CREATE INDEX customers_name_trgm ON customers
+USING gin (name gin_trgm_ops);                                 -- gin_trgm_ops — операторный класс для LIKE/regex
+
+EXPLAIN (ANALYZE)
+SELECT * FROM customers WHERE name ILIKE '%иван%';
+-- Bitmap Index Scan on customers_name_trgm    ← индекс реально участвует
+--   Index Cond: (name ~~* '%иван%'::text)</code></pre>
+    </div>
+    <ul>
+      <li><strong>Почему B-tree не может:</strong> он упорядочен по <em>началу</em> строки, поэтому
+        <code>'%Иван%'</code> может встретиться где угодно — придётся прочитать все строки.</li>
+      <li><strong>Цена <code>pg_trgm</code>:</strong> индекс заметно больше B-tree, запись медленнее. Ставят его
+        только под реальный поиск по подстроке, а не «на всякий случай».</li>
+      <li><strong>Короткие шаблоны:</strong> один-два символа в <code>LIKE '%x%'</code> дают слишком много
+        совпадений — индекс почти не помогает (и это нормально).</li>
+      <li><strong>Проверка обязательна:</strong> <code>EXPLAIN</code> должен показать <code>Bitmap Index Scan</code>.
+        Если там <code>Seq Scan</code> — условие написано не в той форме (часто мешает функция над колонкой или
+        конкатенация).</li>
+    </ul>
 
     <h3>BRIN — «мини-индекс» для огромных таблиц</h3>
-    <p>BRIN хранит не значения строк, а <strong>краткие диапазоны по блокам страниц</strong>. Занимает
-      копейки, но полезен, только если данные физически упорядочены (типично — таблица, куда пишут «по
-      времени», например журнал событий).</p>
+    <p>BRIN хранит не значения строк, а <strong>краткие диапазоны по блокам страниц</strong>: для каждой группы
+      страниц запоминает минимальное и максимальное значение колонки. Поэтому он занимает <em>килобайты</em> там,
+      где B-tree занимает гигабайты, но полезен только если данные физически упорядочены (типично — таблица,
+      куда пишут «по времени», например журнал событий).</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- индекс по дате: «страницы с 1 по 128» → min/max created_at
+CREATE INDEX events_created_brin ON events
+USING brin (created_at)
+WITH (pages_per_range = 32);           -- сколько страниц в одной «сводке»
+
+-- насколько он меньше B-tree — видно по размеру
+SELECT indexrelname, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM   pg_stat_user_indexes
+WHERE  relname = 'events';
+
+-- BRIN обновляет сводки не сразу: новые страницы надо «досчитать»
+SELECT brin_summarize_new_values('events_created_brin');
+-- (или включить autosummarize = on, чтобы это делалось само)</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>pages_per_range</code></strong> — компромисс: меньше значение → сводки точнее (меньше
+        лишних страниц читаем), но индекс больше и обновляется чаще. Для «журнала по времени» обычно 32–128.</li>
+      <li><strong>Когда BRIN плох:</strong> данные в таблице лежат <em>не по порядку</em> (например,
+        <code>created_at</code> приходит «из прошлого» пачками) — тогда в каждом диапазоне окажется «от
+        минимума до максимума», и BRIN не отсечёт ничего. Маленькая таблица тоже не нужна: B-tree дешевле и
+        точнее.</li>
+      <li><strong>Что важно:</strong> BRIN хорошо работает вместе с секционированием (глава 26) — и там, и там
+        выигрыш идёт от «данные упорядочены по времени».</li>
+    </ul>
+
+    <h3>GiST — «соседство» и пересечения</h3>
+    <p>GiST нужен, когда условие — не «равно» и не «попадает в диапазон чисел», а <strong>пересечение,
+      вхождение, близость</strong>: геометрия, диапазоны (<code>tsrange</code>, <code>int4range</code>),
+      полнотекстовый поиск (альтернатива GIN).</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- (а) бронирования: «нет пересечений по времени для одного номера»
+CREATE TABLE bookings (
+    room_id int,
+    period  tsrange,
+    EXCLUDE USING gist (room_id WITH =, period WITH &amp;&amp;)   -- &amp;&amp; = «пересекается»
+);
+-- теперь две пересекающиеся брони физически невозможно вставить: база не даст
+
+-- (б) геоданные и «ближайшие» объекты (PostGIS): KNN-поиск по расстоянию
+CREATE INDEX ON shops USING gist (location);
+SELECT name FROM shops ORDER BY location &lt;-&gt; point '(61.25,73.42)' LIMIT 10;   -- &lt;-&gt; = расстояние</code></pre>
+    </div>
+    <p>Правило выбора простое: <strong>равенство и диапазоны — B-tree, «множества внутри значения» — GIN,
+      пересечения и близость — GiST, «огромная таблица с естественным порядком» — BRIN</strong>. Если сомневаетесь
+      — начните с B-tree и проверьте план (глава 15).</p>
 
     <h2>Цена индексов</h2>
     <p>Индекс ускоряет чтение, но у него есть четыре «счёта к оплате»:</p>
@@ -161,6 +246,44 @@ LIMIT  10;</code></pre>
           увидеть, сколько уже занимают существующие и какой из них реально используется.</li>
       </ul>
     </div>
+
+    <h2>Bloat индексов: как измерить и что делать</h2>
+    <p>Индекс «раздувается» так же, как таблица (глава 25): <code>DELETE</code> и <code>UPDATE</code>
+      оставляют мёртвые записи, обычный <code>VACUUM</code> помечает место свободным для повторного
+      использования, но <strong>файл не уменьшается</strong>. Признак проблемы — индекс занимает в разы больше,
+      чем должен при текущем числе строк: читать его дольше, в кэш он влезает хуже.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- (а) грубая оценка: размер индекса рядом с размером таблицы и числом использований
+SELECT indexrelname,
+       pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
+       idx_scan,                                     -- сколько раз индекс использовали
+       pg_size_pretty(pg_relation_size(relid))      AS table_size
+FROM   pg_stat_user_indexes
+WHERE  relid = 'orders'::regclass
+ORDER  BY pg_relation_size(indexrelid) DESC;
+
+-- (б) точно: плотность страниц индекса (расширение pgstattuple)
+CREATE EXTENSION IF NOT EXISTS pgstattuple;
+SELECT * FROM pgstatindex('orders_status_created_at_idx');
+-- avg_leaf_density ≈ 90 %  → индекс плотный, всё хорошо
+-- avg_leaf_density ≈ 55 %  → половина места пустая, индекс раздут</code></pre>
+    </div>
+    <ul>
+      <li><strong>Что считать нормой:</strong> <code>avg_leaf_density</code> 90 % и выше. Если он ниже ~70 % при
+        большом <code>leaf_fragmentation</code> — индекс стоит перестроить.</li>
+      <li><strong>Как лечить:</strong> <code>REINDEX INDEX CONCURRENTLY orders_status_created_at_idx;</code> —
+        перестраивает без блокировки записи (нужны время и примерно двойное место на диске; внутри транзакции
+        нельзя). Для всей таблицы — <code>REINDEX TABLE CONCURRENTLY</code> (PostgreSQL 12+).</li>
+      <li><strong>Почему раздувается:</strong> массовые <code>DELETE</code>/<code>UPDATE</code>, обновления
+        <em>индексируемых</em> колонок (они выключают HOT — глава 25), <code>fillfactor = 100</code> по
+        умолчанию и autovacuum, который не успевает.</li>
+      <li><strong>Мониторинг в проде:</strong> снимать <code>pg_relation_size</code> по индексам раз в сутки в
+        свою таблицу истории и сравнивать с числом строк. Алерт — «размер растёт, а строк столько же»; это
+        надёжнее, чем разово посмотреть глазами (глава 33).</li>
+      <li><strong>Не путать:</strong> раздутый индекс <em>продолжает работать</em> — это деградация
+        производительности и места, а не поломка. Поэтому перестройку планируют, а не делают в панике во время
+        инцидента.</li>
+    </ul>
 
     <div class="box gold">
       <span class="t">★ Что запомнить</span>

@@ -110,6 +110,41 @@ finally { Gate.Release(); }</code></pre>
 }</code></pre>
     </div>
 
+    <p><strong>Тот же приём — чтобы отдать данные из базы в HTTP-ответ</strong>, не собирая их в память.
+      ASP.NET Core умеет сериализовать <code>IAsyncEnumerable&lt;T&gt;</code> <em>потоком</em>: клиент получает
+      строки по мере их чтения из PostgreSQL.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">[HttpGet("orders/export")]
+public IAsyncEnumerable&lt;OrderDto&gt; Export(
+    [FromQuery] DateOnly day,
+    CancellationToken ct)                      // отмена придёт, если клиент отключится
+    =&gt; _db.Orders
+          .AsNoTracking()                      // ничего не отслеживаем: читаем и отдаём
+          .Where(o =&gt; o.CreatedAt &gt;= day.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)
+                   &amp;&amp; o.CreatedAt &lt;  day.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc))
+          .Select(o =&gt; new OrderDto(o.Id, o.Total))
+          .AsAsyncEnumerable()                 // ← поток из БД, без ToListAsync()
+          .WithCancellation(ct);</code></pre>
+    </div>
+    <ul>
+      <li><strong>Что происходит:</strong> EF читает результат построчно, сериализатор пишет каждую строку в
+        ответ, клиент видит первые данные почти сразу. Память — <code>O(1)</code> вместо <code>O(N)</code>.</li>
+      <li><strong>Что убивает поток:</strong> <code>ToListAsync()</code> в середине цепочки; ручная сборка JSON в
+        строку; буферизация на прокси (в nginx — <code>proxy_buffering on</code>) и в самом ответе
+        (<code>HttpResponse.Body</code> копится, если включена буферизация).</li>
+      <li><strong>Время жизни <code>DbContext</code>:</strong> перечисление ленивое, поэтому контекст должен жить,
+        пока идёт отдача. В контроллере это норма (scope = время запроса), а вот вернуть такой
+        <code>IAsyncEnumerable</code> из фоновой задачи «наружу» нельзя — получите
+        <code>ObjectDisposedException</code>.</li>
+      <li><strong>Ошибка в середине потока:</strong> заголовки уже отправлены, код ответа изменить нельзя —
+        клиент увидит обрыв соединения, а не <code>500</code>. Поэтому параметры проверяйте <em>до</em> первого
+        <code>yield</code>, а обрыв логируйте.</li>
+      <li><strong>Для больших выгрузок (CSV, лог)</strong> берите <code>Response.BodyWriter</code> или
+        <code>PipeWriter</code> и пишите вручную — JSON для гигабайтных выгрузок не нужен вовсе.</li>
+      <li><strong>Отмена работает вся цепочка:</strong> клиент ушёл → <code>WithCancellation(ct)</code> →
+        Npgsql отменяет запрос на сервере (а не просто перестаёт читать).</li>
+    </ul>
+
     <table>
       <thead><tr><th>Сценарий</th><th>Инструмент</th></tr></thead>
       <tbody>

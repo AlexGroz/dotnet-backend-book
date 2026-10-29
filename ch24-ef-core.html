@@ -253,6 +253,46 @@ SELECT id, order_id, text FROM order_comments WHERE order_id IN (1, …, 10); �
         <tr><td>Дата-время</td><td><code>DATE</code> содержит время</td><td><code>timestamp</code> ≠ <code>timestamptz</code></td></tr>
       </tbody>
     </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// (1) Пагинация: один и тот же LINQ — разный SQL
+var page = await db.Orders.OrderBy(o => o.Id).Skip(20_000).Take(20).ToListAsync(ct);
+// PostgreSQL: ORDER BY o.id LIMIT @__p_1 OFFSET @__p_0      ← «страница по номеру» = OFFSET
+// Oracle:     OFFSET 20000 ROWS FETCH NEXT 20 ROWS ONLY     (или ROW_NUMBER() OVER …)
+// Следствие: на глубоких страницах OFFSET дорожает → keyset (см. ниже и SQL-раздел, гл. 20)
+
+// (2) UUID: решаем, ГДЕ рождается значение
+modelBuilder.Entity&lt;Order&gt;().Property(o =&gt; o.Id)
+    .HasDefaultValueSql("gen_random_uuid()");   // значение создаёт PostgreSQL (PG13+ / pgcrypto)
+// альтернатива — Guid.NewGuid() в приложении: id известен ДО вставки (удобно для outbox и ссылок)
+
+// (3) Типы задаём явно, чтобы схема совпала с существующей после миграции
+modelBuilder.Entity&lt;Order&gt;().Property(o =&gt; o.CreatedAt).HasColumnType("timestamptz");
+modelBuilder.Entity&lt;Order&gt;().Property(o =&gt; o.Total).HasPrecision(18, 2);</code></pre>
+    </div>
+    <p><strong>Главная ловушка миграции — неявное приведение типов.</strong> Если колонка <code>uuid</code>, а
+      параметр уходит строкой, PostgreSQL приводит <em>колонку</em> к тексту, и индекс по ней становится
+      неприменим:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ параметр — строка, колонка — uuid
+cmd.CommandText = "SELECT id FROM orders WHERE user_id = @uid";
+cmd.Parameters.AddWithValue("uid", userId.ToString());
+// SQL: WHERE user_id = ($1)::text   → сравнение по тексту → Seq Scan
+
+// ✔ параметр того же типа, что колонка
+cmd.Parameters.AddWithValue("uid", userId);              // Guid → uuid
+// SQL: WHERE user_id = $1          → Index Scan using orders_user_id_idx</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Планы: до и после</p>
+      <pre><code class="language-text">✘ WHERE user_id = ($1)::text
+Seq Scan on orders  (actual time=0.03..612.4 rows=3 loops=1)
+  Filter: ((user_id)::text = '2f1c…'::text)      ← приведение НАД КОЛОНКОЙ
+  Rows Removed by Filter: 480000                 ← прочитали полмиллиона строк ради трёх
+
+✔ WHERE user_id = $1
+Index Scan using orders_user_id_idx on orders  (actual time=0.02..0.05 rows=3 loops=1)
+  Index Cond: (user_id = '2f1c…'::uuid)          ← прямое сравнение того же типа</code></pre>
+    </div>
     <ul>
       <li><strong>Проверяйте SQL, а не догадывайтесь:</strong> <code>ToQueryString()</code> и логирование EF
         показывают, что реально уходит в базу. Если выражение не перевелось — оно выполнится на клиенте (медленно

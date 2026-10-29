@@ -179,6 +179,57 @@ message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
       <li>важна надёжность: «сделать обязательно, даже если сервис падал».</li>
     </ul>
 
+    <h2>Стриминг: gRPC Server Streaming против WebSockets и SignalR</h2>
+    <p><strong>Стриминг</strong> — это когда сервер отдаёт не один ответ, а <strong>поток сообщений по одному
+      соединению</strong>: телеметрия, логи, прогресс длинной операции. Выбор здесь решает не «что быстрее», а
+      <em>кто клиент</em> и <em>в какую сторону идут данные</em>.</p>
+    <table>
+      <thead><tr><th></th><th>gRPC Server Streaming</th><th>WebSockets</th><th>SignalR</th></tr></thead>
+      <tbody>
+        <tr><td>Направление</td><td>сервер → клиент (есть и двусторонний)</td><td>полный дуплекс</td>
+          <td>в обе стороны: вызовы методов хаба</td></tr>
+        <tr><td>Браузер напрямую</td><td>нет — нужен gRPC-Web и прокси</td><td>да</td><td>да, «из коробки»</td></tr>
+        <tr><td>Контракт</td><td><code>.proto</code>: строгий, с кодогенерацией</td><td>свой формат сообщений
+          (JSON или бинарный)</td><td>методы хаба; контракт слабее</td></tr>
+        <tr><td>Переподключение</td><td>пишете сами (или в клиентской библиотеке)</td><td>пишете сами</td>
+          <td>есть автоматическое + фолбэк на SSE/Long Polling</td></tr>
+        <tr><td>Backpressure</td><td><strong>есть</strong>: flow control HTTP/2 притормозит отправителя</td>
+          <td>нужно своё (очередь + лимит, глава 26)</td><td>буферы библиотеки, настраиваются</td></tr>
+        <tr><td>Когда выбирать</td><td>свои сервисы, много потоков, важен трафик</td><td>браузер и нестандартный
+          протокол</td><td>UI-уведомления, чаты, дашборды</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// контракт: stream в возвращаемом типе = «не один ответ, а поток»
+// service Telemetry {
+//   rpc Subscribe (SubscribeRequest) returns (stream Metric);
+// }
+
+// сервер: обычный IAsyncEnumerable — gRPC сам упакует его в поток
+public override async IAsyncEnumerable&lt;Metric&gt; Subscribe(
+    SubscribeRequest request,
+    [EnumeratorCancellation] CancellationToken ct)
+{
+    await foreach (var m in _source.ReadAsync(request.DeviceId, ct))
+        yield return m;          // каждая метрика уходит клиенту сразу
+}
+
+// клиент
+await foreach (var m in client.Subscribe(new SubscribeRequest { DeviceId = "pump-1" })
+                                     .ResponseStream.ReadAllAsync(ct))
+    Console.WriteLine(m.Value);</code></pre>
+    </div>
+    <ul>
+      <li><strong>gRPC-стриминг требует HTTP/2 «end-to-end».</strong> Прокси и ingress часто режут или буферизуют
+        поток — проверяйте настройки (в облаках нужен HTTP/2 target group / h2c).</li>
+      <li><strong>Один медленный клиент</strong> в WebSockets легко съедает память сервера (вы копите для него
+        сообщения). В gRPC об этом заботится flow control, но и там нужен лимит на размер буфера.</li>
+      <li><strong>Стриминг ≠ гарантия доставки.</strong> Если клиент отключился на минуту и должен получить
+        пропущенное — это уже брокер (Kafka/NATS) с подпиской, а не «просто WebSocket».</li>
+      <li><strong>Не путайте с «долгим запросом».</strong> Обычный REST-ответ, который считается 30 секунд, —
+        это не стриминг: клиент не видит прогресса и держит соединение в ожидании.</li>
+    </ul>
+
     <h2>Сравнение</h2>
     <table>
       <thead><tr><th></th><th>REST</th><th>gRPC</th><th>Брокер сообщений</th></tr></thead>

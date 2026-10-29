@@ -153,6 +153,58 @@ Append
   Subplans Removed: 11                       ← 11 секций отброшено
   -&gt; Index Scan using orders_2026_01_created_at_idx on orders_2026_01 …</code></pre>
     </div>
+    <h3>Как это выглядит из .NET (EF Core)</h3>
+    <p>Отсечение ломается не «в базе», а <strong>в LINQ</strong> — когда в SQL попадает функция или приведение
+      над колонкой-ключом. Три самых частых случая:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ 1. Свойство .Date превращается в функцию date() над колонкой
+var bad = await db.Orders
+    .Where(o =&gt; o.CreatedAt.Date == day)
+    .ToListAsync(ct);
+// SQL: WHERE date(o.created_at) = @__day_0     ← границы секций неизвестны → все секции
+
+// ✘ 2. Сравнение со строкой/приведение типа: параметр приходит как text
+var bad2 = await db.Orders
+    .FromSqlRaw("SELECT * FROM orders WHERE created_at::text LIKE '2026-01-%'")
+    .ToListAsync(ct);
+// SQL: WHERE (created_at)::text LIKE '2026-01-%'  ← тоже функция по колонке
+
+// ✔ 3. Диапазон с правильным типом — единственная форма, которая сохраняет pruning
+var from = day.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);   // 2026-01-01 00:00 UTC
+var to   = from.AddDays(1);                                       // 2026-01-02 00:00 UTC
+var good = await db.Orders
+    .Where(o =&gt; o.CreatedAt &gt;= from &amp;&amp; o.CreatedAt &lt; to)
+    .ToListAsync(ct);
+// SQL: WHERE o.created_at &gt;= @__from_0 AND o.created_at &lt; @__to_1</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что видно в плане</p>
+      <pre><code class="language-text">✘ date(created_at) = …
+Append  (actual time=… rows=1200)
+  -&gt;  Seq Scan on orders_2026_01 …            ← 12 секций: Subplans Removed: 0
+  -&gt;  Seq Scan on orders_2026_02 …
+  … (все секции, включая архивные)
+
+✔ created_at &gt;= … AND created_at &lt; …
+Append  (actual time=0.02..0.94 rows=1200)
+  Subplans Removed: 11                        ← 11 секций отброшено планировщиком
+  -&gt;  Index Scan using orders_2026_01_created_at_idx on orders_2026_01 …</code></pre>
+    </div>
+    <ul>
+      <li><strong>Правило:</strong> ключ секционирования сравниваем <strong>напрямую</strong> и с
+        <strong>тем же типом</strong> — никаких <code>.Date</code>, <code>.Year</code>,
+        <code>.ToString()</code>, <code>::text</code>, <code>date_trunc()</code> по колонке.</li>
+      <li><strong>Откуда взять границы:</strong> не «сегодня минус 30 дней в виде строки», а
+        <code>DateTime</code>/<code>DateTimeOffset</code> — тогда провайдер отправит параметр как
+        <code>timestamptz</code>, и сравнение останется простым.</li>
+      <li><strong>Как проверить из кода:</strong> <code>ToQueryString()</code> показывает готовый SQL, а в логах
+        EF видно, что реально ушло в базу. Ищите в SQL <code>date(</code>, <code>::text</code>,
+        <code>CASE</code> вокруг колонки-ключа.</li>
+      <li><strong>Если функция всё-таки нужна</strong> (например, «все заказы за 15-е число»), считайте границы
+        в приложении: <code>День D</code> → <code>[D 00:00, D+1 00:00)</code>. Это тот же приём, что и в главе 5
+        про приведение типов.</li>
+    </ul>
+
     <h2>Обслуживание секций: кто их создаёт и удаляет</h2>
     <p>Секции — это <strong>регулярная работа</strong>, а не разовое решение. На практике:</p>
     <ul>

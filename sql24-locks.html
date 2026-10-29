@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 24 · Блокировки, deadlock и retry</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +20,455 @@
   <div class="chapter">
     <div class="part">SQL · Часть VI · Транзакции и конкурентность</div>
     <h1>Глава 24. Блокировки, deadlock и retry</h1>
-    <p class="sublead">Строки, таблицы, DDL и повторы при ошибках</p>
+    <p class="sublead">Строки, таблицы, DDL и почему ошибки надо повторять. Разберём, что и когда блокирует
+      PostgreSQL, как найти виновника «зависшего» запроса, откуда берутся взаимные блокировки и как писать
+      код так, чтобы их не было.</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Зачем блокировки, если есть MVCC</h2>
+    <p>MVCC (глава 23) решает половину задачи: <strong>читатель не блокирует писателя, а писатель —
+      читателя</strong>. Каждый видит свой снимок данных, поэтому <code>SELECT</code> спокойно работает, пока
+      кто-то другой делает <code>UPDATE</code>.</p>
+    <p>Но остаётся вторая половина: <strong>два писателя не могут менять одну и ту же строку
+      одновременно</strong>. Иначе получилось бы «потерянное обновление»: обе транзакции прочитали
+      <code>balance = 100</code>, обе вычли по 30, и в итоге на счёте 70 вместо 40. Чтобы этого не было,
+      PostgreSQL ставит на изменяемую строку <strong>блокировку</strong>, и вторая транзакция ждёт.</p>
+    <table>
+      <thead><tr><th>Операция</th><th>Что блокирует</th><th>Кого ждёт</th></tr></thead>
+      <tbody>
+        <tr><td><code>SELECT</code></td><td>ничего (в MVCC)</td><td>никого — читает из снимка</td></tr>
+        <tr><td><code>INSERT</code></td><td>новую строку (её ещё никто не видит)</td><td>никого, кроме уникальных индексов</td></tr>
+        <tr><td><code>UPDATE</code> / <code>DELETE</code></td><td>изменяемую строку</td><td>того, кто изменил эту строку раньше и не закоммитил</td></tr>
+        <tr><td><code>ALTER TABLE</code></td><td>всю таблицу</td><td>всех — включая читателей (см. ниже)</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Главное правило ожидания</span>
+      <p>Ожидание блокировки — это <strong>не ошибка, а нормальный механизм</strong>. Плохо, когда ожидание
+        становится долгим: соединение занято, пул исчерпывается, клиент получает таймаут. Поэтому кроме
+        «кто кого ждёт» всегда есть второй вопрос — <strong>сколько</strong> он ждёт и <strong>почему</strong>
+        так долго.</p>
     </div>
+
+    <h2>Два уровня: строка и таблица</h2>
+    <ul>
+      <li><strong>Строчные блокировки</strong> (<code>row-level</code>) — то, что снимается при
+        <code>UPDATE</code>/<code>DELETE</code>. В <code>pg_locks</code> их <strong>нет</strong>: «эта строка
+        занята» хранится прямо в заголовке версии строки (поле <code>xmax</code>, глава 23). В
+        <code>pg_locks</code> попадает только <em>ожидание</em> — запись с <code>locktype = 'tuple'</code>
+        появляется у того, кто ждёт освобождения строки.</li>
+      <li><strong>Табличные блокировки</strong> (<code>table-level</code>) — их берёт <em>каждый</em> запрос,
+        даже обычный <code>SELECT</code>. Они не мешают друг другу, но именно они решают, может ли
+        <code>ALTER TABLE</code> начать работу. Их восемь режимов — ниже.</li>
+      <li><strong>Прочие объекты</strong>: страницы, индексы, последовательности, транзакции
+        (<code>pg_locks.locktype</code>: <code>relation</code>, <code>tuple</code>, <code>transactionid</code>,
+        <code>virtualxid</code>, <code>page</code>, <code>advisory</code>).</li>
+    </ul>
+
+    <h2>Восемь режимов табличных блокировок</h2>
+    <p>Режим отвечает на вопрос «насколько сильно я занимаю таблицу». Чем он выше, тем меньше параллельной
+      работы разрешено. Имена запоминать не нужно — важно понимать, что <strong>обычная работа
+      (<code>SELECT</code>/<code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>) друг другу не
+      мешает</strong>, а вот обслуживание и DDL — мешают.</p>
+    <table>
+      <thead><tr><th>Режим (от слабого к сильному)</th><th>Кто его берёт</th><th>С чем конфликтует</th></tr></thead>
+      <tbody>
+        <tr><td><code>ACCESS SHARE</code></td><td><code>SELECT</code></td><td>только с
+          <code>ACCESS EXCLUSIVE</code></td></tr>
+        <tr><td><code>ROW SHARE</code></td><td><code>SELECT … FOR UPDATE / FOR SHARE</code></td><td>с
+          <code>EXCLUSIVE</code> и <code>ACCESS EXCLUSIVE</code></td></tr>
+        <tr><td><code>ROW EXCLUSIVE</code></td><td><code>INSERT</code>, <code>UPDATE</code>,
+          <code>DELETE</code></td><td>с <code>SHARE</code> и сильнее (то есть с DDL и
+          <code>CREATE INDEX</code>)</td></tr>
+        <tr><td><code>SHARE UPDATE EXCLUSIVE</code></td><td><code>VACUUM</code> (не <code>FULL</code>),
+          <code>ANALYZE</code>, <code>CREATE INDEX CONCURRENTLY</code>,
+          <code>ALTER TABLE … SET (fillfactor = …)</code></td><td>сам с собой и с более сильными</td></tr>
+        <tr><td><code>SHARE</code></td><td><code>CREATE INDEX</code> (без <code>CONCURRENTLY</code>)</td>
+          <td>с <code>ROW EXCLUSIVE</code> и сильнее → <strong>блокирует запись</strong></td></tr>
+        <tr><td><code>SHARE ROW EXCLUSIVE</code></td><td><code>CREATE TRIGGER</code>, некоторые формы
+          <code>ALTER TABLE</code></td><td>со всем, кроме <code>ACCESS SHARE</code></td></tr>
+        <tr><td><code>EXCLUSIVE</code></td><td><code>REFRESH MATERIALIZED VIEW CONCURRENTLY</code></td><td>со
+          всем, кроме <code>ACCESS SHARE</code> (чтение ещё можно)</td></tr>
+        <tr><td><code>ACCESS EXCLUSIVE</code></td><td><code>ALTER TABLE</code>, <code>DROP TABLE</code>,
+          <code>TRUNCATE</code>, <code>LOCK TABLE</code>, <code>REINDEX</code> (не <code>CONCURRENTLY</code>),
+          <code>CLUSTER</code>, <code>VACUUM FULL</code></td><td><strong>со всеми, включая
+          <code>SELECT</code></strong></td></tr>
+      </tbody>
+    </table>
+    <p>На практике достаточно запомнить три факта:</p>
+    <ol>
+      <li><strong><code>SELECT</code> + <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>
+        совместимы.</strong> Обычная нагрузка не выстраивается в очередь — это и есть выигрыш MVCC.</li>
+      <li><strong><code>CREATE INDEX</code> без <code>CONCURRENTLY</code> блокирует запись</strong> в таблицу на
+        всё время построения (минуты на больших таблицах). Поэтому в проде —
+        <code>CREATE INDEX CONCURRENTLY</code>: он берёт <code>SHARE UPDATE EXCLUSIVE</code> и не мешает
+        <code>INSERT</code>/<code>UPDATE</code>.</li>
+      <li><strong><code>ALTER TABLE</code> требует <code>ACCESS EXCLUSIVE</code></strong> — то есть ждёт
+        <em>всех</em>, кто сейчас читает или пишет таблицу, и на время своей работы блокирует всех.</li>
+    </ol>
+    <div class="box warn">
+      <span class="t">Очередь блокировок: почему «быстрый ALTER» кладёт сервис</span>
+      <p>Блокировки выдаются <strong>в порядке очереди</strong>, без «обгона». Представьте: открыта долгая
+        транзакция с <code>SELECT</code> на таблице; администратор запускает
+        <code>ALTER TABLE orders ADD COLUMN …</code>. ALTER ждёт долгую транзакцию, но при этом уже
+        <em>занял место в очереди</em> на <code>ACCESS EXCLUSIVE</code>. И теперь все новые
+        <code>SELECT</code>/<code>INSERT</code> встают <strong>за ALTER</strong>, а не перед ним — хотя формально
+        ALTER ещё ничего не делает. Через несколько секунд таблица полностью недоступна, и виноват не ALTER, а
+        ожидание.</p>
+      <p>Поэтому DDL выполняют с <strong>коротким <code>lock_timeout</code></strong> и повтором:</p>
+      <div class="codewrap">
+        <pre><code class="language-sql">SET lock_timeout = '3s';          -- не ждать блокировку дольше 3 секунд
+ALTER TABLE orders ADD COLUMN note text;
+-- если не успели — ERROR: canceling statement due to lock timeout (55P03).
+-- Тогда: подождать и повторить, а не «висеть» в очереди и блокировать всех.</code></pre>
+      </div>
+      <p>Также полезно: <code>ALTER TABLE … SET (fillfactor = 90)</code> — это <em>только параметр хранения</em>,
+        он берёт <code>SHARE UPDATE EXCLUSIVE</code> и чтение не блокирует. А
+        <code>ADD COLUMN … DEFAULT NULL</code> не переписывает таблицу (только каталог), поэтому проходит
+        мгновенно.</p>
+    </div>
+
+    <h2>Строчные блокировки: <code>FOR UPDATE</code> и <code>SKIP LOCKED</code></h2>
+    <p><code>UPDATE</code> сам блокирует строку — но только в момент записи. Если логика такая:
+      «<strong>прочитать</strong> → принять решение → <strong>записать</strong>», между чтением и записью есть
+      окно, в которое другая транзакция успевает изменить строку. Классический пример — снятие денег:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- ✘ без блокировки: две сессии читают balance = 100 одновременно
+BEGIN;
+SELECT balance FROM accounts WHERE id = 1;          -- обе увидели 100
+-- …проверка «хватает ли 100 на списание 100» в коде приложения…
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+COMMIT;
+-- итог: баланс 0, а списаний два → ушли в минус, хотя каждая транзакция «проверила»</code></pre>
+    </div>
+    <p>Лечится блокировкой на чтение: строка занимается сразу, и вторая сессия ждёт <em>до</em> того, как
+      прочитает значение.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- ✔ FOR UPDATE: строка заблокирована на время транзакции
+BEGIN;
+SELECT balance FROM accounts WHERE id = 1 FOR UPDATE;   -- вторая сессия ждёт здесь
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+COMMIT;                                                 -- блокировка снята, ждущая читает уже 0</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Вариант</th><th>Что делает</th><th>Когда нужен</th></tr></thead>
+      <tbody>
+        <tr><td><code>FOR UPDATE</code></td><td>полная блокировка строки: никто не изменит и не заблокирует
+          её иначе</td><td>«прочитать и изменить» — деньги, остатки, счётчики</td></tr>
+        <tr><td><code>FOR NO KEY UPDATE</code></td><td>слабее: не мешает добавлять ссылки по внешнему ключу
+          на эту строку</td><td>изменение неключевых полей (ставится автоматически обычным
+          <code>UPDATE</code>)</td></tr>
+        <tr><td><code>FOR SHARE</code></td><td>разрешает другим тоже читать с блокировкой, но запрещает
+          менять</td><td>«проверить, что строка не изменится, пока я работаю»</td></tr>
+        <tr><td><code>FOR KEY SHARE</code></td><td>самая слабая: защищает только ключ</td><td>проверка ссылок
+          по внешнему ключу (автоматически)</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Модификаторы ожидания</strong> — то, что отличает «жду» от «падаю» и «беру следующую»:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- (а) не ждать: если строка занята — сразу ошибка (SQLSTATE 55P03)
+SELECT * FROM accounts WHERE id = 1 FOR UPDATE NOWAIT;
+
+-- (б) не ждать, а взять другую строку — очередь задач на PostgreSQL
+--     индекс по status нужен, иначе каждая воркер-сессия читает всю таблицу
+SELECT id, payload
+FROM   outbox
+WHERE  status = 'pending'
+ORDER  BY created_at
+LIMIT  10
+FOR UPDATE SKIP LOCKED;      -- занятые другими воркерами строки просто пропускаем
+
+-- дальше — UPDATE ... SET status = 'in_progress' и COMMIT: строки освободятся
+-- для остальных, но уже со статусом in_progress</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Почему <code>SKIP LOCKED</code> — «правильная» очередь</span>
+      <p>Без него несколько воркеров встают в очередь за одними и теми же первыми строками: один работает,
+        остальные ждут — параллелизм нулевой. С <code>SKIP LOCKED</code> каждый воркер берёт <em>свободные</em>
+        строки, и они не мешают друг другу. Это ровно тот приём, которым устроены очереди в PostgreSQL (и
+        воркер outbox в .NET-разделе).</p>
+      <p>Ограничения: <code>SKIP LOCKED</code> нельзя использовать для «прочитать все данные» — вы
+        <strong>осознанно теряете</strong> занятые строки в этом запросе. И он бесполезен без индекса по
+        условию выборки.</p>
+    </div>
+
+    <h2>Диагностика: кто кого ждёт</h2>
+    <p>Первое, что нужно при «запрос висит», — найти <strong>ожидание</strong>, а не гадать по логам приложения.
+      Всё есть в системных представлениях, и лучший инструмент — функция
+      <code>pg_blocking_pids(pid)</code>: она сразу возвращает список тех, кто держит блокировку.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- кто кого блокирует и сколько это уже длится
+SELECT pid,
+       usename,
+       state,
+       now() - xact_start            AS xact_age,        -- сколько живёт транзакция
+       now() - query_start           AS query_age,       -- сколько идёт текущий запрос
+       pg_blocking_pids(pid)         AS blocked_by,      -- массив PID «виновников»
+       left(query, 60)               AS query
+FROM   pg_stat_activity
+WHERE  cardinality(pg_blocking_pids(pid)) &gt; 0            -- только те, кто ждёт
+ORDER  BY xact_age DESC;</code></pre>
+    </div>
+    <p>Пример вывода: один сеанс держит строку в открытой транзакции, второй ждёт.</p>
+    <table>
+      <tr><th>pid</th><th>state</th><th>xact_age</th><th>blocked_by</th><th>query</th></tr>
+      <tr><td>20431</td><td><code>active</code></td><td>00:00:42</td><td><code>{20388}</code></td>
+        <td><code>UPDATE accounts SET balance = …</code></td></tr>
+      <tr><td>20388</td><td><strong><code>idle in transaction</code></strong></td><td>00:02:10</td>
+        <td><code>{}</code></td><td><code>SELECT … FOR UPDATE</code></td></tr>
+    </table>
+    <p>Читается так: <strong>20388</strong> взял блокировку и <em>ничего не делает</em> (транзакция открыта, но
+      запросов нет — классическая ошибка приложения), а <strong>20431</strong> ждёт уже 42 секунды. Лечится не
+      «убить ждущего», а закрыть транзакцию у 20388.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- то же через pg_locks: что именно не выдали и в каком режиме
+SELECT l.pid,
+       l.locktype,                    -- relation / tuple / transactionid / advisory …
+       l.mode,                        -- AccessShareLock, RowExclusiveLock, …
+       l.relation::regclass           -- какая таблица (NULL, если это не relation)
+FROM   pg_locks l
+WHERE  NOT l.granted                 -- ждущие, ещё не полученные блокировки
+ORDER  BY l.pid;
+
+-- «забытые» транзакции: открыты, но ничего не делают
+SELECT pid, state, now() - xact_start AS xact_age, left(query, 50) AS last_query
+FROM   pg_stat_activity
+WHERE  state = 'idle in transaction'
+ORDER  BY xact_age DESC;
+
+-- аккуратно закрыть: сначала отменить запрос, только потом — соединение
+SELECT pg_cancel_backend(20431);       -- отменяет текущий запрос (мягко)
+SELECT pg_terminate_backend(20388);    -- рвёт соединение целиком (жёстко)</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Не начинайте с <code>pg_terminate_backend</code></span>
+      <p>Обрыв соединения откатывает транзакцию — это может быть <em>чужая работа</em> на 10 минут, которая
+        сейчас закоммитится. Сначала <code>pg_cancel_backend</code> (отменить один запрос), сначала проверьте,
+        что за запрос и чья сессия. И помните: убийство сеанса не «исправляет» приложение — оно лишь освобождает
+        блокировку до следующего раза.</p>
+    </div>
+
+    <h2>Таймауты вместо бесконечного ожидания</h2>
+    <p>Приложение не должно ждать вечно: лучше получить ошибку за 3 секунды и повторить/показать понятное
+      сообщение, чем занять соединение на минуты (и тем самым исчерпать пул — глава 23 .NET-раздела).</p>
+    <table>
+      <thead><tr><th>Параметр</th><th>Что ограничивает</th><th>Разумное значение</th></tr></thead>
+      <tbody>
+        <tr><td><code>lock_timeout</code></td><td>сколько ждать <em>блокировку</em>, прежде чем упасть
+          (<code>55P03</code>)</td><td>1–3 с для OLTP; 0 = ждать бесконечно</td></tr>
+        <tr><td><code>statement_timeout</code></td><td>сколько может идти сам запрос</td><td>5–30 с для API,
+          отдельно для отчётов и DDL</td></tr>
+        <tr><td><code>idle_in_transaction_session_timeout</code></td><td>сколько транзакция может «просто
+          стоять» открытой</td><td>10–60 с — защита от «забытых» транзакций</td></tr>
+        <tr><td><code>deadlock_timeout</code></td><td>через сколько проверять взаимные блокировки</td><td>1 с (по
+          умолчанию), менять не нужно</td></tr>
+        <tr><td><code>log_lock_waits = on</code></td><td>писать в лог ожидания дольше
+          <code>deadlock_timeout</code></td><td>включать в проде — это главный источник диагностики</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- (а) на уровне роли приложения: применяется ко всем её соединениям
+ALTER ROLE app_user SET lock_timeout      = '3s';
+ALTER ROLE app_user SET statement_timeout = '15s';
+ALTER ROLE app_user SET idle_in_transaction_session_timeout = '30s';
+
+-- (б) точечно для опасной операции (DDL в миграции)
+SET LOCAL lock_timeout = '2s';      -- LOCAL — только до конца транзакции
+ALTER TABLE orders ADD COLUMN note text;</code></pre>
+    </div>
+    <p>В .NET эти же значения можно задать в строке подключения
+      (<code>Options=-c lock_timeout=3000</code>) и применить командой <code>command.CommandTimeout</code> —
+      но это <em>клиентский</em> таймаут, он не отменяет работу на сервере, а только перестаёт ждать ответ.</p>
+
+    <h2>Дедлок: когда ждут друг друга</h2>
+    <p><strong>Взаимная блокировка</strong> (deadlock) — ситуация, в которой A держит то, что нужно B, а B держит
+      то, что нужно A. Ни одна не может продолжить, и без вмешательства они ждали бы вечно. Разберём по шагам
+      (две сессии работают параллельно):</p>
+    <table>
+      <tr><th>Шаг</th><th>Сессия A</th><th>Сессия B</th><th>Состояние</th></tr>
+      <tr><td>1</td><td><code>BEGIN; UPDATE accounts SET … WHERE id = 1;</code></td><td>—</td>
+        <td>A держит строку 1</td></tr>
+      <tr><td>2</td><td>—</td><td><code>BEGIN; UPDATE accounts SET … WHERE id = 2;</code></td>
+        <td>B держит строку 2</td></tr>
+      <tr><td>3</td><td><code>UPDATE … WHERE id = 2;</code></td><td>—</td><td>A ждёт B</td></tr>
+      <tr><td>4</td><td>—</td><td><code>UPDATE … WHERE id = 1;</code></td><td><strong>цикл: B ждёт A</strong></td></tr>
+    </table>
+    <p>PostgreSQL замечает цикл через <code>deadlock_timeout</code> (по умолчанию 1 секунда) и
+      <strong>откатывает одну</strong> из транзакций — ту, которую дешевле перезапустить:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- у «проигравшей» сессии:
+-- ERROR:  deadlock detected
+-- DETAIL:  Process 20431 waits for ShareLock on transaction 51234; blocked by process 20388.
+--          Process 20388 waits for ShareLock on transaction 51233; blocked by process 20431.
+-- HINT:  See server log for query details.
+-- SQLSTATE: 40P01
+
+-- в логе сервера (при log_lock_waits = on) — то же плюс тексты запросов
+-- deadlock detected … Process 20431 waits for … blocked by process 20388</code></pre>
+    </div>
+    <p>Важно: дедлок — <strong>не баг базы</strong>, а следствие порядка действий приложения. Поэтому лечится
+      он в коде, а не настройками.</p>
+    <h3>Как не допускать</h3>
+    <ol>
+      <li><strong>Один и тот же порядок захвата.</strong> Самая частая причина — «A сначала трогает счёт 1,
+        потом 2, а B наоборот». Если все транзакции блокируют строки в одном порядке (например, по возрастанию
+        <code>id</code>), цикл невозможен:
+        <div class="codewrap">
+          <pre><code class="language-sql">-- ✔ сначала взять блокировки в детерминированном порядке, потом менять
+SELECT id FROM accounts
+WHERE  id IN (1, 2)
+ORDER  BY id            -- все транзакции идут в одном порядке → дедлока не будет
+FOR UPDATE;
+
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;</code></pre>
+        </div></li>
+      <li><strong>Короткие транзакции и мало строк.</strong> Чем меньше строк и времени, тем меньше окно для
+        пересечения. Не держите транзакцию открытой во время HTTP-вызова (глава 23 .NET-раздела).</li>
+      <li><strong>Не блокируйте лишнего.</strong> <code>FOR UPDATE</code> — только там, где действительно нужно
+        «прочитать и изменить». Массовый <code>FOR UPDATE</code> по 10 000 строк почти гарантирует
+        столкновения.</li>
+      <li><strong>Очереди — на <code>SKIP LOCKED</code>.</strong> Тогда воркеры вообще не ждут друг
+        друга.</li>
+      <li><strong>Массовые обновления — пачками</strong> и в одном порядке (например, по диапазонам
+        <code>id</code>), а не «всё сразу».</li>
+      <li><strong>Retry — часть контракта.</strong> Даже идеальный код может получить <code>40P01</code> или
+        <code>40001</code>: это штатная ситуация, транзакцию повторяют целиком (глава 22).</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// повтор транзакции на «конкурентных» ошибках — по SQLSTATE, а не по тексту
+private static bool IsRetryable(PostgresException ex) =&gt;
+    ex.SqlState is "40001" or "40P01" or "55P03";   // serialization / deadlock / lock_timeout
+
+for (var attempt = 1; attempt &lt;= 3; attempt++)
+{
+    try
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // … работа с БД …
+        await tx.CommitAsync(ct);
+        break;                                        // успех — выходим из цикла
+    }
+    catch (PostgresException ex) when (IsRetryable(ex) &amp;&amp; attempt &lt; 3)
+    {
+        await Task.Delay(TimeSpan.FromMilliseconds(50 * attempt), ct);   // 50, 100 мс
+        // транзакция уже откатана сервером — начинаем заново
+    }
+}</code></pre>
+    </div>
+    <p>Сколько дедлоков было — видно в статистике: <code>SELECT datname, deadlocks FROM pg_stat_database;</code>
+      Рост этого счётчика — сигнал, что где-то нарушен порядок захвата.</p>
+
+    <h2>Advisory-блокировки: «свои» замки</h2>
+    <p>Иногда блокировать нужно не строку и не таблицу, а <em>логический ресурс</em>: «ночная миграция»,
+      «импорт файла X», «только один воркер чистит каталог». Для этого есть advisory-блокировки: вы даёте
+      PostgreSQL число (или пару чисел), и он блокирует его как обычный объект. За этим числом ничего не стоит —
+      ни таблицы, ни строки.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- (а) на время сессии: держится, пока её не снимут или сеанс не отключится
+SELECT pg_try_advisory_lock(42);     -- true — взяли; false — уже занято (и мы НЕ ждём)
+-- … работа …
+SELECT pg_advisory_unlock(42);       -- снять вручную
+
+-- (б) на время транзакции: снимается автоматически при COMMIT/ROLLBACK — безопаснее
+BEGIN;
+SELECT pg_try_advisory_xact_lock(42);
+-- … работа …
+COMMIT;                              -- замок снят сам
+
+-- (в) без try: не «проверить», а подождать освобождения
+SELECT pg_advisory_lock(42);</code></pre>
+    </div>
+    <ul>
+      <li><strong>Зачем:</strong> «ровно один экземпляр задачи» без отдельной таблицы-флага: пересчёт отчёта,
+        миграция, очистка. Работает между всеми инстансами приложения, потому что замок живёт в базе.</li>
+      <li><strong>Ловушка пула:</strong> session-блокировка привязана к <em>соединению</em>. «Взять одним
+        запросом, отпустить другим» не получится: в пуле запросы уходят в разные соединения. Берите
+        <code>xact</code>-вариант (внутри той же транзакции) или держите один
+        <code>NpgsqlConnection</code> явно.</li>
+      <li><strong>Это не изоляция данных:</strong> advisory-замок ничего не знает о ваших строках и не мешает их
+        менять. Это координация между процессами, а не защита строк.</li>
+    </ul>
+
+    <h2>Частые ошибки</h2>
+    <table>
+      <thead><tr><th>Ошибка</th><th>Чем плохо</th><th>Как правильно</th></tr></thead>
+      <tbody>
+        <tr><td>Транзакция открыта во время HTTP-вызова</td><td>Строки заблокированы секунды, соединение занято,
+          пул исчерпан</td><td>Сеть — до/после транзакции (глава 23 .NET-раздела)</td></tr>
+        <tr><td>Нет <code>idle_in_transaction_session_timeout</code></td><td>«Забытая» транзакция держит снимок
+          и блокировки часами</td><td>Таймаут на роли приложения (10–60 с)</td></tr>
+        <tr><td><code>CREATE INDEX</code> без <code>CONCURRENTLY</code> в проде</td><td>Блокирует запись на всё
+          время построения</td><td><code>CREATE INDEX CONCURRENTLY</code></td></tr>
+        <tr><td><code>ALTER TABLE</code> без <code>lock_timeout</code></td><td>Встаёт в очередь и блокирует всю
+          таблицу для новых запросов</td><td><code>SET lock_timeout</code> + повтор</td></tr>
+        <tr><td>Сразу <code>pg_terminate_backend</code></td><td>Откатывает чужую работу, теряет прогресс</td>
+          <td>Сначала <code>pg_cancel_backend</code>, разобравшись, что за запрос</td></tr>
+        <tr><td>Разный порядок захвата строк в разных операциях</td><td>Дедлоки под нагрузкой</td>
+          <td>Единый порядок (<code>ORDER BY id</code>) и пачки</td></tr>
+        <tr><td>Retry «на любую ошибку»</td><td>Бессмысленные повторы, маскировка багов</td><td>Только
+          <code>40001</code>, <code>40P01</code>, <code>55P03</code> — по SQLSTATE</td></tr>
+        <tr><td><code>FOR UPDATE</code> без <code>SKIP LOCKED</code> в очереди</td><td>Воркеры ждут друг
+          друга, параллелизм нулевой</td><td><code>FOR UPDATE SKIP LOCKED</code> + индекс по условию</td></tr>
+        <tr><td>Advisory-замок взят и «отпущен» в другом соединении</td><td>Замок остаётся висеть, задача
+          блокируется навсегда</td><td><code>pg_try_advisory_xact_lock</code> в той же транзакции</td></tr>
+        <tr><td><code>lock_timeout = 0</code> (по умолчанию)</td><td>Запрос ждёт вечно, клиент — до
+          таймаута</td><td>1–3 секунды для OLTP и обработка ошибки</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Если запрос «висит»: порядок действий</h2>
+    <ol>
+      <li><strong>Убедиться, что это блокировка</strong>, а не медленный план: запрос в состоянии
+        <code>active</code> и не растёт <code>Buffers</code> — скорее всего ждёт; <code>pg_stat_activity</code>
+        покажет <code>wait_event_type = 'Lock'</code>.</li>
+      <li><strong>Найти виновника:</strong> <code>pg_blocking_pids(pid)</code> (или <code>pg_locks</code> с
+        <code>NOT granted</code>). Смотрим <code>state</code> и <code>xact_age</code> у блокирующего.</li>
+      <li><strong>Проверить, не <code>idle in transaction</code></strong> — тогда виновато приложение, а не
+        запрос.</li>
+      <li><strong>Решить, что делать:</strong> закрыть транзакцию в приложении → <code>pg_cancel_backend</code> →
+        только в крайнем случае <code>pg_terminate_backend</code>.</li>
+      <li><strong>Записать в журнал и починить причину:</strong> таймауты, <code>CONCURRENTLY</code>, вынос сети
+        из транзакции, единый порядок захвата.</li>
+    </ol>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>MVCC не отменяет блокировки:</strong> читатели не мешают писателям, но два писателя одну
+          строку менять не могут — второй ждёт.</li>
+        <li><strong>Каждый запрос берёт табличную блокировку</strong> (обычно <code>ACCESS SHARE</code> или
+          <code>ROW EXCLUSIVE</code>); <code>ALTER TABLE</code> требует <code>ACCESS EXCLUSIVE</code> и блокирует
+          даже <code>SELECT</code>.</li>
+        <li><strong>Блокировки выдаются по очереди:</strong> «быстрый» <code>ALTER TABLE</code> может парализовать
+          таблицу, потому что новые запросы встают за ним. Лечится <code>lock_timeout</code> + повтор.</li>
+        <li><strong>«Прочитать и изменить»</strong> — <code>SELECT … FOR UPDATE</code>; очереди —
+          <code>FOR UPDATE SKIP LOCKED</code>; «не ждать» — <code>NOWAIT</code>.</li>
+        <li><strong>Дедлок</strong> — следствие разного порядка захвата; база откатывает одну транзакцию с
+          <code>40P01</code>, и это надо повторять. Одинаковый порядок (<code>ORDER BY id</code>) убирает
+          причину.</li>
+        <li><strong>Retry — по SQLSTATE</strong> (<code>40001</code>, <code>40P01</code>, <code>55P03</code>), а
+          не по тексту ошибки.</li>
+        <li><strong>Advisory-блокировки</strong> — «свои» замки для «один воркер на всю систему»;
+          <code>xact</code>-вариант безопаснее в приложении с пулом.</li>
+        <li><strong>Диагностика:</strong> <code>pg_blocking_pids</code>, <code>pg_locks</code>,
+          <code>pg_stat_activity</code>, <code>log_lock_waits</code>, счётчик <code>deadlocks</code>.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="sql23-mvcc.html">← <span class="sp">Глава 23. MVCC в PostgreSQL: версии строк и снимки</span></a>
       <a href="sql25-vacuum-bloat.html"><span class="sp">Глава 25. VACUUM, autovacuum, bloat и HOT-апдейты</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
+
+
+
+
+
+
