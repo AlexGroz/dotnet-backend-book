@@ -23,6 +23,19 @@
     <p class="sublead">Образ — это файлы плюс конфигурация, нарезанные на слои. Отсюда сразу объясняются
       теги, digest, размер, кэш сборки и «почему на сервере другая версия».</p>
     <p><span class="tag lead">подводящая глава</span></p>
+    <div class="box tip">
+      <span class="t">Какие вопросы закрывает эта глава</span>
+      <ul>
+        <li>Что физически лежит внутри образа и почему он весит столько, сколько весит.</li>
+        <li>Почему <code>rm</code> «следующей строкой» не уменьшает образ и как правильно писать
+          <code>RUN</code>.</li>
+        <li>Чем тег отличается от digest, что писать в Dockerfile, а что — в манифесте деплоя.</li>
+        <li>Куда отправляется образ (<code>docker push</code>) и почему имя при сборке должно совпадать с
+          именем в реестре.</li>
+        <li>Какой из образов .NET брать: <code>sdk</code>, <code>aspnet</code> или <code>runtime</code>.</li>
+        <li>Почему возникает <code>exec format error</code> и как собрать под нужную архитектуру.</li>
+      </ul>
+    </div>
 
     <h2>Что лежит внутри образа</h2>
     <p>Образ — не «архив с программой». Внутри две части:</p>
@@ -31,6 +44,24 @@
         слой неизменяем.</li>
       <li><strong>Конфигурация</strong> — JSON: переменные окружения, <code>Entrypoint</code>,
         <code>Cmd</code>, пользователь, открытые порты, рабочая папка, healthcheck.</li>
+    </ul>
+    <p>Сначала — про длинное имя, которое будет встречаться в каждом примере. Оно устроено как адрес:
+      сначала «где лежит», потом «что именно», в конце — версия:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">mcr.microsoft.com / dotnet/aspnet : 8.0
+      реестр          репозиторий    тег
+   где лежит образ   что именно   какая версия</code></pre>
+    </div>
+    <ul>
+      <li><strong>Реестр</strong> (<code>mcr.microsoft.com</code>) — сервер, на котором хранятся образы.
+        Microsoft Container Registry — официальный реестр .NET-образов.</li>
+      <li><strong>Репозиторий</strong> (<code>dotnet/aspnet</code>) — «папка» внутри реестра: владелец
+        <code>dotnet</code>, образ <code>aspnet</code>.</li>
+      <li><strong>Тег</strong> (<code>8.0</code>) — версия.</li>
+      <li><strong>Части можно опускать</strong>, и Docker подставит значения по умолчанию: <code>alpine</code>
+        — это на самом деле <code>docker.io/library/alpine:latest</code> (Docker Hub, официальный образ,
+        тег <code>latest</code>). Поэтому <code>alpine</code> и <code>alpine:latest</code> — одно и то
+        же.</li>
     </ul>
     <div class="codewrap">
       <p class="cap">Конфигурация образа: команда и вывод (сокращённо)</p>
@@ -43,7 +74,8 @@
     <ul>
       <li><code>--format '{{json .Config}}'</code> — вывести только раздел <code>Config</code> (это
         Go-шаблон: <code>.Config</code> — поле объекта, <code>json</code> — «в одну строку»).</li>
-      <li><code>| head -c 400</code> — обрезать вывод до 400 байт, иначе он не влезет на экран.</li>
+      <li><code>…</code> в выводе — сокращение автора: настоящий JSON длиннее. Если он не влезает в
+        терминал, вывод обрезают на лету: <code>| head -c 400</code> — «взять первые 400 байт».</li>
       <li><code>Env</code> — переменные окружения, которые <strong>автоматически попадут в контейнер</strong>.
         Здесь видно, что образ .NET задаёт <code>APP_UID=1654</code> и
         <code>ASPNETCORE_HTTP_PORTS=8080</code>.</li>
@@ -69,7 +101,8 @@ IMAGE          CREATED      CREATED BY                                      SIZE
         <code>0B</code>.</li>
       <li><code>SIZE</code> — <strong>сколько добавил именно этот слой</strong>, а не размер всего
         образа. Сумма столбца = размер образа.</li>
-      <li><code>--no-trunc</code> — показать команды целиком, без «…».</li>
+      <li><code>--no-trunc</code> — ключ, который добавляют к команде, чтобы увидеть <code>CREATED BY</code>
+        целиком: по умолчанию Docker обрезает длинные команды, и в выводе выше стоит <code>…</code>.</li>
     </ul>
     <p>Идентификатор образа — хеш, посчитанный по содержимому конфигурации и слоёв. Поэтому один и тот же
       Dockerfile при тех же входных данных даёт один и тот же образ, а «поменяли файл вручную внутри
@@ -99,6 +132,12 @@ IMAGE          CREATED      CREATED BY                                      SIZE
       мегабайт.</p>
 
     <h2>Dockerfile → образ</h2>
+    <p><code>RUN</code>, <code>COPY</code>, <code>FROM</code> и другие слова капсом — это
+      <strong>инструкции Dockerfile</strong>: текстового файла-рецепта, в котором записано, как собрать
+      образ. Сами по себе они ничего не выполняют — их читает <code>docker build</code>, сверху вниз.
+      <code>RUN</code> значит «выполни эту команду <em>внутри собираемого образа</em>»: то же, что вы
+      набрали бы в терминале контейнера, но на этапе сборки. Поэтому в примерах ниже строки
+      <code>RUN …</code> — это содержимое Dockerfile, а не то, что набирают в терминале.</p>
     <p>Инструкции делятся на два типа:</p>
     <table>
       <tr><th>Тип инструкции</th><th>Что создаёт</th><th>Примеры</th></tr>
@@ -111,53 +150,74 @@ IMAGE          CREATED      CREATED BY                                      SIZE
     </table>
     <div class="box note">
       <span class="t">Зачем думать о слоях: «скачал — удалил в одной инструкции»</span>
-      <p>Каждая инструкция <code>RUN</code>/<code>COPY</code> создаёт <strong>новый слой</strong>, а слои
-        <strong>не перезаписывают друг друга</strong> — они накладываются. Поэтому удаление файла «следующей
-        инструкцией» образ не уменьшает: файл остаётся в нижнем слое, а сверху появляется лишь метка
-        «не показывать».</p>
-      <p><strong>Плохо — два слоя:</strong></p>
-      <pre><code class="language-dockerfile">RUN curl -o /tmp/big.tar https://example.com/big.tar   # слой A: +500 МБ
-RUN rm /tmp/big.tar                                    # слой B: 0 МБ, но файл остался в A
-# образ весит +500 МБ, хотя файла «нет»</code></pre>
-      <p><strong>Хорошо — один слой:</strong></p>
+      <p><strong>Как устроен слой.</strong> Одна инструкция <code>RUN</code> — <strong>один слой</strong>:
+        снимок файловой системы <em>после</em> её выполнения. Слои не перезаписывают друг друга, а
+        накладываются (глава 2). Значит, <code>rm</code> в следующей инструкции файл из нижнего слоя не
+        удаляет — он только прячет его (whiteout), а байты остаются в образе.</p>
+      <p><strong>Плохо — две инструкции, два слоя:</strong></p>
+      <pre><code class="language-dockerfile">RUN curl -o /tmp/big.tar https://example.com/big.tar   # слой A: +500 МБ (архив лежит здесь)
+RUN rm /tmp/big.tar                                    # слой B: 0 МБ + метка «файла нет»
+# что произошло: скачали архив (500 МБ попали в слой A), потом «удалили» —
+# но файл физически остался в слое A. Образ весит +500 МБ, хотя в контейнере файла не видно</code></pre>
+      <p><strong>Хорошо — одна инструкция, один слой:</strong></p>
       <pre><code class="language-dockerfile">RUN curl -o /tmp/big.tar https://example.com/big.tar \
  &amp;&amp; tar -xf /tmp/big.tar -C /opt \
  &amp;&amp; rm /tmp/big.tar
-# всё произошло в слое A: в образ попал только результат распаковки, самого архива нет</code></pre>
-      <p>Проверяется это <code>docker history</code>: в плохом варианте будет слой на 500 МБ, в хорошем —
-        только то, что осталось после удаления. <strong>Зачем важно:</strong> меньше образ — быстрее
-        скачивание из реестра, меньше места в CI и на серверах. Именно поэтому в главе 5 установку пакетов
-        и очистку кэша пишут <em>одной</em> командой <code>RUN</code>.</p>
+# три команды выполнились подряд, а слой создался уже ПОСЛЕ всех трёх:
+#   скачали → распаковали в /opt → удалили архив
+# в слой попал только результат — файлы в /opt; самого архива там никогда не было</code></pre>
+      <p><strong>В чём разница по сути:</strong> в первом варианте 500 МБ «запомнились» в момент создания
+        слоя A, и стереть их можно только пересборкой образа. Во втором варианте слой создаётся один раз и
+        уже без архива — поэтому <code>&amp;&amp;</code> (а не два <code>RUN</code>) и есть решение.</p>
+      <p>Проверяется это <code>docker history</code>: в плохом варианте видно слой на 500 МБ, в хорошем
+        такого слоя нет. <strong>Зачем важно:</strong> меньше образ — быстрее скачивается из реестра, меньше
+        места занимает в CI и на серверах. <em>CI</em> (continuous integration, «непрерывная интеграция») —
+        это сервер, который по каждому коммиту сам собирает проект, прогоняет тесты и публикует образ; он
+        хранит свои копии образов, поэтому размер там тоже считается. Именно поэтому в главе 5 установку
+        пакетов и очистку кэша пишут <em>одной</em> командой <code>RUN</code>.</p>
     </div>
 
-    <h2>Теги и digest: почему <code>latest</code> — ловушка</h2>
-    <p>Тег — это <strong>указатель</strong> на образ. Он изменяем: завтра <code>8.0</code> может означать
-      другой набор слоёв (вышел патч). Digest — хеш содержимого, он неизменяем.</p>
+    <h2>Тег и digest: указатель и сам образ</h2>
+    <p><strong>Тег — это ярлык-указатель</strong> на образ, и ярлык можно перевесить. Сегодня <code>8.0</code>
+      — один набор слоёв, а через месяц, после патча безопасности, — уже другой. Это не ошибка, а смысл
+      тега версии: вы получаете обновления, не меняя имени. Но следствие важное: <em>одно и то же имя не
+      гарантирует один и тот же образ</em> — «у меня локально <code>8.0</code>» и «на сервере
+      <code>8.0</code>» могут быть разными образами.</p>
+    <p><strong>Digest (<code>sha256:…</code>) — это хеш содержимого</strong>: он считается по слоям и
+      конфигурации. Разные образы дают разные digest, один и тот же — всегда одинаковый. Перевесить digest
+      нельзя: он и есть «именно этот образ, вот с таким содержимым».</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># имя образа с тегом: удобно, но тег — «плавающий» указатель, его могут перевесить
-#   mcr.microsoft.com   реестр
-#   dotnet/aspnet       репозиторий: владелец/имя
-#   8.0                 тег — версия .NET
-mcr.microsoft.com/dotnet/aspnet:8.0
+      <pre><code class="language-bash"># 1) обычная запись: имя + тег — указатель, который могут перевесить
+$ docker pull mcr.microsoft.com/dotnet/aspnet:8.0
 
-# тот же образ, зафиксированный по содержимому: тег + digest через @
-#   sha256:…   digest — хеш содержимого; неизменяем: это именно этот образ,
-#              а не «что сейчас лежит под тегом 8.0»
-mcr.microsoft.com/dotnet/aspnet:8.0@sha256:3f1a2b...
+# 2) имя + digest через @ — «этот образ, с вот таким содержимым»
+$ docker pull mcr.microsoft.com/dotnet/aspnet:8.0@sha256:3f1a2b…
 
-# docker image inspect ... --format '{{index .RepoDigests 0}}'
-#   .RepoDigests   массив строк «имя@digest»
-#   index ... 0    взять первый элемент массива (то есть digest этого образа)
-docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{index .RepoDigests 0}}'</code></pre>
+# 3) digest не пишут руками — его копируют из вывода команды:
+$ docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{index .RepoDigests 0}}'
+mcr.microsoft.com/dotnet/aspnet@sha256:3f1a2b…
+
+#   .RepoDigests              массив строк «имя@digest»
+#   index ... 0               взять первый элемент массива
+#   docker image ls --digests посмотреть digest у всех локальных образов</code></pre>
     </div>
     <ul>
-      <li><code>latest</code> — это <strong>просто тег по умолчанию</strong>, а не «самая свежая
-        версия». <code>docker pull postgres</code> и <code>docker pull postgres:latest</code> — одно и
-        то же, и там может быть что угодно.</li>
-      <li>В Dockerfile приложения фиксируйте <strong>конкретную версию</strong>
-        (<code>8.0</code>, лучше — с дистрибутивом: <code>8.0-bookworm-slim</code>).</li>
-      <li>В проде полезно фиксировать <strong>digest</strong>: тогда «пересобрали и выкатили» не значит
-        «внезапно другой рантайм» (глава 15).</li>
+      <li><strong>В Dockerfile</strong> достаточно тега версии — <code>FROM
+        mcr.microsoft.com/dotnet/aspnet:8.0</code> (ещё точнее с дистрибутивом:
+        <code>8.0-bookworm-slim</code>), чтобы образ не «самообновился» до следующего мажора.</li>
+      <li><strong>В деплое</strong> (compose, Kubernetes, CI) фиксируют digest или свой неизменяемый тег
+        <code>1.4.2</code>: тогда «пересобрали и выкатили» не превращается в «внезапно другой рантайм»
+        (глава 15).</li>
+      <li><strong>Для аудита</strong>: сканер проверил образ с digest X — и на сервере запущен именно X,
+        а не «что-то, что сейчас лежит под тем же тегом».</li>
+      <li><strong>Портянку <code>@sha256:…</code> руками никто не пишет</strong>: её подставляет CI, скрипт
+        деплоя или инженер, фиксирующий версию в манифесте. В обычной работе вы видите только
+        <code>имя:тег</code>.</li>
+      <li><strong>Тег по умолчанию — <code>latest</code></strong>: <code>docker pull postgres</code> и
+        <code>docker pull postgres:latest</code> — одно и то же. И это <em>не</em> «самая свежая версия», а
+        просто имя, под которым может лежать что угодно.</li>
+      <li><strong>В своём реестре</strong> (Harbor, ACR, Artifactory) можно запретить перезапись тега —
+        тогда тег тоже становится неизменяемым, и digest нужен только для проверки.</li>
     </ul>
 
     <h2>Реестр: как образ доезжает до сервера</h2>
@@ -172,9 +232,13 @@ docker image inspect mcr.microsoft.com/dotnet/aspnet:8.0 --format '{{index .Repo
       <tr><td>ECR, ACR, Artifact Registry</td><td>Облачные реестры (AWS, Azure, GCP)</td></tr>
       <tr><td>Harbor, Nexus, Artifactory</td><td>Свой реестр внутри компании</td></tr>
     </table>
+    <p><strong>Адрес реестра — это настройка, а не часть Docker.</strong> Если вы работаете в компании, где
+      есть свой реестр (Harbor, Nexus, Artifactory, GitLab, ACR, ECR — строки в таблице выше), имя образа
+      будет вида <code>registry.company.local/team/orders-api:1.4.2</code>. В примерах ниже стоит
+      <code>ghcr.io</code> — просто как образец: подставьте адрес вашего реестра, остальное не меняется.</p>
     <div class="codewrap">
       <pre><code class="language-bash"># docker login            войти в реестр; данные сохранятся в ~/.docker/config.json
-#   ghcr.io               адрес реестра (GitHub Container Registry)
+#   ghcr.io               адрес реестра — здесь GitHub Container Registry; у вас может быть свой
 #   пароль                personal access token с правом write:packages, а не пароль от аккаунта
 docker login ghcr.io
 
@@ -283,7 +347,8 @@ docker system prune -a
           копий.</li>
         <li><code>RUN</code>/<code>COPY</code>/<code>ADD</code> создают слои; <code>ENV</code>,
           <code>ENTRYPOINT</code>, <code>USER</code> — только конфигурацию.</li>
-        <li><strong>Тег может переехать, digest — нет</strong>; <code>latest</code> ничего не значит.</li>
+        <li><strong>Тег — указатель, его можно перевесить; digest — нет</strong>. Тег по умолчанию —
+          <code>latest</code>, и он ничего не обещает.</li>
         <li>Реестр — это адрес образа; имя с реестром и без — разные образы.</li>
         <li>Архитектура (amd64/arm64) должна совпадать, иначе <code>exec format error</code>.</li>
       </ul>
