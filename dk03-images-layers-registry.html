@@ -26,6 +26,8 @@
     <div class="box tip">
       <span class="t">Какие вопросы закрывает эта глава</span>
       <ul>
+        <li>Что должно быть <strong>запущено</strong>, чтобы любая команда <code>docker …</code> вообще
+          работала (демон Docker) и почему иногда нужен <code>sudo</code>.</li>
         <li>Что физически лежит внутри образа и почему он весит столько, сколько весит.</li>
         <li>Почему <code>rm</code> «следующей строкой» не уменьшает образ и как правильно писать
           <code>RUN</code>.</li>
@@ -181,6 +183,34 @@ RUN    curl -o /tmp/a.tar https://example.com/a.tar                 ← та ж�
       <code>docker build</code>, и с программами в системе они не конфликтуют (разбор — глава 5). И ещё
       одно: сами по себе они ничего не делают — файл нужно <em>собрать</em> командой
       <code>docker build</code>, и только потом запускать получившийся образ.</p>
+    <div class="box warn">
+      <span class="t">Прежде чем писать <code>docker build</code>: должен работать демон</span>
+      <p><code>docker build</code> — <strong>не сервис и не «сборщик»</strong>, а обычная команда, как
+        <code>ls</code>. Она только просит <em>демон</em> Docker (<code>dockerd</code>) сделать работу.
+        Демон — это фоновый процесс, который и создаёт образы, и запускает контейнеры (глава 2).</p>
+      <p>Если демон не запущен, любая команда <code>docker …</code> заканчивается ошибкой:</p>
+      <pre><code class="language-text">Cannot connect to the Docker daemon at unix:///var/run/docker.sock.
+Is the docker daemon running?</code></pre>
+      <p><strong>Что делать</strong> — зависит от системы:</p>
+      <ul>
+        <li><strong>Linux</strong> (пакет <code>docker-ce</code>): демон — это systemd-сервис с именем
+          <code>docker</code>; при установке он обычно уже запущен и добавлен в автозапуск. Проверить:
+          <code>systemctl status docker</code>; запустить: <code>sudo systemctl start docker</code>;
+          включить автозапуск: <code>sudo systemctl enable --now docker</code>.</li>
+        <li><strong>macOS / Windows</strong>: демон работает внутри приложения
+          <strong>Docker Desktop</strong> — его нужно <em>запустить</em> (значок кита в трее), и оно поднимет
+          виртуальную машину с демоном. Закрыли Docker Desktop — команды <code>docker …</code> перестают
+          работать.</li>
+        <li><strong>Проверка одной командой:</strong> <code>docker version</code> печатает два блока —
+          <code>Client</code> и <code>Server</code>. Если блока <code>Server</code> нет, демон не отвечает;
+          <code>docker info</code> покажет то же подробнее.</li>
+      </ul>
+      <p><strong>И про права.</strong> Демон слушает сокет <code>/var/run/docker.sock</code>, а он принадлежит
+        <code>root</code>. Поэтому либо команды запускают через <code>sudo</code>, либо пользователя
+        добавляют в группу <code>docker</code>: <code>sudo usermod -aG docker $USER</code> — и затем
+        <em>перелогиниваются</em>. Иначе увидите
+        <code>permission denied while trying to connect to the Docker daemon socket</code>.</p>
+    </div>
     <p>В примере ниже встретятся три незнакомые программы. Вот что каждая делает — по одному слову за
       раз:</p>
     <ul>
