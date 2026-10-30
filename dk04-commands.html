@@ -53,10 +53,10 @@ CONTAINER ID   IMAGE        COMMAND                  STATUS        PORTS        
 8c1f0a9b2c31   orders-api   "dotnet Orders.Api.dll"  Up 2 hours    0.0.0.0:8080-&gt;8080/tcp   api
 
 $ docker ps -a
-CONTAINER ID   IMAGE        COMMAND                  STATUS                       NAMES
-8c1f0a9b2c31   orders-api   "dotnet Orders.Api.dll"  Up 2 hours                   api
-9a77e1c4d002   orders-api   "dotnet Orders.Api.dll"  Exited (1) 3 minutes ago     api-old
-7f31b0e9aa10   postgres     "docker-entrypoint.s…"   Exited (0) 2 days ago        pg</code></pre>
+CONTAINER ID   IMAGE        COMMAND                  STATUS                     PORTS                    NAMES
+8c1f0a9b2c31   orders-api   "dotnet Orders.Api.dll"  Up 2 hours                 0.0.0.0:8080-&gt;8080/tcp   api
+9a77e1c4d002   orders-api   "dotnet Orders.Api.dll"  Exited (1) 3 minutes ago                            api-old
+7f31b0e9aa10   postgres     "docker-entrypoint.s…"   Exited (0) 2 days ago                               pg</code></pre>
     </div>
     <p>Вторая команда показывает то, чего не видно в первой: <code>Exited (1)</code> — контейнер упал с
       кодом 1, <code>Exited (0)</code> — завершился нормально, <code>Up 2 hours</code> — работает.</p>
@@ -75,6 +75,10 @@ CONTAINER ID   IMAGE        COMMAND                  STATUS                     
       <tr><td><code>docker rm</code></td><td>Ничего: удалены записываемый слой и метаданные; образ и тома
         целы</td><td>Контейнер больше не нужен</td></tr>
     </table>
+    <p>В таблице выше встретился <code>-f '{{.State.ExitCode}}'</code> — это <strong>шаблон</strong>:
+      строка, в которую Docker подставляет значения полей из JSON-конфигурации контейнера.
+      <code>{{.State.ExitCode}}</code> читается как «поле <code>State</code> → в нём поле
+      <code>ExitCode</code>». Что это за поля и как их смотреть — в разделе «Смотреть» ниже.</p>
     <p>Три бытовых сценария — и что мы делаем в каждом:</p>
     <table>
       <tr><th>Сценарий</th><th>Команда</th><th>Зачем</th></tr>
@@ -91,9 +95,11 @@ CONTAINER ID   IMAGE        COMMAND                  STATUS                     
     </table>
     <div class="box note">
       <span class="t">Почему это нормально: контейнер — расходуемый</span>
-      <p>В Docker не «лечат» контейнер, а заменяют его новым из того же образа: образ неизменяем, поэтому
-        новый запуск предсказуем. В проде это делает оркестратор — при выкатке старые контейнеры
-        удаляются. Данные для этого держат вне контейнера: в томе (глава 9) или в базе.</p>
+      <p>В Docker не «лечат» контейнер, а заменяют его новым из того же образа: образ неизменяем,
+        поэтому новый запуск предсказуем. В проде это делает <strong>оркестратор</strong> — система,
+        которая запускает контейнеры на многих машинах, сама перезапускает упавшие и распределяет трафик
+        (Kubernetes, Docker Swarm; глава 15). При выкатке старые контейнеры удаляются. Данные для этого
+        держат вне контейнера: в томе (глава 9) или в базе.</p>
     </div>
 
     <h2>run: одна команда вместо трёх</h2>
@@ -109,11 +115,17 @@ CONTAINER ID   IMAGE        COMMAND                  STATUS                     
         запусков; сервисам — нет, иначе пропадут логи упавшего контейнера</td></tr>
       <tr><td><code>--name api</code></td><td>Имя вместо случайного. Нужно для <code>logs</code>,
         <code>exec</code>, <code>stop</code></td></tr>
-      <tr><td><code>-p 8080:8080</code></td><td>Опубликовать порт: <code>хост:контейнер</code> (глава 8)</td></tr>
-      <tr><td><code>-e KEY=value</code></td><td>Переменная окружения — так передают конфигурацию
-        (глава 10)</td></tr>
-      <tr><td><code>-v pgdata:/var/lib/postgresql/data</code></td><td>Том или папка с данными (глава 9)</td></tr>
-      <tr><td><code>-it</code></td><td>Интерактивно + терминал: для <code>sh</code> и <code>psql</code></td></tr>
+      <tr><td><code>-p 8080:8080</code></td><td><strong>Опубликовать порт</strong>: <code>порт на хосте :
+        порт в контейнере</code>. Без <code>-p</code> приложение внутри работает, но снаружи до него не
+        достучаться (глава 8)</td></tr>
+      <tr><td><code>-e KEY=value</code></td><td>Переменная окружения внутри контейнера — так передают
+        пароли, строки подключения, режим работы (глава 10)</td></tr>
+      <tr><td><code>-v pgdata:/var/lib/postgresql/data</code></td><td><strong>Подключить хранилище</strong>:
+        слева имя тома или путь на хосте, справа путь внутри контейнера. Данные в томе переживают удаление
+        контейнера (что это — ниже и в главе 9)</td></tr>
+      <tr><td><code>-it</code></td><td>Интерактивно (<code>-i</code> — не закрывать ввод) и с терминалом
+        (<code>-t</code>): нужно для <code>sh</code> и <code>psql</code>; разбор — в разделе про
+        <code>exec</code></td></tr>
       <tr><td><code>--memory 512m --cpus 1.5</code></td><td>Лимиты cgroups (глава 12)</td></tr>
       <tr><td><code>--restart unless-stopped</code></td><td>Перезапускать после падения и перезагрузки
         хоста</td></tr>
@@ -169,14 +181,31 @@ docker rm pg</code></pre>
     <p>Что здесь важно: пароль передан <strong>переменной окружения</strong>, порт
       <strong>опубликован</strong> на хост, данные вынесены <strong>в том</strong>. Уберите
       <code>-v</code> — и после <code>docker rm</code> база будет пустой (глава 9).</p>
+    <div class="box note">
+      <span class="t">Что такое том (volume), если вы ещё не встречали это слово</span>
+      <p>Файлы контейнера живут в его записываемом слое и исчезают вместе с контейнером (глава 2).
+        <strong>Том</strong> — папка, которой управляет Docker и которая хранится <em>вне</em> контейнера.
+        Подключается флагом <code>-v имя_тома:путь_в_контейнере</code>: удалили контейнер — том с данными
+        остался, новый контейнер подключает его снова. Так база и не теряет данные при пересоздании.</p>
+      <ul>
+        <li><strong>Именованный том</strong> — <code>-v pgdata:/var/lib/postgresql/data</code>: имя
+          придумываете вы (или Docker), хранит его Docker; по имени том подключают к другим контейнерам.</li>
+        <li><strong>Папка хоста</strong> (bind mount) — <code>-v /home/me/site:/usr/share/nginx/html</code>:
+          монтируется ваша папка; удобно в разработке — поправили файл, и в контейнере он сразу новый.</li>
+        <li><strong>Посмотреть и удалить:</strong> <code>docker volume ls</code>;
+          <code>docker volume rm pgdata</code> — <em>вместе с данными</em>. Подробно — глава 9.</li>
+      </ul>
+    </div>
 
     <h2>Смотреть: ps, logs, inspect, stats</h2>
     <div class="codewrap">
       <pre><code class="language-bash"># docker ps                    список работающих контейнеров
 docker ps
 #   -a                         все, включая остановленные и упавшие (exited)
-#   -q                         только ID — удобно для скриптов: docker stop $(docker ps -q)
-#   --format 'шаблон'          свой вывод (Go-шаблон):
+#   -q                         только ID — удобно для скриптов; $(…) — подстановка:
+#                              сначала выполнится docker ps -q, его вывод подставится в строку
+#   --format 'шаблон'          свой вывод: {{.Поле}} заменяется значением поля
+#                              (посмотреть все поля сразу: docker ps --format '{{json .}}')
 #     {{.Names}}               имя контейнера
 #     {{.Status}}              «Up 5 minutes» или «Exited (1) 2 minutes ago»
 #     {{.Ports}}               опубликованные порты
@@ -193,7 +222,8 @@ docker logs --since 10m api
 
 # docker inspect               полная конфигурация и состояние контейнера (JSON)
 docker inspect api
-#   -f '{{.State.ExitCode}}'   код выхода: 0 — ок, 137 — SIGKILL/OOM, 143 — SIGTERM
+#   -f '{{.State.ExitCode}}'   код выхода: 0 — ок, 137 — процесс убит сигналом SIGKILL
+#                              (частая причина — нехватка памяти, OOM; глава 12), 143 — SIGTERM
 docker inspect -f '{{.State.ExitCode}}' api
 #   -f '{{.HostConfig.Memory}}'  лимит памяти в байтах (0 — лимит не задан)
 docker inspect -f '{{.HostConfig.Memory}}' api
@@ -215,6 +245,8 @@ docker exec -it api sh
 docker exec -it api bash
 
 # если приложение работает от непривилегированного пользователя, а нужны права
+#   -u root   ключ -u (user): от чьего имени выполнить команду
+#             (по умолчанию — тот пользователь, что задан в образе инструкцией USER)
 docker exec -u root api bash
 
 # без шелла: выполнить одну программу и выйти
@@ -256,7 +288,9 @@ docker exec api ls -la /app</code></pre>
       <tr><th>Команда</th><th>Что делает</th></tr>
       <tr><td><code>docker stop api</code></td><td><code>SIGTERM</code>, ожидание 10 с,
         <code>SIGKILL</code> (глава 13)</td></tr>
-      <tr><td><code>docker kill api</code></td><td>Сразу <code>SIGKILL</code> — без graceful shutdown</td></tr>
+      <tr><td><code>docker kill api</code></td><td>Сразу <code>SIGKILL</code> — без <em>graceful
+        shutdown</em> (корректного завершения: приложение не получает сигнал и не успевает дописать
+        данные)</td></tr>
       <tr><td><code>docker start api</code></td><td>Запустить остановленный контейнер снова (тот же
         записываемый слой)</td></tr>
       <tr><td><code>docker restart api</code></td><td>stop + start</td></tr>

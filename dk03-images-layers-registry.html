@@ -306,10 +306,13 @@ docker pull ghcr.io/acme/orders-api:1.4.2</code></pre>
         веб-приложения</td></tr>
       <tr><td><code>dotnet/runtime:8.0</code></td><td>Только .NET runtime</td><td>Консольные сервисы,
         воркеры</td></tr>
-      <tr><td><code>dotnet/runtime-deps:8.0</code></td><td>Зависимости без рантайма</td><td>Self-contained
-        и Native AOT приложения</td></tr>
+      <tr><td><code>dotnet/runtime-deps:8.0</code></td><td>Зависимости без рантайма</td>
+        <td>Self-contained (приложение со встроенным рантаймом) и Native AOT (заранее
+        скомпилировано в машинный код)</td></tr>
       <tr><td><code>*-alpine</code>, <code>*-chiseled</code></td><td>Минимальные варианты без лишнего
-        (часто без ICU и tzdata)</td><td>Когда важен размер — с оговорками из главы 14</td></tr>
+        (часто без ICU — библиотеки языков и форматов, и без tzdata — базы часовых поясов)</td>
+        <td>Когда важен размер, с оговорками из главы 14: без ICU .NET иначе форматирует даты, числа
+        и валюты, а без tzdata не знает часовых поясов</td></tr>
     </table>
     <p>Версия в теге должна совпадать с целевой платформой проекта: приложение на
       <code>net8.0</code> не запустится на <code>aspnet:6.0</code> — увидите
@@ -329,6 +332,8 @@ docker pull ghcr.io/acme/orders-api:1.4.2</code></pre>
 docker buildx build --platform linux/amd64 -t ghcr.io/acme/orders-api:1.4.2 --push .
 
 # два значения через запятую → один тег с манифестом сразу под обе архитектуры:
+#   манифест — файл-описание: под одним тегом лежит несколько вариантов образа,
+#   и docker сам скачивает тот, который подходит вашей машине
 # один и тот же 1.4.2 скачается arm64 на Mac и amd64 на сервере
 docker buildx build --platform linux/amd64,linux/arm64 \
   -t ghcr.io/acme/orders-api:1.4.2 --push .

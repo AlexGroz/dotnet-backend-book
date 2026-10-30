@@ -69,10 +69,11 @@
     </table>
     <p>Это деление объясняет, почему в <code>docker history</code> у инструкций из второй группы
       размер <code>0B</code>: они не положили в образ ни одного файла, только записали настройку
-      (глава 3).</p>
+      (глава 3). Одна оговорка: <code>FROM</code> стоит во второй группе потому, что сам файлов не создаёт —
+      он <em>берёт</em> уже готовые слои базового образа.</p>
 
-    <h2>Пример: собираем API «в лоб»</h2>
-    <p>Такой Dockerfile пишут в первый раз почти все — он работает, но у него есть цена:</p>
+    <h2>Пример: простейший Dockerfile для API — и его цена</h2>
+    <p>Такой Dockerfile пишут в первый раз почти все — он работает, но обходится дорого:</p>
     <div class="codewrap">
       <pre><code class="language-dockerfile">FROM mcr.microsoft.com/dotnet/sdk:8.0
 WORKDIR /src
@@ -103,9 +104,11 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
       реестра. Если интернета нет:</p>
     <ul>
       <li>на машине с интернетом: <code>docker pull mcr.microsoft.com/dotnet/sdk:8.0</code>, затем
-        <code>docker save … -o sdk.tar</code>;</li>
-      <li>на изолированной машине: <code>docker load -i sdk.tar</code> — и <code>FROM</code> возьмёт
-        образ из локального хранилища.</li>
+        <code>docker save mcr.microsoft.com/dotnet/sdk:8.0 -o sdk.tar</code> — <code>save</code> значит
+        «упаковать образ в файл», <code>-o</code> (<em>output</em>) — «в какой файл»;</li>
+      <li>на изолированной машине: <code>docker load -i sdk.tar</code> — <code>load</code> «загрузить
+        образ из файла», <code>-i</code> (<em>input</em>) «из какого файла». После этого <code>FROM</code>
+        возьмёт образ из локального хранилища, интернет не понадобится.</li>
     </ul>
     <p>То же можно делать через свой реестр: собрать базовый образ один раз, запушить и ссылаться на
       него. <code>FROM scratch</code> — особый случай: «пустой» образ, с которого начинают
@@ -171,13 +174,20 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
       <pre><code class="language-dockerfile"># 1) shell-форма: строка → Docker запускает /bin/sh -c "строка"
 #    /bin/sh — командная оболочка (shell) Linux; ключ -c = «выполни эту строку как команду»
 #    Нужна, когда используются возможности шелла: &amp;&amp; (и), | (пайп),
-#    &gt; (редирект), $VAR (переменные), подстановки и glob-маски
+#    > (редирект), $VAR (переменные), подстановки и glob-маски
 RUN apt-get update &amp;&amp; apt-get install -y curl &amp;&amp; rm -rf /var/lib/apt/lists/*
+#    что в этой строке по частям:
+#      apt-get                    менеджер пакетов Debian/Ubuntu (системные пакеты; NuGet — это другое)
+#      update                     обновить СПИСКИ доступных пакетов, а не сами пакеты
+#      install -y curl            поставить curl; -y = «на все вопросы отвечай да»
+#      &amp;&amp;                          «и затем»: следующая команда выполнится, только если предыдущая удалась
+#      rm -rf /var/lib/apt/lists/*  удалить списки; -r — с папками, -f — без вопросов
 
 # 2) exec-форма: JSON-массив, без шелла — аргументы передаются как есть
-#    Нужна, когда шелла в образе нет вообще (chiseled/distroless) или важны
-#    точные аргументы (пробелы, кавычки) без обработки их шеллом
+#    Нужна, когда шелла в образе нет вообще (chiseled/distroless — минимальные образы,
+#    где есть только ваше приложение) или важны точные аргументы (пробелы, кавычки)
 RUN ["dotnet", "restore"]
+#    restore — восстановить NuGet-пакеты проекта (аналог npm install)
 
 # так НЕ сработает: в exec-форме нет шелла, поэтому &amp;&amp; останется просто аргументом
 # RUN ["apt-get", "update", "&amp;&amp;", "apt-get", "install", "-y", "curl"]   ✘</code></pre>
@@ -199,7 +209,7 @@ RUN ["dotnet", "restore"]
     <table>
       <tr><th></th><th><code>ARG</code></th><th><code>ENV</code></th></tr>
       <tr><td>Когда существует</td><td>только во время сборки</td><td>и при сборке, и в контейнере</td></tr>
-      <tr><td>Виден приложению</td><td>нет</td><td>да — как переменная окружения и в
+      <tr><td>Виден приложению</td><td>нет</td><td>да — как переменная окружения; .NET читает её через
         <code>IConfiguration</code></td></tr>
       <tr><td>Переопределяется</td><td><code>docker build --build-arg</code></td>
         <td><code>docker run -e</code></td></tr>
@@ -223,8 +233,8 @@ RUN echo "собираем $APP_VERSION"   # ARG доступен на сбор�
 
     <h3><code>COPY</code> и <code>ADD</code>: файлы в образ</h3>
     <p><code>COPY &lt;откуда&gt; &lt;куда&gt;</code> — простое копирование из контекста сборки (разбор
-      <code>COPY . .</code> — выше). <code>ADD</code> умеет то же плюс две «магии»: распаковывает
-      локальные <code>.tar</code>/<code>.tar.gz</code> и скачивает URL.</p>
+      <code>COPY . .</code> — выше). <code>ADD</code> умеет то же плюс два неявных действия:
+      распаковывает локальные архивы <code>.tar</code>/<code>.tar.gz</code> и скачивает файл по URL.</p>
     <p><strong>Почему советуют <code>COPY</code>:</strong> <code>ADD</code> делает неявные вещи. Нужен
       архив — распакуйте явно (<code>RUN tar -xf</code>), нужен файл из сети — скачайте
       <code>curl</code> и проверьте контрольную сумму. Так в Dockerfile видно, что происходит.</p>
@@ -260,7 +270,11 @@ USER 1654          # то же самое, если переменная нед�
 #   --timeout       сколько ждать ответа
 #   --start-period  льготное время после старта (приложение греется)
 #   --retries       сколько провалов подряд → unhealthy
-#   curl -f         HTTP 4xx/5xx = провал;  || exit 1 — ненулевой код = провал</code></pre>
+#   curl -f         HTTP 4xx/5xx считается ошибкой (без -f curl «успешен» даже на 500)
+#   ||              «или иначе»: выполнить команду справа, только если левая провалилась
+#   exit 1          ненулевой код выхода = проверка провалена → статус unhealthy
+#   /health         адрес проверки в ВАШЕМ приложении: эндпоинт, который отвечает 200,
+#                   когда всё в порядке. Нет такого эндпоинта — проверка всегда падает</code></pre>
     </div>
     <div class="box note">
       <span class="t">В образе <code>aspnet</code> нет <code>curl</code></span>
@@ -278,12 +292,16 @@ USER 1654          # то же самое, если переменная нед�
       <tr><th>ENTRYPOINT</th><th>CMD</th><th>Что выполнится</th></tr>
       <tr><td><code>["dotnet","Api.dll"]</code></td><td><code>["--urls","http://+:8080"]</code></td>
         <td><code>dotnet Api.dll --urls http://+:8080</code></td></tr>
-      <tr><td><code>["dotnet","Api.dll"]</code></td><td>—</td><td><code>dotnet Api.dll</code></td></tr>
       <tr><td>—</td><td><code>["dotnet","Api.dll"]</code></td><td><code>dotnet Api.dll</code>, но
         <code>docker run img sh</code> заменит команду целиком</td></tr>
       <tr><td><code>["dotnet","Api.dll"]</code></td><td>—</td><td><code>docker run img --help</code>
         добавит аргумент, а не заменит команду</td></tr>
     </table>
+    <p>Две вещи в таблице читаются не сразу: <code>—</code> значит «инструкция не задана», а
+      <code>http://+</code> — «слушать на всех адресах» (<code>+</code> = любой IP, включая
+      <code>127.0.0.1</code> внутри контейнера). Если написать <code>http://localhost:8080</code>,
+      приложение будет принимать запросы только от самого контейнера, и публикация порта <code>-p</code>
+      не поможет.</p>
     <p><strong>Форма записи важнее, чем кажется.</strong> Запуск без shell:</p>
     <div class="codewrap">
       <pre><code class="language-dockerfile"># exec-форма: PID 1 = dotnet → SIGTERM от docker stop доходит до приложения
@@ -302,12 +320,14 @@ ENTRYPOINT dotnet Orders.Api.dll</code></pre>
     <div class="codewrap">
       <p class="cap">Команда и её вывод</p>
       <pre><code class="language-bash">$ docker build -t orders-api:1.4.2 .
-[+] Building 41.7s (9/9) FINISHED
+[+] Building 41.7s (10/10) FINISHED
  =&gt; [internal] load build definition from Dockerfile
- =&gt; [1/4] FROM mcr.microsoft.com/dotnet/sdk:8.0
- =&gt; [2/4] WORKDIR /src
- =&gt; [3/4] COPY . .
- =&gt; [4/4] RUN dotnet publish -c Release -o /app
+ =&gt; [internal] load metadata for mcr.microsoft.com/dotnet/sdk:8.0
+ =&gt; [1/5] FROM mcr.microsoft.com/dotnet/sdk:8.0
+ =&gt; [2/5] WORKDIR /src
+ =&gt; [3/5] COPY . .
+ =&gt; [4/5] RUN dotnet publish -c Release -o /app
+ =&gt; [5/5] WORKDIR /app
  =&gt; exporting to image
  =&gt; =&gt; naming to docker.io/library/orders-api:1.4.2</code></pre>
     </div>
@@ -318,8 +338,9 @@ ENTRYPOINT dotnet Orders.Api.dll</code></pre>
       <li><code>.</code> — <strong>контекст сборки</strong>: папка, содержимое которой отправляется демону
         и доступно для <code>COPY</code>. Чем больше контекст, тем дольше сборка — поэтому нужен
         <code>.dockerignore</code> (глава 6).</li>
-      <li>Строки <code>[1/4] … [4/4]</code> — шаги; каждый создаёт слой. Если шаг не изменился, при
-        следующей сборке он берётся из кэша (глава 6).</li>
+      <li>Строки <code>[1/5] … [5/5]</code> — шаги сборки. Шагов пять, хотя инструкций в Dockerfile шесть:
+        <code>ENTRYPOINT</code> ничего не выполняет, он только записывает настройку в конфиг образа. Если шаг
+        не изменился, при следующей сборке он берётся из кэша (глава 6).</li>
       <li><code>-f docker/Api.Dockerfile</code> — взять Dockerfile по другому пути (по умолчанию
         <code>./Dockerfile</code>).</li>
       <li><code>--progress=plain</code> — подробный текстовый лог; <code>--no-cache</code> — не
