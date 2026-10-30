@@ -48,6 +48,22 @@
         показывает вам ID контейнера. Когда вы позже пишете <code>docker ps</code>, CLI снова спрашивает
         демона «что запущено» и печатает ответ.</p>
     </div>
+    <div class="box note">
+      <span class="t">Как читать примеры в книге</span>
+      <ul>
+        <li><code>$</code> — приглашение оболочки: строка с <code>$</code> — команда, которую вы
+          набираете; строки под ней без <code>$</code> — то, что напечатала программа.</li>
+        <li>Блоки бывают двух видов. <strong>Транскрипт</strong> — команда и её вывод: команда помечена
+          <code>$</code>, вывод — нет. <strong>Справочник</strong> — только команды с пояснениями: там
+          <code>$</code> часто опускают, и тогда ориентир такой: строка <em>без</em> <code>#</code> —
+          команда, строка с <code>#</code> — пояснение к ней.</li>
+        <li><code>#</code> — комментарий: в команду не входит, объясняет ключи и вывод.</li>
+        <li><code>…</code> — пропущенные аргументы; <code>&lt;имя&gt;</code> — подставьте своё
+          значение.</li>
+        <li>В блоках <code>Dockerfile</code> и в схемах <code>$</code> нет никогда: это директивы файла
+          или рисунок, а не команды оболочки. То же правило действует во всех книгах библиотеки.</li>
+      </ul>
+    </div>
 
     <h2>Сначала — жизненный цикл: контейнер не исчезает после остановки</h2>
     <p>Это место, где новички теряются. Запуск контейнера — <strong>создание объекта</strong>, а не
@@ -117,7 +133,7 @@ docker rm …             объект удалён                          →
     <h2>Один процесс, которому выдали своё окружение</h2>
     <p>Начнём с команды, которая выглядит непонятно, а делает простую вещь:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker run --rm alpine ps aux</code></pre>
+      <pre><code class="language-bash">$ docker run --rm alpine ps aux</code></pre>
     </div>
     <p>Разбираем каждую часть — и что она означает:</p>
     <ul>
@@ -128,11 +144,31 @@ docker rm …             объект удалён                          →
         десятки раз подряд.</li>
       <li><code>ps aux</code> — <strong>программа внутри образа</strong>, а не команда Docker. <code>ps</code>
         = «process status»: печатает список процессов. Ключи: <code>a</code> — процессы всех
-        пользователей, <code>u</code> — «пользовательский» формат (PID, USER, %CPU, TIME, COMMAND),
-        <code>x</code> — включая процессы без терминала.</li>
+        пользователей, <code>u</code> — «пользовательский» формат (подробные столбцы: USER, PID, %CPU,
+        %MEM, VSZ, RSS, TTY, STAT, START, TIME, COMMAND), <code>x</code> — включая процессы без
+        терминала.</li>
+      <li><strong>Почему в выводе ниже нет <code>%CPU</code>.</strong> Столбцы выбирает не Docker, а сама
+        программа <code>ps</code>. В <code>alpine</code> стоит <em>busybox</em> — упрощённый набор утилит, и
+        её <code>ps aux</code> печатает только четыре столбца: <code>PID</code>, <code>USER</code>,
+        <code>TIME</code>, <code>COMMAND</code>. Полный формат с <code>%CPU</code> вы увидите у обычного
+        <code>ps</code> хоста — вторая таблица ниже.</li>
     </ul>
     <p><strong>Зачем эта команда в примере:</strong> чтобы увидеть, что <em>внутри</em> контейнера нет
       ни одного чужого процесса — только сама <code>ps</code>. Именно это и означает «изоляция».</p>
+    <p><strong>Почему в команде нет имени контейнера.</strong> Потому что контейнера ещё не существует —
+      <code>docker run</code> его <em>создаёт</em>. Обязателен только <strong>образ</strong> (из чего
+      создавать); имя Docker придумает сам, а <code>--name</code> нужен лишь для удобства — чтобы потом
+      обращаться к готовому контейнеру по-человечески. Разделение простое:</p>
+    <table>
+      <tr><th>Команда</th><th>Что делает</th><th>Что нужно указать</th></tr>
+      <tr><td><code>docker run &lt;образ&gt; …</code></td><td>создаёт <em>новый</em> контейнер и запускает
+        в нём программу</td><td>образ и программу; имя — по желанию, через <code>--name</code></td></tr>
+      <tr><td><code>docker start &lt;имя&gt;</code></td><td>запускает <em>уже созданный</em> контейнер
+        (тот, что виден в <code>docker ps -a</code>)</td><td>имя или ID — контейнер уже есть</td></tr>
+      <tr><td><code>docker stop &lt;имя&gt;</code></td><td>останавливает процесс внутри</td>
+        <td>имя или ID</td></tr>
+      <tr><td><code>docker rm &lt;имя&gt;</code></td><td>удаляет объект</td><td>имя или ID</td></tr>
+    </table>
     <div class="codewrap">
       <p class="cap">Вывод (внутри контейнера)</p>
       <pre><code class="language-text">PID   USER     TIME  COMMAND
@@ -157,9 +193,10 @@ docker rm …             объект удалён                          →
       <li>строки <em>без</em> слова <code>docker</code> (<code>ps aux</code>, <code>grep</code>,
         <code>uname</code>) — обычные программы <strong>хоста</strong>, они видят процессы хоста, в том
         числе процесс контейнера.</li>
-      <li><code>$</code> в примерах — это приглашение оболочки (prompt): строки с <code>$</code> — то, что
-        вы печатаете; строки без <code>$</code> — ответ программы. Символ в команду не входит и ни на что
-        не влияет.</li>
+      <li><code>$</code> в примерах — приглашение оболочки (prompt): строка с <code>$</code> — команда,
+        которую вы набираете; строки под ней без <code>$</code> — вывод программы. Символ в команду не
+        входит и ни на что не влияет. Полное правило записи примеров — во врезке «Как читать примеры»
+        выше.</li>
     </ul>
     <div class="codewrap">
       <p class="cap">Команды в терминале хоста: что где выполняется</p>
@@ -200,6 +237,25 @@ root   48173  0.0  0.0   1620   4 ?   Ss   12:00   0:00 sleep 300
       <li><code>48173</code> — на хосте тот же самый процесс виден как обычный процесс с обычным PID.
         Это и есть главная мысль главы: контейнер — не «коробка с ОС», а процесс на хосте.</li>
     </ul>
+    <p>Столбцов в строке хоста больше, чем у busybox в контейнере: здесь <code>%CPU</code> и
+      <code>%MEM</code> как раз есть. Разберём её по столбцам:</p>
+    <table>
+      <tr><th>Столбец</th><th>Что значит</th></tr>
+      <tr><td><code>root</code></td><td>пользователь, от которого работает процесс</td></tr>
+      <tr><td><code>48173</code></td><td>PID <em>на хосте</em>; внутри контейнера тот же процесс был
+        <code>1</code></td></tr>
+      <tr><td><code>0.0</code> (%CPU)</td><td>сколько процентов процессора процесс занимает прямо сейчас
+        (у <code>sleep</code> — ноль: он спит)</td></tr>
+      <tr><td><code>0.0</code> (%MEM)</td><td>сколько процентов памяти хоста</td></tr>
+      <tr><td><code>1620</code> (VSZ) / <code>4</code> (RSS)</td><td>виртуальный размер и сколько реально
+        в памяти, в килобайтах</td></tr>
+      <tr><td><code>?</code> (TTY)</td><td>терминала нет — процесс запущен в фоне</td></tr>
+      <tr><td><code>Ss</code> (STAT)</td><td>состояние: <code>S</code> — спит, <code>s</code> — лидер
+        сессии</td></tr>
+      <tr><td><code>12:00</code> (START)</td><td>когда процесс запущен</td></tr>
+      <tr><td><code>0:00</code> (TIME)</td><td>сколько процессорного времени потратил</td></tr>
+      <tr><td><code>sleep 300</code> (COMMAND)</td><td>сама программа</td></tr>
+    </table>
     <p>Это главное, что нужно усвоить: <strong>контейнер — не «коробка с ОС»</strong>. На хосте это
       обычный процесс (или несколько), которому ядро показало другую картину мира: свои процессы, свою
       сеть, свою файловую систему. Docker — это инструмент, который готовит такую картину и запускает
@@ -308,25 +364,25 @@ Linux my-laptop 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC x86_64 GNU/Linux
 #   --memory 512m         лимит памяти 512 МБ (cgroup); 512m = 512 мебибайт
 #   --cpus 1.5            лимит CPU: полтора ядра (cgroup, файл cpu.max)
 #   my-api                имя образа
-docker run -d --name limited --memory 512m --cpus 1.5 my-api
+$ docker run -d --name limited --memory 512m --cpus 1.5 my-api
 
 # ── 2. ЧИТАЕМ изнутри: как лимит видит сам контейнер ────────────────────────
 # docker exec limited ...  выполнить команду в УЖЕ работающем контейнере (новый процесс)
 # cat                      вывести содержимое файла
 # /sys/fs/cgroup/memory.max  файл cgroup v2: максимум памяти в байтах
 #                            536870912 байт = 512 МБ — столько видит сам контейнер
-docker exec limited cat /sys/fs/cgroup/memory.max
+$ docker exec limited cat /sys/fs/cgroup/memory.max
 
 # /sys/fs/cgroup/cpu.max   два числа: квота и период в микросекундах
 #                            150000 / 100000 = 1.5 ядра
-docker exec limited cat /sys/fs/cgroup/cpu.max
+$ docker exec limited cat /sys/fs/cgroup/cpu.max
 
 # ── 3. ЧИТАЕМ снаружи: что Docker запомнил в конфигурации ───────────────────
 # docker inspect            показать полную конфигурацию контейнера (JSON)
 #   -f 'шаблон'             вывести только нужное поле (Go-шаблон)
 #   .HostConfig.Memory      лимит памяти в байтах
 #   .HostConfig.NanoCpus    лимит CPU в наноядрах: 1.5 → 1500000000
-docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' limited</code></pre>
+$ docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' limited</code></pre>
     </div>
     <p>Правило простое: лимиты <strong>задаёт только создание</strong> контейнера
       (<code>docker run --memory … --cpus …</code>); <code>docker inspect</code>,
