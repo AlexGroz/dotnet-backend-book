@@ -161,6 +161,11 @@ RUN    curl -o /tmp/a.tar https://example.com/a.tar                 ← та ж�
         Dockerfile, а всё остальное — обычные программы Linux</strong> (<code>curl</code>,
         <code>tar</code>, <code>rm</code>, <code>apt-get</code>, <code>ps</code>). Docker их не заменяет —
         он просто запускает их там, куда его попросили.</p>
+      <p>И уточнение, которое снимает путаницу: <code>RUN</code>, <code>COPY</code>, <code>ENV</code> —
+        <strong>ключевые слова файла</strong>, а не программы в системе. Их читает
+        <code>docker build</code>, поэтому своя программа с именем <code>run</code> ничего не путает:
+        в строке <code>RUN run --verbose</code> первое слово — инструкция, второе — уже программа
+        (подробно — глава 5).</p>
     </div>
     <p>Инструкции делятся на два типа (подробный разбор каждой — глава 5):</p>
     <table>
@@ -172,6 +177,10 @@ RUN    curl -o /tmp/a.tar https://example.com/a.tar                 ← та ж�
         <code>EXPOSE</code>, <code>ENTRYPOINT</code>, <code>CMD</code>, <code>LABEL</code>,
         <code>HEALTHCHECK</code></td></tr>
     </table>
+    <p>Это <strong>ключевые слова файла Dockerfile</strong>, а не команды Linux: их понимает только
+      <code>docker build</code>, и с программами в системе они не конфликтуют (разбор — глава 5). И ещё
+      одно: сами по себе они ничего не делают — файл нужно <em>собрать</em> командой
+      <code>docker build</code>, и только потом запускать получившийся образ.</p>
     <p>В примере ниже встретятся три незнакомые программы. Вот что каждая делает — по одному слову за
       раз:</p>
     <ul>
