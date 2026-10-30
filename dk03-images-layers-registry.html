@@ -35,6 +35,9 @@
         <li>Какой из образов .NET брать: <code>sdk</code>, <code>aspnet</code> или <code>runtime</code>.</li>
         <li>Почему возникает <code>exec format error</code> и как собрать под нужную архитектуру.</li>
       </ul>
+      <p>Предполагается только одно: вы умеете открыть терминал и перейти в папку. Всё остальное —
+        незнакомые программы Linux (<code>curl</code>, <code>tar</code>, <code>ps</code>) и слова Docker —
+        объясняются там, где появляются впервые.</p>
     </div>
 
     <h2>Что лежит внутри образа</h2>
@@ -132,13 +135,34 @@ IMAGE          CREATED      CREATED BY                                      SIZE
       мегабайт.</p>
 
     <h2>Dockerfile → образ</h2>
-    <p><code>RUN</code>, <code>COPY</code>, <code>FROM</code> и другие слова капсом — это
-      <strong>инструкции Dockerfile</strong>: текстового файла-рецепта, в котором записано, как собрать
-      образ. Сами по себе они ничего не выполняют — их читает <code>docker build</code>, сверху вниз.
-      <code>RUN</code> значит «выполни эту команду <em>внутри собираемого образа</em>»: то же, что вы
-      набрали бы в терминале контейнера, но на этапе сборки. Поэтому в примерах ниже строки
-      <code>RUN …</code> — это содержимое Dockerfile, а не то, что набирают в терминале.</p>
-    <p>Инструкции делятся на два типа:</p>
+    <p><code>RUN</code>, <code>COPY</code>, <code>FROM</code> — это <strong>инструкции
+      Dockerfile</strong>: текстового файла-рецепта, в котором записано, как собрать образ. Пишут их
+      <strong>заглавными (большими) буквами</strong> — просто по традиции, для наглядности; Docker понимает
+      и строчные, но так никто не пишет. Сами по себе эти слова ничего не выполняют: их читает
+      <code>docker build</code> сверху вниз. <code>RUN</code> значит «выполни эту команду <em>внутри
+      собираемого образа</em>».</p>
+    <div class="box tip">
+      <span class="t">Три вида строк — не путайте их</span>
+      <table>
+        <tr><th>Строка</th><th>Что это</th><th>Кто выполняет</th></tr>
+        <tr><td><code>docker run alpine ps aux</code></td><td>команда, которую вы набираете в
+          терминале</td><td>программа <code>docker</code> на хосте</td></tr>
+        <tr><td><code>RUN curl -o /tmp/a.tar …</code></td><td>инструкция из файла
+          <code>Dockerfile</code></td><td><code>docker build</code>, внутри собираемого образа</td></tr>
+        <tr><td><code>curl -o /tmp/a.tar …</code></td><td>обычная программа Linux</td>
+          <td>тот, кто её вызвал: вы — на хосте, <code>docker run</code> — в контейнере,
+          <code>RUN</code> — на этапе сборки</td></tr>
+      </table>
+      <p>Одна и та же команда <code>curl</code> в трёх ролях — сравните первые слова:</p>
+      <pre><code class="language-text">docker run alpine curl -o /tmp/a.tar https://example.com/a.tar      ← curl работает В КОНТЕЙНЕРЕ
+RUN    curl -o /tmp/a.tar https://example.com/a.tar                 ← та же команда ПРИ СБОРКЕ образа
+       curl -o /tmp/a.tar https://example.com/a.tar                 ← та же команда НА ХОСТЕ</code></pre>
+      <p>Общее правило: <strong><code>docker …</code> — это про Docker, <code>RUN …</code> — строка
+        Dockerfile, а всё остальное — обычные программы Linux</strong> (<code>curl</code>,
+        <code>tar</code>, <code>rm</code>, <code>apt-get</code>, <code>ps</code>). Docker их не заменяет —
+        он просто запускает их там, куда его попросили.</p>
+    </div>
+    <p>Инструкции делятся на два типа (подробный разбор каждой — глава 5):</p>
     <table>
       <tr><th>Тип инструкции</th><th>Что создаёт</th><th>Примеры</th></tr>
       <tr><td>Меняет файловую систему</td><td><strong>Новый слой</strong> (и участвует в кэше)</td>
@@ -148,6 +172,21 @@ IMAGE          CREATED      CREATED BY                                      SIZE
         <code>EXPOSE</code>, <code>ENTRYPOINT</code>, <code>CMD</code>, <code>LABEL</code>,
         <code>HEALTHCHECK</code></td></tr>
     </table>
+    <p>В примере ниже встретятся три незнакомые программы. Вот что каждая делает — по одному слову за
+      раз:</p>
+    <ul>
+      <li><code>curl https://example.com/big.tar</code> — «скачай то, что лежит по этому адресу»
+        (<em>curl</em> — клиент для HTTP). <strong>Ничего не устанавливает и не запускает</strong>: просто
+        забирает файл по сети.</li>
+      <li><code>-o /tmp/big.tar</code> — ключ <code>-o</code> (<em>output</em>) у <code>curl</code>:
+        «сохрани скачанное в файл <code>/tmp/big.tar</code>». Без <code>-o</code> curl вывел бы содержимое
+        файла в терминал. Ключ <code>-o</code> есть и у других программ, но у каждой он свой — смотрите
+        <code>curl --help</code>.</li>
+      <li><code>tar -xf /tmp/big.tar -C /opt</code> — распаковать архив: <code>-x</code> — «извлечь»,
+        <code>-f</code> — «архив называется вот так», <code>-C /opt</code> — «распаковать в папку
+        <code>/opt</code>».</li>
+      <li><code>rm /tmp/big.tar</code> — удалить файл (<em>remove</em>).</li>
+    </ul>
     <div class="box note">
       <span class="t">Зачем думать о слоях: «скачал — удалил в одной инструкции»</span>
       <p><strong>Как устроен слой.</strong> Одна инструкция <code>RUN</code> — <strong>один слой</strong>:
