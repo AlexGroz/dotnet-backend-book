@@ -147,26 +147,50 @@ docker rm …             объект удалён                          →
       <li><code>COMMAND ps aux</code> — сама команда. Больше строк нет: процессов хоста здесь не
         видно.</li>
     </ul>
-    <p>Теперь посмотрим на ту же картину <strong>с хоста</strong> — то есть из терминала на машине, где
-      работает Docker (ваш ноутбук или сервер). Запустим контейнер, который «живёт» 300 секунд, и
-      посмотрим, что видит хост:</p>
+    <p>Теперь посмотрим на ту же картину <strong>с хоста</strong> — из терминала машины, где работает
+      Docker (ваш ноутбук или сервер). Сразу важное: <strong>все</strong> команды в книге вы набираете в
+      терминале <em>хоста</em> — и <code>docker run …</code>, и <code>ps aux</code>. Терминал не решает,
+      где выполнится программа; это решает <em>сама команда</em>:</p>
+    <ul>
+      <li><code>docker run &lt;образ&gt; &lt;программа&gt;</code> — всё после имени образа выполняется
+        <strong>внутри</strong> контейнера (его запускает Docker).</li>
+      <li>строки <em>без</em> слова <code>docker</code> (<code>ps aux</code>, <code>grep</code>,
+        <code>uname</code>) — обычные программы <strong>хоста</strong>, они видят процессы хоста, в том
+        числе процесс контейнера.</li>
+      <li><code>$</code> в примерах — это приглашение оболочки (prompt): строки с <code>$</code> — то, что
+        вы печатаете; строки без <code>$</code> — ответ программы. Символ в команду не входит и ни на что
+        не влияет.</li>
+    </ul>
     <div class="codewrap">
-      <p class="cap">Команды и их вывод на хосте</p>
+      <p class="cap">Команды в терминале хоста: что где выполняется</p>
       <pre><code class="language-bash">$ docker run -d --name demo alpine sleep 300
-8c1f0a9b2c31d4e5…        # ← ID созданного контейнера
+8c1f0a9b2c31d4e5…          # ← вывод Docker: ID созданного контейнера
+#  └─ sleep 300 работает ВНУТРИ контейнера, в фоне
 
 $ docker ps
 CONTAINER ID   IMAGE    COMMAND       CREATED         STATUS         PORTS   NAMES
 8c1f0a9b2c31   alpine   "sleep 300"   5 seconds ago   Up 5 seconds           demo
+#  └─ CLI спрашивает демона «что запущено» и печатает ответ
 
 $ ps aux | grep 'sleep 300'
-root   48173  0.0  0.0   1620   4 ?   Ss   12:00   0:00 sleep 300</code></pre>
+root   48173  0.0  0.0   1620   4 ?   Ss   12:00   0:00 sleep 300
+#  └─ ps и grep — программы ХОСТА: контейнер тут ни при чём,
+#     просто среди процессов хоста нашёлся тот самый sleep</code></pre>
     </div>
     <ul>
       <li><code>docker run -d</code> — <code>-d</code> (detached) значит «в фоне»: терминал сразу
         вернётся, а контейнер продолжит работать.</li>
-      <li><code>--name demo</code> — имя контейнера, придумали сами; нужно, чтобы потом обращаться к нему
-        по имени (<code>docker stop demo</code>), а не по ID.</li>
+      <li><code>--name demo</code> — имя <strong>контейнера</strong>, придумали сами; нужно, чтобы потом
+        обращаться к нему по имени (<code>docker stop demo</code>), а не по ID. Не путайте два имени в
+        одной команде: <code>alpine</code> — имя <strong>образа</strong> («из чего создаём»),
+        <code>demo</code> — имя <strong>созданного контейнера</strong> («что получилось»). Из одного
+        образа <code>alpine</code> можно сделать сотню контейнеров с разными именами — это будут разные
+        объекты с одинаковым содержимым. Если <code>--name</code> не указывать, Docker придумает имя сам
+        (<code>zen_hopper</code>, <code>bold_turing</code>).</li>
+      <li><strong>Скелет любой команды запуска:</strong> <code>docker run [ключи] &lt;образ&gt;
+        [программа и аргументы]</code>. Поэтому <code>docker run -d --name demo alpine sleep 300</code>
+        читается так: «создай контейнер из образа <code>alpine</code>, назови его <code>demo</code>,
+        работать оставь в фоне и выполни внутри <code>sleep 300</code>».</li>
       <li><code>sleep 300</code> — программа «спать 300 секунд». Контейнер живёт, пока живёт его процесс,
         поэтому он не завершится раньше.</li>
       <li><code>docker ps</code> — список <em>контейнеров</em> (не процессов) и их состояние:
@@ -241,8 +265,17 @@ PID   USER     TIME  COMMAND
         следующий <code>.3</code> и так далее. Если создать свою сеть
         (<code>docker network create</code>), подсеть будет другая — например,
         <code>172.18.0.0/16</code>. В Kubernetes адреса выдаёт уже он.</li>
-      <li><code>mtu 1500</code> — максимальный размер пакета; <code>brd</code> — широковещательный
-        адрес; <code>scope global</code> — адрес виден всей сети.</li>
+      <li><code>link/ether 02:42:ac:11:00:02</code> — MAC-адрес интерфейса. Docker не выдаёт его
+        случайно: <code>ac 11 00 02</code> — это тот же адрес <code>172.17.0.2</code>, записанный
+        шестнадцатеричными парами.</li>
+      <li><code>mtu 1500</code> — в строке <code>2: eth0@if7 … mtu 1500</code>: максимальный размер
+        пакета в байтах, который интерфейс передаёт за один раз.</li>
+      <li><code>brd 172.17.255.255</code> — <strong>широковещательный</strong> (broadcast) адрес
+        подсети. Он стоит в строке <code>inet 172.17.0.2/16 brd 172.17.255.255 scope global eth0</code> —
+        сразу после адреса. Пакет, отправленный на этот адрес, получают <em>все</em> машины сети
+        <code>172.17.0.0/16</code>; <code>172.17.255.255</code> — её последний адрес.</li>
+      <li><code>scope global</code> — адрес доступен всей сети (в отличие от <code>scope host</code> у
+        loopback, который виден только внутри машины).</li>
     </ul>
 
     <h3>Ядро: <code>uname -a</code></h3>
@@ -260,11 +293,14 @@ Linux my-laptop 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC x86_64 GNU/Linux
 
     <h2>cgroups: сколько можно потратить</h2>
     <p>Namespaces отвечают на вопрос «что видно», cgroups — на вопрос «сколько разрешено».
-      Контрольные группы считают и ограничивают CPU, память, ввод-вывод, число процессов. Запустим
-      контейнер с лимитами и посмотрим, как они выглядят изнутри (образ <code>my-api</code> здесь
-      условный — подставьте свой):</p>
+      Контрольные группы считают и ограничивают CPU, память, ввод-вывод, число процессов.</p>
+    <p>Ниже три команды, и у них разные роли — не перепутайте: <strong>первая задаёт</strong> лимиты в
+      момент создания контейнера (значения запоминаются в его конфигурации и применяются cgroup'ами),
+      <strong>две следующие только читают</strong> — одна изнутри контейнера, другая снаружи. Образ
+      <code>my-api</code> здесь условный — подставьте свой:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># docker run              создать и запустить контейнер
+      <pre><code class="language-bash"># ── 1. ЗАДАЁМ лимиты (в момент создания контейнера) ─────────────────────────
+# docker run              создать и запустить контейнер
 #   -d                    в фоне (detached), не занимать терминал
 #   --name limited        имя контейнера — придумали сами («limited» = «ограниченный»,
 #                         потому что задаём лимиты). Имя может быть любым, лишь бы уникальным:
@@ -274,6 +310,7 @@ Linux my-laptop 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC x86_64 GNU/Linux
 #   my-api                имя образа
 docker run -d --name limited --memory 512m --cpus 1.5 my-api
 
+# ── 2. ЧИТАЕМ изнутри: как лимит видит сам контейнер ────────────────────────
 # docker exec limited ...  выполнить команду в УЖЕ работающем контейнере (новый процесс)
 # cat                      вывести содержимое файла
 # /sys/fs/cgroup/memory.max  файл cgroup v2: максимум памяти в байтах
@@ -284,12 +321,18 @@ docker exec limited cat /sys/fs/cgroup/memory.max
 #                            150000 / 100000 = 1.5 ядра
 docker exec limited cat /sys/fs/cgroup/cpu.max
 
+# ── 3. ЧИТАЕМ снаружи: что Docker запомнил в конфигурации ───────────────────
 # docker inspect            показать полную конфигурацию контейнера (JSON)
 #   -f 'шаблон'             вывести только нужное поле (Go-шаблон)
 #   .HostConfig.Memory      лимит памяти в байтах
 #   .HostConfig.NanoCpus    лимит CPU в наноядрах: 1.5 → 1500000000
 docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' limited</code></pre>
     </div>
+    <p>Правило простое: лимиты <strong>задаёт только создание</strong> контейнера
+      (<code>docker run --memory … --cpus …</code>); <code>docker inspect</code>,
+      <code>docker stats</code> и файлы <code>/sys/fs/cgroup/…</code> — <strong>читают</strong>. Уже
+      созданному контейнеру лимиты можно поправить на живую:
+      <code>docker update --memory 1g --cpus 2 limited</code> (глава 4).</p>
     <p>Зачем это разработчику. Лимиты нужны не только для того, чтобы один контейнер не забрал себе всю
       память и весь процессор и не затормозил остальные <em>контейнеры на том же сервере</em> — по-английски
       такую ситуацию называют <em>noisy neighbor</em>, «шумный сосед»: сосед, который мешает всем вокруг.
@@ -409,7 +452,13 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]
 #   итого PID 1 = /bin/sh, а dotnet — его дочерний процесс: SIGTERM достаётся оболочке
 #   и часто не доходит до приложения
 #   плюс: строку разбирает оболочка, поэтому $ASPNETCORE_URLS подставится, работают | и &amp;&amp;
-ENTRYPOINT dotnet Orders.Api.dll</code></pre>
+ENTRYPOINT dotnet Orders.Api.dll
+
+# ИТОГ: во второй форме /bin/sh -c в файле НЕ написан — его дописывает сам Docker.
+# Проверить, что получилось, можно так:
+#   docker inspect -f '{{json .Config.Entrypoint}}' my-api
+#     exec-форма  →  ["dotnet","Orders.Api.dll"]               ← оболочки нет
+#     shell-форма →  ["/bin/sh","-c","dotnet Orders.Api.dll"]  ← Docker добавил её сам</code></pre>
     </div>
     <div class="box note">
       <span class="t">Что такое <code>/bin/sh -c</code></span>
@@ -423,6 +472,12 @@ ENTRYPOINT dotnet Orders.Api.dll</code></pre>
         и <code>&amp;&amp;</code>. Плата — лишний процесс: PID 1 становится <code>/bin/sh</code>,
         приложение перестаёт быть главным процессом контейнера, и <code>SIGTERM</code> от
         <code>docker stop</code> часто до него не доходит (глава 13).</p>
+      <p><strong>Где он в наших двух записях.</strong> В первой —
+        <code>ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code> — его нет и не будет: там массив, Docker
+        запускает <code>dotnet</code> напрямую. Во второй — <code>ENTRYPOINT dotnet Orders.Api.dll</code>
+        — вы его тоже не писали: <em>Docker дописывает оболочку сам</em>, превращая строку в
+        <code>["/bin/sh", "-c", "dotnet Orders.Api.dll"]</code>. То есть «в коде его не видно» и есть
+        ответ: shell-форма тем и отличается от exec-формы, что оболочка появляется неявно.</p>
     </div>
     <p>Именно из-за этого «контейнер не останавливается, приходится ждать 10 секунд и он умирает
       жёстко». Подробный разбор — в главе 13.</p>
