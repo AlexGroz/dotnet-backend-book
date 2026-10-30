@@ -169,6 +169,7 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
     <p>Две формы записи — и зачем каждая:</p>
     <div class="codewrap">
       <pre><code class="language-dockerfile"># 1) shell-форма: строка → Docker запускает /bin/sh -c "строка"
+#    /bin/sh — командная оболочка (shell) Linux; ключ -c = «выполни эту строку как команду»
 #    Нужна, когда используются возможности шелла: &amp;&amp; (и), | (пайп),
 #    &gt; (редирект), $VAR (переменные), подстановки и glob-маски
 RUN apt-get update &amp;&amp; apt-get install -y curl &amp;&amp; rm -rf /var/lib/apt/lists/*
@@ -289,6 +290,7 @@ USER 1654          # то же самое, если переменная нед�
 ENTRYPOINT ["dotnet", "Orders.Api.dll"]
 
 # shell-форма: Docker выполнит /bin/sh -c "dotnet Orders.Api.dll"
+#   (/bin/sh — оболочка, -c = «выполни строку»; см. пояснение в главе 2)
 #   PID 1 = /bin/sh; плюс — раскрываются переменные, минус — сигналы часто не доходят
 ENTRYPOINT dotnet Orders.Api.dll</code></pre>
     </div>
