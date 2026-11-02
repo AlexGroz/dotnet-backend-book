@@ -306,27 +306,101 @@ USER 1654          # то же самое, если переменная нед�
 #                   когда всё в порядке. Нет такого эндпоинта — проверка всегда падает</code></pre>
     </div>
     <div class="box note">
-      <span class="t">В образе <code>aspnet</code> нет <code>curl</code></span>
-      <p>Проверка выше упадёт не потому, что приложение больно, а потому что утилиты нет. Варианты:
-        добавить <code>curl</code> своим слоем (плюс мегабайты и уязвимости) или — правильнее в проде —
-        отдать проверку оркестратору: Kubernetes-проба <code>httpGet</code> не требует утилит внутри
-        образа. Подробно — глава 13.</p>
+      <span class="t">Проверка упадёт не из-за приложения, а из-за отсутствия утилиты</span>
+      <p>В образе <code>aspnet</code> нет ни <code>curl</code>, ни <code>wget</code>: он собран «тонким» —
+        только рантайм .NET. Поэтому статус будет честным, но причина — не та, которую вы ищете:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">$ docker ps
+CONTAINER ID   IMAGE                STATUS
+3f2c9a1b7d4e   orders-api:1.4.2     Up 2 minutes (unhealthy)
+
+$ docker inspect --format '{{json .State.Health}}' 3f2c9a1b7d4e | head -c 400
+{"Status":"unhealthy","FailingStreak":3,
+ "Log":[{"Output":"/bin/sh: 1: curl: not found\n"}]}</code></pre>
+      </div>
+      <p>Приложение при этом живое — упала <em>проверка</em>. Рабочих вариантов три, и выбирают их по
+        ситуации.</p>
+      <p><strong>Вариант 1: поставить утилиту в образ.</strong> Тот самый слой <code>apt-get</code> из
+        раздела про <code>RUN</code>, и обязательно в <em>финальную</em> стадию (в multi-stage — в ту, что
+        станет образом, глава 7):</p>
+      <div class="codewrap">
+        <pre><code class="language-dockerfile">RUN apt-get update \
+ &amp;&amp; apt-get install -y --no-install-recommends curl \
+ &amp;&amp; rm -rf /var/lib/apt/lists/*
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1</code></pre>
+      </div>
+      <ul>
+        <li><code>--no-install-recommends</code> — не тянуть «рекомендованные» пакеты: нужен один
+          <code>curl</code>, а не двадцать его знакомых.</li>
+        <li><code>rm -rf /var/lib/apt/lists/*</code> — стереть индексы пакетов <em>в том же слое</em>
+          (глава 3: иначе эти мегабайты останутся в образе навсегда).</li>
+        <li>Цена: <code>curl</code> умеет ходить в сеть и качать файлы — в проде это лишняя возможность для
+          атакующего (глава 14). Поэтому вариант 3 часто лучше.</li>
+      </ul>
+      <p><strong>Вариант 2: проверить только порт, без утилит.</strong> У <code>bash</code> есть встроенное
+        перенаправление <code>/dev/tcp</code> — «открой TCP-соединение с адресом»:</p>
+      <div class="codewrap">
+        <pre><code class="language-dockerfile">HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD bash -c '&lt;/dev/tcp/127.0.0.1/8080' || exit 1</code></pre>
+      </div>
+      <p>Работает там, где есть <code>bash</code> (в <code>aspnet:8.0</code> на Debian он есть, в alpine —
+        нет). Минус: проверяется «порт слушается», а не «приложение отвечает 200». Приложение может висеть
+        и не отвечать — проверка этого не заметит.</p>
+      <p><strong>Вариант 3: отдать проверку наружу.</strong> Ничего не ставить в образ, а проверять
+        снаружи: Kubernetes-проба <code>httpGet</code> или <code>healthcheck</code> в compose, который
+        выполняет утилита <em>другого</em> контейнера. Так делают в проде — подробно в главах 11 и 13.</p>
     </div>
 
     <h3><code>ENTRYPOINT</code> и <code>CMD</code>: что запускать и с какими аргументами</h3>
     <p>Зачем их две. <code>ENTRYPOINT</code> — «<strong>что за программа</strong>»: он не переопределяется
       аргументами в конце <code>docker run</code>. <code>CMD</code> — «<strong>аргументы по
       умолчанию</strong>»: их легко заменить.</p>
+    <p>В таблице два <em>разных</em> вопроса, и именно поэтому её раньше читали как противоречие:
+      что запустится, <strong>если ничего не дописывать</strong>, и что запустится,
+      <strong>если дописать аргументы в <code>docker run</code></strong>. Теперь это разные столбцы.</p>
     <table>
-      <tr><th>ENTRYPOINT</th><th>CMD</th><th>Что выполнится</th></tr>
+      <tr><th>ENTRYPOINT</th><th>CMD</th><th>По умолчанию:<br><code>docker run img</code></th>
+        <th>С аргументами:<br><code>docker run img --help</code></th></tr>
       <tr><td><code>["dotnet","Api.dll"]</code></td><td><code>["--urls","http://+:8080"]</code></td>
-        <td><code>dotnet Api.dll --urls http://+:8080</code></td></tr>
-      <tr><td>—</td><td><code>["dotnet","Api.dll"]</code></td><td><code>dotnet Api.dll</code>, но
-        <code>docker run img sh</code> заменит команду целиком</td></tr>
-      <tr><td><code>["dotnet","Api.dll"]</code></td><td>—</td><td><code>docker run img --help</code>
-        добавит аргумент, а не заменит команду</td></tr>
+        <td><code>dotnet Api.dll --urls http://+:8080</code></td>
+        <td><code>dotnet Api.dll --help</code><br>(CMD выброшен, его место заняли аргументы)</td></tr>
+      <tr><td>—</td><td><code>["dotnet","Api.dll"]</code></td>
+        <td><code>dotnet Api.dll</code></td>
+        <td><code>--help</code> → ошибка «executable file not found»<br>(CMD был единственной командой,
+          поэтому заменён целиком — вместе с программой)</td></tr>
+      <tr><td><code>["dotnet","Api.dll"]</code></td><td>—</td>
+        <td><code>dotnet Api.dll</code></td>
+        <td><code>dotnet Api.dll --help</code><br>(CMD не было, поэтому аргументы дописались в конец
+          ENTRYPOINT)</td></tr>
     </table>
-    <p>Две вещи в таблице читаются не сразу: <code>—</code> значит «инструкция не задана», а
+    <p><strong>Правило, из которого следуют все три строки:</strong> аргументы из <code>docker run</code>
+      <em>заменяют</em> <code>CMD</code> — целиком, как один блок. Был <code>CMD</code> — он выброшен;
+      не было — дописанное просто добавляется к <code>ENTRYPOINT</code>. Программу
+      (<code>ENTRYPOINT</code>) так подменить нельзя: во второй строке «замена» случилась только потому,
+      что программы в <code>ENTRYPOINT</code> нет вообще — её роль играл <code>CMD</code>.</p>
+    <div class="box tip">
+      <span class="t">Как всё-таки «залезть внутрь» образа, у которого есть <code>ENTRYPOINT</code></span>
+      <p><code>docker run -it orders-api:1.4.2 bash</code> шелл не откроет: <code>bash</code> станет
+        аргументом и превратится в <code>dotnet Orders.Api.dll bash</code> — приложение просто получит
+        лишний аргумент. Нужен флаг <code>--entrypoint</code>:</p>
+      <pre><code class="language-bash">$ docker run --rm -it --entrypoint bash orders-api:1.4.2
+root@4b1f9c2a7d31:/app#</code></pre>
+      <ul>
+        <li><code>--entrypoint bash</code> — «забудь <code>ENTRYPOINT</code> из образа, запусти вот
+          это».</li>
+        <li><code>-it</code> — интерактивный режим с терминалом (<code>-i</code> = подавать мой ввод,
+          <code>-t</code> = выделить tty); без них шелл сразу закроется.</li>
+        <li><code>--rm</code> — удалить контейнер после выхода, чтобы не копить остановленные.</li>
+        <li>Если в образе задан ещё и <code>CMD</code>, его аргументы допишутся к новой команде — ровно по
+          правилу из таблицы выше. В нашем Dockerfile <code>CMD</code> нет, поэтому здесь всё чисто.</li>
+        <li>Для уже запущенного контейнера то же делают через
+          <code>docker exec -it &lt;имя&gt; bash</code> (глава 4) — там <code>ENTRYPOINT</code> вообще ни при
+          чём.</li>
+      </ul>
+    </div>
+    <p>Ещё две вещи в таблице читаются не сразу: <code>—</code> значит «инструкция не задана», а
       <code>http://+</code> — «слушать на всех адресах» (<code>+</code> = любой IP, включая
       <code>127.0.0.1</code> внутри контейнера). Если написать <code>http://localhost:8080</code>,
       приложение будет принимать запросы только от самого контейнера, и публикация порта <code>-p</code>
@@ -348,7 +422,7 @@ ENTRYPOINT dotnet Orders.Api.dll</code></pre>
     <h2>Сборка</h2>
     <p>Здесь Dockerfile из начала главы превращается в образ — это тот самый шаг 2.</p>
     <div class="codewrap">
-      <p class="cap">Команда и её вывод</p>
+      <p class="cap">Команда и её вывод (в книге — без цвета: пояснение ниже)</p>
       <pre><code class="language-bash">$ docker build -t orders-api:1.4.2 .
 [+] Building 41.7s (10/10) FINISHED
  =&gt; [internal] load build definition from Dockerfile
@@ -361,6 +435,12 @@ ENTRYPOINT dotnet Orders.Api.dll</code></pre>
  =&gt; exporting to image
  =&gt; =&gt; naming to docker.io/library/orders-api:1.4.2</code></pre>
     </div>
+    <p><strong>Почему в книге «не так, как у меня».</strong> В живом терминале этот вывод
+      <strong>цветной и анимированный</strong>: строки дописываются по мере выполнения, справа тикают
+      секунды, готовые шаги помечаются зелёными галочками, внизу бежит индикатор. Здесь — статичный «снимок»
+      без цвета. Ровно такое же содержимое Docker печатает, когда вывод <em>не</em> терминал (например, лог
+      в CI) или когда добавлен <code>--progress=plain</code>. То есть расхождение — про оформление, а не про
+      смысл; во всей книге вывод сборки показан в этом виде.</p>
     <ul>
       <li><code>docker build</code> — собрать образ по Dockerfile.</li>
       <li><code>-t orders-api:1.4.2</code> — имя и тег результата (<code>-t</code> = tag). Без него образ
@@ -371,6 +451,9 @@ ENTRYPOINT dotnet Orders.Api.dll</code></pre>
       <li>Строки <code>[1/5] … [5/5]</code> — шаги сборки. Шагов пять, хотя инструкций в Dockerfile шесть:
         <code>ENTRYPOINT</code> ничего не выполняет, он только записывает настройку в конфиг образа. Если шаг
         не изменился, при следующей сборке он берётся из кэша (глава 6).</li>
+      <li>Число <code>(10/10)</code> в первой строке считает <strong>все</strong> шаги, включая внутренние:
+        загрузку самого Dockerfile, запрос метаданных базового образа, экспорт результата. Ваших шагов из
+        Dockerfile среди них пять — <code>[1/5] … [5/5]</code>, поэтому числа и не совпадают.</li>
       <li><code>-f docker/Api.Dockerfile</code> — взять Dockerfile по другому пути (по умолчанию
         <code>./Dockerfile</code>).</li>
       <li><code>--progress=plain</code> — подробный текстовый лог; <code>--no-cache</code> — не
