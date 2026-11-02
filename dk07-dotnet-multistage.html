@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 7 · Multi-stage: сборка .NET-образа построчно</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/dockerfile.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -18,30 +22,462 @@
     <h1>Глава 7. Multi-stage: сборка .NET-образа построчно</h1>
     <p class="sublead">SDK-стадия, publish, runtime-стадия и non-root — полный рабочий Dockerfile</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>План главы:</p>
+    <div class="box note">
+      <span class="t">Из главы 5 остался образ на 1.02 ГБ. Здесь он станет 218 МБ</span>
+      <p>Dockerfile из главы 5 собирал приложение <em>на том же образе, в котором оно потом работало</em>:
+        SDK, MSBuild, NuGet, исходники и готовые dll — всё в одном месте. Получается 1.02 ГБ, из которых
+        приложению нужны полтора десятка мегабайт.</p>
+      <p><strong>Multi-stage</strong> («многостадийная сборка») — возможность описать в одном файле
+        <em>несколько</em> образов и взять из «строительного» только результат. Компилятор остаётся на
+        первой стадии и в финальный образ не попадает вообще.</p>
+    </div>
+
+    <h2>Что не так с одной стадией</h2>
+    <table>
+      <tr><th>Что лежит в образе</th><th>Нужно приложению?</th><th>Цена</th></tr>
+      <tr><td>рантайм .NET (<code>aspnet</code>)</td><td>да — на нём всё работает</td><td>~218 МБ</td></tr>
+      <tr><td>SDK: компилятор, MSBuild, NuGet, шаблоны</td><td>нет: код уже скомпилирован</td>
+        <td>+700 МБ</td></tr>
+      <tr><td>исходники: <code>.cs</code>, <code>.csproj</code>, <code>.git</code></td><td>нет</td>
+        <td>+размер и утечка кода</td></tr>
+      <tr><td>промежуточные <code>obj</code> и <code>bin/Debug</code></td><td>нет</td><td>+мусор</td></tr>
+    </table>
+    <p>Три следствия, и все три видны не сразу:</p>
+    <ul>
+      <li><strong>Образ качается при каждом деплое.</strong> Его тянут на каждую машину и в каждую реплику:
+        1 ГБ вместо 218 МБ — это минуты вместо секунд и лишний трафик.</li>
+      <li><strong>Больше поверхностей атаки.</strong> Компилятор, NuGet и утилиты умеют скачивать и
+        исполнять код. В работающем контейнере это не нужно, а уязвимости в них считаются так же, как в
+        рантайме (глава 14).</li>
+      <li><strong>Исходники уезжают вместе с образом.</strong> Кто получил образ — получил и ваш код. Для
+        закрытого продукта это уже инцидент.</li>
+    </ul>
+    <p>Схема того, что делает multi-stage:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">СТАДИЯ 1 (build)                        СТАДИЯ 2 (final)
+FROM sdk:8.0                            FROM aspnet:8.0
+  ├ компилятор, MSBuild, NuGet            ├ только рантайм .NET
+  ├ исходники                             ├
+  ├ dotnet restore                        │
+  ├ dotnet publish -c Release -o /app     │
+  └ /app — готовые dll   ───────────────► └ COPY --from=build /app .
+                                               │
+                                               ▼
+                                   ОБРАЗ 218 МБ: без SDK, без исходников
+
+Стадия 1 целиком остаётся в кэше сборки (глава 6) — в результат она не входит.</code></pre>
+    </div>
+    <h2>Полный Dockerfile</h2>
+    <p>Вот файл целиком — в нём всё, что нужно боевому .NET-API. Дальше разбираем каждую строку.</p>
+    <div class="codewrap">
+      <p class="cap">Dockerfile (рядом с ним — <code>.dockerignore</code> из главы 6)</p>
+      <pre><code class="language-dockerfile"># syntax=docker/dockerfile:1
+
+# ---------- стадия 1: сборка ----------
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+# restore зависит только от .csproj/.sln — копируем их первыми (глава 6)
+COPY Orders.sln ./
+COPY Orders.Api/Orders.Api.csproj Orders.Api/
+COPY Orders.Domain/Orders.Domain.csproj Orders.Domain/
+RUN --mount=type=cache,target=/root/.nuget/packages,sharing=locked \
+    dotnet restore
+
+# теперь весь остальной код и публикация в папку /app
+COPY . .
+RUN dotnet publish Orders.Api/Orders.Api.csproj \
+      -c Release \
+      -o /app \
+      --no-restore
+
+# ---------- стадия 2: то, что поедет в прод ----------
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
+WORKDIR /app
+
+# берём готовый результат первой стадии — и только его
+COPY --from=build /app .
+
+# не root: пользователь app уже есть в образе (APP_UID=1654)
+USER $APP_UID
+
+# документация: приложение слушает 8080 (ASPNETCORE_HTTP_PORTS из образа)
+EXPOSE 8080
+
+# exec-форма: PID 1 = dotnet, сигналы доходят до приложения
+ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
+    </div>
+    <p>Что важно увидеть сразу:</p>
+    <ul>
+      <li><strong>Два <code>FROM</code></strong> — это два независимых образа. Имена после
+        <code>AS</code> (<code>build</code>, <code>final</code>) нужны, чтобы на стадию можно было
+        сослаться: <code>--from=build</code>.</li>
+      <li><strong>Между стадиями ничего не перетекает само.</strong> Всё, что нужно взять, перечислено в
+        <code>COPY --from=…</code>.</li>
+      <li><strong>Вторая стадия ничего не знает о первой:</strong> ни про <code>WORKDIR /src</code>, ни про
+        установленные пакеты, ни про исходники. Каждая стадия начинается с чистого базового образа — в этом
+        и смысл.</li>
+      <li><strong>В образ попадает только последняя стадия.</strong> Первая остаётся в кэше сборки (глава
+        6), поэтому <code>docker images</code> покажет 218 МБ, а не 1 ГБ.</li>
+    </ul>
+
+    <h2>Разбор по строкам</h2>
+
+    <h3>1. <code>FROM … sdk:8.0 AS build</code></h3>
+    <p>Первая стадия — <strong>строительная площадка</strong>. Здесь нужен полный SDK: компилятор, MSBuild,
+      NuGet, шаблоны проектов. Имя стадии можно взять любое (<code>AS compile</code>,
+      <code>AS builder</code>) — важно, что потом на него ссылаются.</p>
+    <table>
+      <tr><th>Образ</th><th>Что внутри</th><th>Размер</th><th>Куда</th></tr>
+      <tr><td><code>sdk:8.0</code></td><td>компилятор, MSBuild, NuGet, рантайм</td><td>~780 МБ</td>
+        <td>стадия сборки</td></tr>
+      <tr><td><code>aspnet:8.0</code></td><td>рантайм .NET + ASP.NET Core (веб-сервер Kestrel)</td>
+        <td>~218 МБ</td><td>веб-API в проде</td></tr>
+      <tr><td><code>runtime:8.0</code></td><td>только рантайм .NET, без ASP.NET Core</td><td>~190 МБ</td>
+        <td>консольные приложения, worker-сервисы</td></tr>
+    </table>
+    <p>Выбор образа для второй стадии — это выбор того, что вообще будет установлено в контейнере. Для API
+      берут <code>aspnet</code> (там уже есть Kestrel), для фонового обработчика очередей —
+      <code>runtime</code>.</p>
+
+    <h3>2. <code>COPY</code> файлов проектов и <code>dotnet restore</code></h3>
+    <p>Копируем не весь код, а только <code>.sln</code> и <code>.csproj</code> — то, от чего зависит
+      восстановление пакетов. Это приём из главы 6: правка <code>Program.cs</code> не должна заставлять
+      заново качать пакеты.</p>
+    <p><code>--mount=type=cache,target=/root/.nuget/packages</code> — пакеты складываются в кэш демона,
+      который переживает между сборками и не попадает в образ. Если синтаксис незнаком — вернитесь к главе
+      6: там разобрано и монтирование, и почему <code>publish</code> потом идёт с
+      <code>--no-restore</code>.</p>
+
+    <h3>3. <code>RUN dotnet publish … -c Release -o /app --no-restore</code></h3>
+    <p>Главная инструкция стадии. Каждый флаг по делу:</p>
+    <ul>
+      <li><code>dotnet publish</code>, а не <code>build</code>: <code>build</code> только компилирует в
+        <code>bin/Debug/net8.0</code>, а <code>publish</code> ещё и раскладывает результат в папку, готовую
+        к запуску, — с зависимостями и конфигами.</li>
+      <li><code>-c Release</code> — конфигурация Release: включены оптимизации, нет отладочных проверок.
+        Без этого флага в прод уедет <strong>Debug-сборка</strong> — медленнее и болтливее, чем нужно.</li>
+      <li><code>-o /app</code> — «положи результат сюда» (<code>-o</code> = output). Так путь известен
+        точно, и вторая стадия копирует ровно его. Без <code>-o</code> publish кладёт файлы в
+        <code>bin/Release/net8.0/publish</code> — работает, но путь длиннее и легче ошибиться.</li>
+      <li><code>--no-restore</code> — «пакеты уже восстановлены, в сеть не ходи». Пара к предыдущему
+        <code>RUN dotnet restore</code>: иначе restore выполнится второй раз, уже без кэша пакетов.</li>
+      <li><code>Orders.Api/Orders.Api.csproj</code> — публикуется <em>конкретный проект</em>, а не solution:
+        в solution обычно есть тесты и утилиты, в образе они не нужны.</li>
+    </ul>
+    <h3>4. <code>FROM … aspnet:8.0 AS final</code></h3>
+    <p>Вторая стадия начинается <strong>с нуля</strong> — из чистого <code>aspnet</code>. Здесь нет ни
+      исходников, ни SDK: только рантайм .NET и ASP.NET Core с веб-сервером Kestrel. Именно этот образ и
+      станет результатом сборки, потому что он <em>последний</em>.</p>
+    <p><code>AS final</code> — просто имя. Оно понадобится, если вы захотите собрать образ только до
+      определённой стадии: <code>docker build --target build -t orders-api:debug .</code> остановится на
+      первой стадии и даст образ с SDK и исходниками — удобно, когда нужно зайти внутрь и что-то
+      посмотреть.</p>
+
+    <h3>5. <code>COPY --from=build /app .</code></h3>
+    <p>Одна строка, которая связывает стадии. Читается так: «возьми <code>/app</code>
+      <strong>из стадии <code>build</code></strong> и положи в текущую папку текущей стадии».</p>
+    <div class="codewrap">
+      <pre><code class="language-text">COPY --from=build /app .
+     └── откуда ──┘ └источник┘ └куда: WORKDIR текущей стадии = /app</code></pre>
+    </div>
+    <ul>
+      <li><code>--from=build</code> — имя стадии из <code>AS build</code>. Можно указать номер
+        (<code>--from=0</code>) или даже <em>чужой образ</em>:
+        <code>COPY --from=nginx:latest /etc/nginx/nginx.conf /etc/nginx/</code> — так берут конфиги из
+        готовых образов.</li>
+      <li><code>/app</code> — путь <em>внутри стадии build</em>. Он существует потому, что publish писал
+        именно туда (<code>-o /app</code>).</li>
+      <li><code>.</code> — путь <em>в текущей стадии</em>, то есть <code>/app</code> (его задал
+        <code>WORKDIR /app</code> строкой выше). Точка вместо абсолютного пути — чтобы работало и при смене
+        <code>WORKDIR</code>.</li>
+      <li>Два аргумента обязательны: <code>COPY --from=build /app</code> без второго — ошибка
+        <code>COPY requires at least two arguments</code>.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Что именно скопировалось</span>
+      <p>Не «проект», не «исходники» и не «всё из стадии build» — только содержимое папки
+        <code>/app</code>: готовые dll, файл зависимостей, конфигурация. Всё остальное из первой стадии
+        (SDK, <code>.cs</code>, <code>obj</code>, кэш NuGet) в финальный образ не попадает физически,
+        потому что о нём никто не просил.</p>
+    </div>
+
+    <h3>6. <code>USER $APP_UID</code></h3>
+    <p>Строка переключает пользователя: с этого места все инструкции <code>RUN</code> этой стадии и сам
+      запуск контейнера идут не от <code>root</code>, а от пользователя <code>app</code>. В нашем файле после
+      <code>USER</code> ни одного <code>RUN</code> нет, так что влияет он только на запуск. Пользователь
+      <code>app</code> в образах .NET 8 уже создан, а его идентификатор лежит в переменной
+      <code>APP_UID=1654</code> (мы видели её в главе 3, когда смотрели <code>Config.Env</code>). Поэтому
+      <code>USER $APP_UID</code> и <code>USER app</code> — одно и то же; первый вариант удобнее, потому что
+      не зависит от имени.</p>
+    <p>Зачем это нужно и что ломается:</p>
+    <ul>
+      <li><strong>Зачем:</strong> если в приложении найдут уязвимость и выполнят свой код, он получит права
+        <code>app</code>, а не <code>root</code>. Внутри контейнера root — это не «root на хосте», но
+        достаточно, чтобы навредить соседним процессам и смонтированным папкам (глава 14).</li>
+      <li><strong>Порт ниже 1024 недоступен.</strong> Поэтому приложение слушает 8080, а не 80: порты
+        <code>&lt;1024</code> — привилегированные, их может открыть только root. Как это связано с
+        <code>-p 8080:8080</code> и почему снаружи может быть 80 — глава 8.</li>
+      <li><strong>Писать в <code>/app</code> нельзя.</strong> Файлы туда положил <code>COPY</code> от
+        <code>root</code>, а у <code>app</code> прав на запись нет. Если приложению нужно что-то писать —
+        это либо <code>COPY --chown=$APP_UID /app .</code>, либо (правильнее) том или временная папка
+        (глава 9).</li>
+      <li><strong>Логи — только в stdout.</strong> Файл <code>/var/log/app.log</code> создать не выйдет;
+        впрочем, в контейнере так и надо: <code>docker logs</code> читает stdout (глава 4).</li>
+    </ul>
+
+    <h3>7. <code>EXPOSE 8080</code> и <code>ENTRYPOINT</code></h3>
+    <p><code>EXPOSE 8080</code> ничего не открывает — это документация для людей и подсказка для
+      инструментов: «приложение слушает 8080». Публикация порта наружу делается флагом <code>-p</code> при
+      запуске (глава 8).</p>
+    <p><code>ENTRYPOINT</code> записывает в конфиг образа программу, которая станет процессом контейнера.
+      Форма записи здесь принципиальна:</p>
+    <table>
+      <tr><th>Форма</th><th>Что станет PID 1</th><th>Сигналы и переменные</th></tr>
+      <tr><td><code>ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code><br>(exec, в квадратных скобках)</td>
+        <td><code>dotnet</code></td>
+        <td>сигнал <code>SIGTERM</code> от <code>docker stop</code> доходит до приложения → оно успевает
+          корректно завершиться; переменные <code>$VAR</code> не раскрываются (их раскрывает только
+          оболочка)</td></tr>
+      <tr><td><code>ENTRYPOINT dotnet Orders.Api.dll</code><br>(shell, строкой)</td>
+        <td><code>/bin/sh</code></td>
+        <td>оболочка раскрывает <code>$VAR</code>, но сигналы часто не передаёт дальше: <code>docker
+          stop</code> ждёт 10 секунд, потом убивает контейнер <code>SIGKILL</code> — запросы рвутся</td></tr>
+    </table>
+    <p>Правило для .NET-сервисов: <strong>exec-форма</strong>. Что происходит при остановке контейнера и как
+      настроить graceful shutdown — глава 13; как передать приложению аргументы в обход
+      <code>ENTRYPOINT</code> — глава 5.</p>
+    <h2>Что именно попадает в <code>/app</code></h2>
+    <p>Полезно один раз увидеть это глазами. Запускаем одноразовый контейнер, но вместо приложения —
+      <code>ls</code>:</p>
+    <div class="codewrap">
+      <p class="cap">Содержимое финального образа (сокращённо)</p>
+      <pre><code class="language-bash">$ docker run --rm --entrypoint ls orders-api:1.4.2 -la /app
+total 15M
+drwxr-xr-x 1 root root 4.0K Nov  2 12:41 .
+-rw-r--r-- 1 root root  412 Nov  2 12:41 Orders.Api.deps.json
+-rw-r--r-- 1 root root  18K Nov  2 12:41 Orders.Api.dll
+-rw-r--r-- 1 root root  128 Nov  2 12:41 Orders.Api.runtimeconfig.json
+-rw-r--r-- 1 root root 1.1K Nov  2 12:41 appsettings.json
+-rw-r--r-- 1 root root 1.4M Nov  2 12:41 Orders.Domain.dll
+-rw-r--r-- 1 root root 1.2M Nov  2 12:41 Swashbuckle.AspNetCore.SwaggerUI.dll</code></pre>
+    </div>
+    <ul>
+      <li><code>--entrypoint ls</code> — «запусти вместо приложения <code>ls</code>», а всё после имени
+        образа станет его аргументами (глава 5).</li>
+      <li><code>Orders.Api.dll</code> — ваш скомпилированный код. Имя файла = <code>AssemblyName</code>,
+        по умолчанию совпадает с именем проекта; ровно оно стоит в <code>ENTRYPOINT</code>.</li>
+      <li><code>Orders.Api.deps.json</code> — «карта зависимостей»: какие сборки и каких версий нужны
+        рантайму и где их искать.</li>
+      <li><code>Orders.Api.runtimeconfig.json</code> — как запускать: версия рантайма, режим сборки мусора и
+        прочие настройки CLR (что там можно менять — глава 12).</li>
+      <li><code>appsettings.json</code> — конфигурация. Секреты сюда не кладут: они приезжают переменными
+        окружения (глава 10).</li>
+      <li>Остальные dll — ваши проекты и NuGet-пакеты.</li>
+      <li>Владелец всех файлов — <code>root</code>: их положил <code>COPY</code>, выполнявшийся от root.
+        Это ровно та причина, по которой процессу от <code>app</code> нельзя писать в <code>/app</code>
+        (см. пункт 6 выше).</li>
+    </ul>
+    <p>Ни одного <code>.cs</code>, <code>.csproj</code>, <code>obj</code> и никакого SDK: это и есть работа
+      второй стадии.</p>
+    <h2>Сборка и проверка результата</h2>
+    <p>Собираем той же командой, что и раньше, — разница только в выводе: шаги теперь подписаны
+      <strong>именами стадий</strong>.</p>
+    <div class="codewrap">
+      <p class="cap">docker build: видно, какие шаги к какой стадии относятся</p>
+      <pre><code class="language-bash">$ docker build -t orders-api:1.4.2 .
+[+] Building 38.4s (13/13) FINISHED
+ =&gt; [internal] load build definition from Dockerfile
+ =&gt; [internal] load .dockerignore
+ =&gt; [internal] load metadata for mcr.microsoft.com/dotnet/aspnet:8.0
+ =&gt; [internal] load metadata for mcr.microsoft.com/dotnet/sdk:8.0
+ =&gt; [build 1/8] FROM mcr.microsoft.com/dotnet/sdk:8.0
+ =&gt; [build 2/8] WORKDIR /src
+ =&gt; [build 3/8] COPY Orders.sln ./
+ =&gt; [build 4/8] COPY Orders.Api/Orders.Api.csproj Orders.Api/
+ =&gt; [build 5/8] COPY Orders.Domain/Orders.Domain.csproj Orders.Domain/
+ =&gt; [build 6/8] RUN --mount=type=cache,... dotnet restore
+ =&gt; [build 7/8] COPY . .
+ =&gt; [build 8/8] RUN dotnet publish Orders.Api/Orders.Api.csproj -c Release -o /app
+ =&gt; [final 1/6] FROM mcr.microsoft.com/dotnet/aspnet:8.0
+ =&gt; [final 2/6] WORKDIR /app
+ =&gt; [final 3/6] COPY --from=build /app .
+ =&gt; [final 4/6] USER app
+ =&gt; [final 5/6] EXPOSE map[8080/tcp:{}]
+ =&gt; [final 6/6] ENTRYPOINT ["dotnet" "Orders.Api.dll"]
+ =&gt; exporting to image
+ =&gt; =&gt; naming to docker.io/library/orders-api:1.4.2</code></pre>
+    </div>
+    <p>Две вещи в этом выводе стоят внимания: шаги идут <strong>параллельно</strong> (поэтому в живом
+      терминале порядок строк перемешивается — это нормально), а <code>[final 5/6]</code> и
+      <code>[final 6/6]</code> выполняются мгновенно: <code>EXPOSE</code> и <code>ENTRYPOINT</code> файлов не
+      создают, только пишут настройки в конфиг образа (глава 5).</p>
+    <p>Размер — то, ради чего всё делалось:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ docker images orders-api
+REPOSITORY    TAG     IMAGE ID       CREATED          SIZE
+orders-api    1.4.2   7c1e9b3d4a52   20 seconds ago   218MB</code></pre>
+    </div>
+    <p>Было 1.02 ГБ (глава 5), стало 218 МБ — и почти всё это сам рантайм .NET. Что именно лежит в слоях:</p>
+    <div class="codewrap">
+      <p class="cap">Слои образа, сверху — самые новые (сокращённо)</p>
+      <pre><code class="language-bash">$ docker history orders-api:1.4.2
+IMAGE          CREATED         CREATED BY                              SIZE
+7c1e9b3d4a52   20 seconds ago  ENTRYPOINT ["dotnet" "Orders.Api.dll"]  0B
+&lt;missing&gt;      20 seconds ago  EXPOSE map[8080/tcp:{}]                 0B
+&lt;missing&gt;      20 seconds ago  USER app                                0B
+&lt;missing&gt;      20 seconds ago  COPY /app . # buildkit                  14.2MB
+&lt;missing&gt;      20 seconds ago  WORKDIR /app                            0B
+&lt;missing&gt;      3 weeks ago     #(nop)  CMD ["bash"]                    0B</code></pre>
+    </div>
+    <ul>
+      <li><code>docker history</code> — «из чего собран образ»: инструкция и размер каждого слоя.</li>
+      <li><code>0B</code> у <code>USER</code>, <code>EXPOSE</code>, <code>ENTRYPOINT</code> — те самые
+        инструкции-настройки: файлов не добавляют.</li>
+      <li><code>14.2MB</code> у <code>COPY /app .</code> — ваш код и зависимости. Это единственное, что
+        добавила вторая стадия.</li>
+      <li>BuildKit не пишет в истории <code>--from=build</code> — видно просто <code>COPY /app .</code>.
+        Не пугайтесь: источник всё равно указан в Dockerfile.</li>
+      <li><code>&lt;missing&gt;</code> — слои, которые пришли из базового образа: они лежат отдельно и в
+        строке не расписаны.</li>
+    </ul>
+    <p>И наконец — запуск. Заодно проверяем, что приложение действительно отвечает:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ docker run -d --name api -p 8080:8080 orders-api:1.4.2
+9a4f2c1e7b33d5a8...
+
+$ docker ps
+CONTAINER ID   IMAGE               STATUS
+9a4f2c1e7b33   orders-api:1.4.2    Up 12 seconds
+
+$ curl -s http://localhost:8080/health
+{"status":"Healthy"}
+
+$ docker logs api
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://[::]:8080</code></pre>
+    </div>
+    <ul>
+      <li><code>-d</code> — «в фоне» (detached): команда вернёт ID и отпустит терминал. Без <code>-d</code>
+        вывод приложения пошёл бы прямо в терминал.</li>
+      <li><code>--name api</code> — имя контейнера, чтобы потом писать <code>docker logs api</code> вместо
+        ID.</li>
+      <li><code>-p 8080:8080</code> — опубликовать порт: слева порт на вашей машине, справа порт в
+        контейнере. Подробно — глава 8.</li>
+      <li><code>Now listening on: http://[::]:8080</code> — доказательство, что <code>EXPOSE 8080</code>
+        совпадает с реальностью. Если бы приложение слушало другой порт, <code>curl</code> молчал бы.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Если контейнер сразу завершился</span>
+      <p>Самая частая причина — <code>ENTRYPOINT</code> указывает на несуществующий файл: имя dll не
+        совпало с <code>AssemblyName</code> или <code>WORKDIR</code> не та папка. Смотреть так:
+        <code>docker ps -a</code> (увидеть <code>Exited (…)</code>) → <code>docker logs api</code>
+        (сообщение вида <code>Could not execute because the specified command or file was not found</code>) →
+        <code>docker run --rm -it --entrypoint ls orders-api:1.4.2 -la /app</code> (что вообще лежит в папке).
+        Полный алгоритм разбора — глава 16.</p>
+    </div>
+    <h2>Варианты, которые встречаются на работе</h2>
+
+    <h3>Фоновый сервис вместо API</h3>
+    <p>Если приложение не принимает HTTP (обработчик очереди, планировщик), ASP.NET Core не нужен — берут
+      <code>runtime</code> и меняют точку входа:</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">FROM mcr.microsoft.com/dotnet/runtime:8.0 AS final
+WORKDIR /app
+COPY --from=build /app .
+USER $APP_UID
+ENTRYPOINT ["dotnet", "Orders.Worker.dll"]</code></pre>
+    </div>
+    <p><code>EXPOSE</code> здесь не нужен: портов нет. Всё остальное — то же самое.</p>
+
+    <h3>Сборка только до нужной стадии</h3>
+    <p><code>--target</code> останавливает сборку на указанной стадии и отдаёт её как результат:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># образ с SDK и исходниками — чтобы зайти и посмотреть, что происходит при сборке
+$ docker build --target build -t orders-api:build-debug .
+
+# внутри: /src с кодом, /app с результатом publish
+$ docker run --rm -it --entrypoint bash orders-api:build-debug</code></pre>
+    </div>
+    <p>Так разбираются вопросы вида «а точно ли publish положил файлы туда, куда я думаю». В продакшене такой
+      образ, разумеется, не нужен.</p>
+
+    <h3>Несколько сервисов из одного решения</h3>
+    <p>Один Dockerfile на каждый сервис — самый простой и предсказуемый вариант: <code>Dockerfile</code> для
+      API, <code>Worker.Dockerfile</code> для обработчика. Внутри каждого — своя стадия
+      <code>build</code>, и <code>dotnet publish</code> указывает на нужный <code>.csproj</code>.</p>
+    <p>Собираются они из одного контекста и делят кэш (глава 6), поэтому restore во втором файле обычно
+      берётся из кэша первого:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ docker build -f Dockerfile        -t orders-api:1.4.2    .
+$ docker build -f Worker.Dockerfile -t orders-worker:1.4.2 .</code></pre>
+    </div>
+    <p><code>-f</code> — «взять этот файл вместо <code>./Dockerfile</code>» (глава 5). Не забудьте
+      <code>.dockerignore</code> в корне контекста — он один на всех (глава 6).</p>
+
+    <h3>Сборка под чужую архитектуру</h3>
+    <p>Ноутбук на Apple Silicon собирает arm64, а сервер ждёт amd64 — при запуске это даст
+      <code>exec format error</code> (глава 3). Лечится явной платформой:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ docker buildx build --platform linux/amd64 -t orders-api:1.4.2 --push .</code></pre>
+    </div>
+    <p><code>--platform</code> — под какую архитектуру собирать; одна сборка может сделать сразу несколько
+      (<code>--platform linux/amd64,linux/arm64</code>), но такой результат нельзя «загрузить в локальный
+      Docker» — только <code>--push</code> в реестр. Где это нужно в пайплайне — глава 15.</p>
+
+    <h3>Ещё меньше и безопаснее</h3>
+    <p>Дальше размер уменьшают <code>8.0-alpine</code> (меньше базовый образ, но другая libc) и
+      <code>8.0-noble-chiseled</code> — «выщербленный» образ без оболочки и пакетного менеджера: в него не
+      зайти через <code>docker exec</code>, зато и атакующему почти нечего делать. Подробности и цена — глава
+      14.</p>
+    <div class="box warn">
+      <span class="t">Пять ошибок, которые встречаются в реальных Dockerfile</span>
+      <ol>
+        <li><strong>Нет <code>-c Release</code>.</strong> В прод уезжает Debug-сборка: медленнее, с отладочной
+          информацией. Видно по <code>docker run --rm --entrypoint ls … -la /app</code> — рядом с dll лежат
+          <code>*.pdb</code>.</li>
+        <li><strong><code>COPY . .</code> в финальной стадии.</strong> Классика: «скопирую весь проект, чтобы
+          точно всё работало». SDK там не появится, зато приедут исходники, тесты и <code>obj</code> — и весь
+          смысл стадий потерян. В финальной стадии нужен только <code>COPY --from=build /app .</code>.</li>
+        <li><strong>Путь не совпадает.</strong> publish писал в <code>/app</code>, а <code>COPY
+          --from=build</code> смотрит в <code>/src/bin/Release/net8.0</code>. Итог — пустая папка и падение на
+          старте. Проверка: <code>ls -la /app</code> в обеих стадиях.</li>
+        <li><strong>Забыт <code>--no-restore</code>.</strong> restore выполняется второй раз, уже без
+          cache-монтирования: сборка медленнее и снова лезет в сеть.</li>
+        <li><strong>Shell-форма <code>ENTRYPOINT</code>.</strong> Работает, но PID 1 — это
+          <code>/bin/sh</code>: <code>docker stop</code> и Kubernetes будут ждать таймаут и убивать приложение
+          жёстко (глава 13).</li>
+      </ol>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
       <ul>
-        <li>Зачем две стадии: SDK нужен только на сборке, в прод едет runtime.</li>
-        <li>Полный Dockerfile построчно: <code>FROM sdk AS build</code>, копирование
-          <code>sln</code>/<code>csproj</code>, <code>restore</code>, <code>COPY . .</code>,
-          <code>publish -c Release -o /app --no-restore</code>.</li>
-        <li>Вторая стадия: <code>aspnet:8.0</code>, <code>WORKDIR</code>,
-          <code>COPY --from=build</code>, <code>USER $APP_UID</code>, <code>ENTRYPOINT</code> в
-          exec-форме.</li>
-        <li>Что именно попадает в <code>/app</code> после <code>publish</code> и чем это отличается от
-          <code>build</code>.</li>
-        <li>Как проверить результат: размер образа, <code>docker history</code>, запуск и запрос к
-          <code>/health</code>.</li>
-        <li>Отдельные варианты: worker-сервис на <code>runtime</code>, несколько проектов в решении,
-          <code>--platform</code>.</li>
+        <li><strong>Стадия</strong> — отдельный образ внутри одного Dockerfile: <code>FROM … AS имя</code>. В
+          результат попадает только последняя стадия.</li>
+        <li>Между стадиями ничего не перетекает: нужное забирают явно —
+          <code>COPY --from=build /app .</code>.</li>
+        <li>Сборка: <code>sdk</code> → <code>restore</code> (по <code>.csproj</code>) → <code>COPY . .</code> →
+          <code>dotnet publish -c Release -o /app --no-restore</code>.</li>
+        <li>Запуск: <code>aspnet</code> (или <code>runtime</code> для не-HTTP) → <code>WORKDIR</code> →
+          <code>COPY --from</code> → <code>USER $APP_UID</code> → <code>EXPOSE</code> →
+          <code>ENTRYPOINT</code> в exec-форме.</li>
+        <li>Итог: 218 МБ вместо 1.02 ГБ — без SDK, без исходников, не от root, сигналы доходят до
+          приложения.</li>
+        <li>Проверка: <code>docker images</code> (размер), <code>docker history</code> (слои),
+          <code>curl …/health</code> (работает), <code>--entrypoint ls … -la /app</code> (что внутри).</li>
       </ul>
     </div>
+
+    <p>Дальше — сеть: почему <code>-p 8080:8080</code> не то же самое, что <code>EXPOSE 8080</code>, и
+      почему <code>localhost</code> внутри контейнера — не ваш ноутбук.</p>
     <div class="pager">
       <a href="dk06-build-cache.html">← <span class="sp">Глава 6. Кэш слоёв и .dockerignore</span></a>
       <a href="dk08-network.html"><span class="sp">Глава 8. Сеть: порты, DNS и localhost</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
