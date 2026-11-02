@@ -233,8 +233,34 @@ docker inspect -f '{{.HostConfig.Memory}}' api
 docker stats --no-stream</code></pre>
     </div>
     <p><code>inspect</code> — главный инструмент разбора: там видно итоговый образ, переменные,
-      лимиты, сеть, точку монтирования, код выхода. Формат <code>-f</code> принимает Go-шаблоны,
-      поэтому нужное поле достаётся одной командой.</p>
+      лимиты, сеть, точку монтирования, код выхода. Без <code>-f</code> он печатает весь объект как JSON —
+      длинный, на несколько экранов, — и именно этот JSON служит источником всех полей.</p>
+    <div class="box tip">
+      <span class="t">Как читать <code>--format '{{…}}'</code> за две минуты</span>
+      <p><code>-f</code> (он же <code>--format</code>) принимает <strong>Go-шаблон</strong>: обычный текст, в
+        который через <code>{{ }}</code> вставлены значения. Всё, что вне двойных фигурных скобок,
+        печатается как есть.</p>
+      <table>
+        <tr><th>Запись</th><th>Что значит</th><th>Пример</th></tr>
+        <tr><td><code>{{.Поле}}</code></td>
+          <td>точка — <em>сам объект</em> (контейнер, образ); дальше путь по его полям, как по папкам</td>
+          <td><code>{{.State.ExitCode}}</code> → <code>1</code></td></tr>
+        <tr><td><code>{{json .Поле}}</code></td><td>вывести значение как JSON в одну строку</td>
+          <td><code>{{json .State.Health}}</code> → <code>{"Status":"unhealthy",…}</code></td></tr>
+        <tr><td><code>{{index .Массив N}}</code></td><td>взять N-й элемент массива (нумерация с нуля)</td>
+          <td><code>{{index .RepoDigests 0}}</code> → <code>имя@sha256:…</code></td></tr>
+        <tr><td><code>\t</code>, <code>\n</code></td><td>табуляция и перевод строки внутри шаблона</td>
+          <td><code>'{{.Names}}\t{{.Status}}'</code></td></tr>
+      </table>
+      <p><strong>Имена полей не угадывают:</strong> сначала смотрят весь JSON (<code>docker inspect api</code>)
+        или печатают его одной строкой — <code>docker inspect api --format '{{json .}}'</code> — и ищут
+        нужное поле там.</p>
+      <p><strong>Кавычки — одинарные.</strong> В двойных оболочка попытается подставить своё
+        (<code>$</code>, <code>!</code>), и шаблон сломается. Одинарные отдают строку как есть.</p>
+      <p><strong>Частая ошибка:</strong> <code>docker inspect -f 'State.ExitCode' api</code> — без точки и без
+        скобок. Это для Docker просто текст, он так его и напечатает:
+        <code>State.ExitCode</code>.</p>
+    </div>
 
     <h2>Залезть внутрь: exec</h2>
     <div class="codewrap">

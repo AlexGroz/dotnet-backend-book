@@ -318,7 +318,8 @@ $ docker inspect --format '{{json .State.Health}}' 3f2c9a1b7d4e | head -c 400
 {"Status":"unhealthy","FailingStreak":3,
  "Log":[{"Output":"/bin/sh: 1: curl: not found\n"}]}</code></pre>
       </div>
-      <p>Приложение при этом живое — упала <em>проверка</em>. Рабочих вариантов три, и выбирают их по
+      <p>Приложение при этом живое — упала <em>проверка</em> (что делает запись
+        <code>--format '{{json …}}'</code> — разобрано в главе 4). Рабочих вариантов три, и выбирают их по
         ситуации.</p>
       <p><strong>Вариант 1: поставить утилиту в образ.</strong> Тот самый слой <code>apt-get</code> из
         раздела про <code>RUN</code>, и обязательно в <em>финальную</em> стадию (в multi-stage — в ту, что

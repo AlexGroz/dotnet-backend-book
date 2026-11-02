@@ -78,7 +78,8 @@
     </div>
     <ul>
       <li><code>--format '{{json .Config}}'</code> — вывести только раздел <code>Config</code> (это
-        Go-шаблон: <code>.Config</code> — поле объекта, <code>json</code> — «в одну строку»).</li>
+        Go-шаблон: <code>.Config</code> — поле объекта, <code>json</code> — «в одну строку»). Синтаксис
+        таких шаблонов разобран в главе 4.</li>
       <li><code>…</code> в выводе — сокращение автора: настоящий JSON длиннее. Если он не влезает в
         терминал, вывод обрезают на лету: <code>| head -c 400</code> — «взять первые 400 байт».</li>
       <li><code>Env</code> — переменные окружения, которые <strong>автоматически попадут в контейнер</strong>.
@@ -391,7 +392,9 @@ linux/arm64
 
 # архитектура машины, где запускаем
 $ docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
-linux/amd64          # ← не совпадает → exec format error</code></pre>
+linux/amd64          # ← не совпадает → exec format error
+
+# запись '{{…}}' — Go-шаблон: {{.Поле}} подставляет поле объекта (разбор — глава 4)</code></pre>
     </div>
     <p>Лечится сборкой под нужную платформу: <code>docker buildx build --platform linux/amd64 …</code>
       (пример — ниже).</p>
