@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 6 · Кэш слоёв и .dockerignore</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/dockerfile.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -18,21 +22,477 @@
     <h1>Глава 6. Кэш слоёв и .dockerignore</h1>
     <p class="sublead">Почему сборка идёт четыре минуты вместо двадцати секунд и как это исправить</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>План главы:</p>
+    <div class="box note">
+      <span class="t">Один и тот же проект, разница — в порядке строк</span>
+      <p>Два Dockerfile для одного и того же приложения. Меняем ровно один файл — <code>Program.cs</code> —
+        и собираем заново:</p>
+      <pre><code class="language-text">«COPY . . → restore → publish»    3 мин 47 с   ← пересобирается ВСЁ, включая restore
+«csproj → restore → COPY . .»     24 с        ← restore взялся из кэша</code></pre>
+      <p>Дело не в мощности машины и не в флагах: Docker умеет не переделывать то, что не менялось, но
+        <strong>только если вы дали ему такую возможность</strong> — порядком инструкций и файлом
+        <code>.dockerignore</code>. Это два рычага, которые дают почти весь эффект, и оба разобраны ниже.</p>
+    </div>
+
+    <h2>Что такое кэш сборки</h2>
+    <p>В главе 3 мы выяснили: инструкции <code>RUN</code>, <code>COPY</code> и <code>ADD</code> создают
+      слои, а слои <strong>неизменяемы</strong> и у каждого есть свой идентификатор — хеш. Отсюда главное:
+      если Docker уже построил слой с точно таким же содержимым, второй раз строить его не нужно — можно
+      взять готовый.</p>
+    <p>Готовые слои лежат не «в образе», а рядом — в <strong>кэше сборки</strong> локального демона. Сколько
+      он занимает:</p>
+    <div class="codewrap">
+      <p class="cap">Сколько места Docker занимает на диске</p>
+      <pre><code class="language-bash">$ docker system df
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          14        3         6.812GB   4.201GB (61%)
+Containers      5         1         128.4MB   127.9MB (99%)
+Local Volumes   2         2         1.024GB   0B (0%)
+Build Cache     96        0         2.318GB   2.318GB</code></pre>
+    </div>
+    <ul>
+      <li><code>docker system df</code> — «сколько занимает Docker» (<code>df</code> = disk free, как у
+        одноимённой команды Linux).</li>
+      <li>Строка <code>Build Cache</code> — это и есть кэш слоёв: <strong>2.3 ГБ</strong> промежуточных
+        результатов сборок. Он растёт с каждой сборкой, в которой что-то менялось.</li>
+      <li><code>ACTIVE = 0</code> — ни один существующий образ эти слои не использует.</li>
+      <li><code>RECLAIMABLE</code> — сколько можно освободить; <code>(61%)</code> — доля от строки.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Кэш можно удалить — и вместе с ним уйдёт скорость</span>
+      <pre><code class="language-bash">$ docker builder prune          # удалить неиспользуемый кэш сборки (спросит подтверждение)
+$ docker builder prune -af      # удалить всё и без вопросов (-a = all, -f = force)
+$ docker build --no-cache -t orders-api:1.4.2 .   # собрать, НЕ читая кэш (новые слои в кэш запишутся)</code></pre>
+      <p><code>prune</code> — «подрезать»: удалить то, что не используется. Типичная причина прибегнуть к
+        нему — «на диске кончилось место». После него первая сборка снова будет холодной, поэтому в CI это
+        делают редко, а на ноутбуке — когда место реально нужно.</p>
+    </div>
+    <h2>Как Docker решает: взять из кэша или пересобрать</h2>
+    <p>Ключ кэша для каждой инструкции складывается из трёх вещей:</p>
+    <table>
+      <tr><th>Из чего</th><th>Что это значит на практике</th></tr>
+      <tr><td><strong>родительский слой</strong></td>
+        <td>слои идут цепочкой: пересобрался слой выше — всё, что ниже, тоже станет другим</td></tr>
+      <tr><td><strong>текст инструкции</strong></td>
+        <td>изменили строку <code>RUN</code> (даже добавили флаг или лишний пробел) — слой считается новым</td></tr>
+      <tr><td><strong>содержимое файлов</strong><br>(для <code>COPY</code>/<code>ADD</code>)</td>
+        <td>хеш считается по <em>байтам</em> файлов и их правам, а <strong>не по дате изменения</strong></td></tr>
+    </table>
+    <p>Три вывода, которые надо запомнить сразу:</p>
+    <ul>
+      <li><strong>Дата файла не важна.</strong> Скопировали файл заново с тем же содержимым — кэш жив.
+        Изменили один байт — кэш этого слоя мёртв.</li>
+      <li><strong>Кэш рвётся цепочкой.</strong> Docker идёт по Dockerfile сверху вниз и на первом
+        несовпадении перестаёт искать кэш: этот шаг и <em>все следующие</em> выполняются заново.</li>
+      <li><strong>Инструкции-настройки кэшируются тоже.</strong> <code>WORKDIR</code>, <code>ENV</code>,
+        <code>EXPOSE</code> не создают файлов, но если их строка не менялась — шаг мгновенный.</li>
+    </ul>
+    <p>Как это выглядит в выводе. Современный сборщик (<strong>BuildKit</strong>, он работает по умолчанию
+      в Docker 23 и новее) помечает взятые из кэша шаги словом <code>CACHED</code>:</p>
+    <div class="codewrap">
+      <p class="cap">Повторная сборка без изменений: <code>docker build --progress=plain</code></p>
+      <pre><code class="language-text">$ docker build --progress=plain -t orders-api:1.4.2 .
+#1 [internal] load build definition from Dockerfile
+#1 DONE 0.0s
+#4 [1/5] FROM mcr.microsoft.com/dotnet/sdk:8.0
+#4 CACHED
+#5 [2/5] WORKDIR /src
+#5 CACHED
+#6 [3/5] COPY . .
+#6 CACHED
+#7 [4/5] RUN dotnet publish -c Release -o /app
+#7 CACHED
+#8 [5/5] WORKDIR /app
+#8 CACHED
+#9 exporting to image
+#9 DONE 0.1s</code></pre>
+    </div>
+    <p>Вся сборка заняла 1.8 секунды: ни одна инструкция не выполнялась, образ собран из готовых слоёв.
+      <code>--progress=plain</code> — «покажи текстовый лог вместо анимированного списка»; он нужен, когда
+      лог читают глазами или разбирают в CI, где анимация бессмысленна.</p>
+    <p>В старом сборщике (до Docker 23) то же самое называлось <em>Using cache</em>, и вывод был другим:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Step 4/6 : RUN dotnet publish -c Release -o /app
+ ---&gt; Using cache
+ ---&gt; 5d3c1b7a9e21</code></pre>
+    </div>
+    <p>Смысл один: шаг не выполнялся, взят готовый слой <code>5d3c1b7a9e21</code>. Дальше в книге используется
+      вывод BuildKit — если у вас старый Docker, ищите вместо <code>CACHED</code> строку
+      <code>Using cache</code>.</p>
+    <h2>Что сбрасывает кэш: таблица</h2>
+    <p>Практически важнее не «как считается хеш», а <strong>что именно пересобирается</strong> в каждом
+      типичном случае. Таблица — для Dockerfile в порядке <code>COPY . .</code> → <code>RUN publish</code>
+      (как в главе 5); как это исправить — в следующем разделе.</p>
+    <table>
+      <tr><th>Что изменилось</th><th>Что выполняется заново</th></tr>
+      <tr><td>ничего</td><td>ничего — все шаги <code>CACHED</code>, секунда-две</td></tr>
+      <tr><td>один <code>.cs</code> файл</td>
+        <td><code>COPY . .</code> и всё ниже (то есть <code>restore</code> и <code>publish</code>)</td></tr>
+      <tr><td>файл <code>.csproj</code> (новый пакет)</td>
+        <td><code>COPY</code> проекта и всё ниже — здесь пересборка <em>неизбежна</em>: зависимости
+          действительно изменились</td></tr>
+      <tr><td>строка <code>RUN</code> — добавили флаг</td>
+        <td>этот шаг и всё ниже, даже если команда делает то же самое</td></tr>
+      <tr><td>базовый образ обновился</td>
+        <td>всё: <code>FROM</code> стоит первым, а под ним меняются все слои. Само по себе это не
+          происходит — нужен <code>--pull</code> или смена тега</td></tr>
+      <tr><td><code>--no-cache</code></td>
+        <td>всё, полностью холодная сборка</td></tr>
+    </table>
+    <p>Из таблицы видно, что управлять можно только одним: <strong>какие файлы попадают в каждый слой
+      <code>COPY</code></strong>. Если в слое лежит весь проект, то любая правка в любом файле убивает
+      этот слой и всё, что после него. Если в слое лежат только файлы проектов — правка кода его не
+      трогает.</p>
+
+    <h2>Главная ошибка: <code>COPY . .</code> перед <code>restore</code></h2>
+    <p>Так пишет почти каждый, кто собрал первый образ по образцу из интернета:</p>
+    <div class="codewrap">
+      <p class="cap">Плохо: весь код копируется до восстановления пакетов</p>
+      <pre><code class="language-dockerfile">FROM mcr.microsoft.com/dotnet/sdk:8.0
+WORKDIR /src
+COPY . .                                      # ← весь проект, включая bin/obj
+RUN dotnet restore                            # ← restore ПОСЛЕ копирования
+RUN dotnet publish -c Release -o /app --no-restore</code></pre>
+    </div>
+    <p>Что происходит, когда вы поменяли одну строку в <code>Program.cs</code>:</p>
+    <ol>
+      <li>Слой <code>COPY . .</code> изменился (изменился файл внутри него) — кэш этого слоя мёртв.</li>
+      <li>Так как родительский слой стал другим, все следующие шаги тоже выполняются заново.</li>
+      <li><code>dotnet restore</code> заново ходит в NuGet и заново разворачивает 180 пакетов.</li>
+      <li><code>dotnet publish</code> компилирует весь solution с нуля.</li>
+    </ol>
+    <p>Правильный порядок: сначала копируем <strong>только то, от чего зависит restore</strong> — файлы
+      проектов и solution, — восстанавливаем пакеты, и лишь потом весь остальной код.</p>
+    <div class="codewrap">
+      <p class="cap">Хорошо: restore зависит только от <code>.csproj</code></p>
+      <pre><code class="language-dockerfile">FROM mcr.microsoft.com/dotnet/sdk:8.0
+WORKDIR /src
+
+# 1) только описание проектов: список пакетов и ссылки между проектами
+COPY Orders.sln ./
+COPY Orders.Api/Orders.Api.csproj Orders.Api/
+COPY Orders.Domain/Orders.Domain.csproj Orders.Domain/
+
+# 2) restore читает .csproj и качает пакеты — код ему не нужен
+RUN dotnet restore
+
+# 3) а теперь весь код: этот слой будет меняться при каждой правке
+COPY . .
+
+# 4) --no-restore: пакеты уже восстановлены, второй раз в сеть не идём
+RUN dotnet publish Orders.Api/Orders.Api.csproj -c Release -o /app --no-restore</code></pre>
+    </div>
+    <p>Почему это работает: хеш слоя <code>COPY Orders.Api/Orders.Api.csproj …</code> считается только по
+      содержимому этого файла. Правка <code>Program.cs</code> его не касается, значит и слой
+      <code>RUN dotnet restore</code> остаётся годным. Меняется только слой <code>COPY . .</code> и всё
+      ниже. Проверяется глазами за одну сборку:</p>
+    <div class="codewrap">
+      <p class="cap">Изменили <code>Program.cs</code> — restore берётся из кэша</p>
+      <pre><code class="language-text">$ docker build --progress=plain -t orders-api:1.4.2 .
+#4 [1/8] FROM mcr.microsoft.com/dotnet/sdk:8.0
+#4 CACHED
+#5 [2/8] WORKDIR /src
+#5 CACHED
+#6 [3/8] COPY Orders.sln ./
+#6 CACHED
+#7 [4/8] COPY Orders.Api/Orders.Api.csproj Orders.Api/
+#7 CACHED
+#8 [5/8] COPY Orders.Domain/Orders.Domain.csproj Orders.Domain/
+#8 CACHED
+#9 [6/8] RUN dotnet restore
+#9 CACHED                                    ← 1 мин 20 с сэкономлено
+#10 [7/8] COPY . .
+#10 DONE 0.4s                                 ← выполнился: код изменился
+#11 [8/8] RUN dotnet publish ... --no-restore
+#11 DONE 22.9s                                ← только компиляция</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Цена этого приёма: список <code>COPY</code> надо поддерживать</span>
+      <p>Добавили новый проект в solution — допишите строку <code>COPY</code> для его
+        <code>.csproj</code>, иначе <code>dotnet restore</code> упадёт с «project not found». В свежих
+        версиях BuildKit есть <code>COPY --parents */*.csproj ./</code>, которая копирует файлы с
+        сохранением путей, но она появилась поздно — в примерах книги используется явный список, он
+        работает везде.</p>
+      <p>Второй вариант, без списка: положить все <code>.csproj</code> в один слой через
+        <code>COPY */*.csproj ./</code> <em>нельзя</em> — эта форма «сплющивает» структуру папок, и ссылки
+        между проектами сломаются.</p>
+    </div>
+    <h2>Второй рычаг: <code>.dockerignore</code></h2>
+    <p>Прежде чем выполнить первую инструкцию, Docker должен получить <strong>контекст сборки</strong> —
+      ту папку, которую вы указали в конце команды (<code>docker build … .</code> — точка означает «текущая
+      папка»). Всё, что в ней лежит, уходит демону; всё, что ушло, доступно для <code>COPY</code>. По
+      умолчанию туда попадает <em>вся</em> папка, включая то, что к образу отношения не имеет.</p>
+    <div class="codewrap">
+      <p class="cap">Сборка без <code>.dockerignore</code>: сколько уходит демону</p>
+      <pre><code class="language-text">$ docker build -t orders-api:1.4.2 .
+#1 [internal] load .dockerignore
+#1 transferring context: 2B done
+#2 [internal] load build context
+#2 transferring context: 1.21GB 38.4s done      ← контекст: папка bin, obj, .git, .vs
+#2 DONE 38.6s</code></pre>
+    </div>
+    <p>1.2 ГБ и 38 секунд — <strong>до</strong> того, как началась хоть одна инструкция. И это каждый раз,
+      потому что Docker обязан пересчитать хеши файлов, чтобы понять, изменился ли слой
+      <code>COPY . .</code>.</p>
+    <p>Три следствия, каждое из которых ломает работу:</p>
+    <ul>
+      <li><strong>Медленно.</strong> Передача контекста — это чистые накладные расходы на каждой сборке.</li>
+      <li><strong>Образ пухнет.</strong> <code>COPY . .</code> затащит внутрь <code>bin/Debug</code>,
+        <code>obj</code> и <code>.git</code>. В образе окажется <em>старая локальная сборка</em> рядом с
+        новой, а вместе с ней история коммитов.</li>
+      <li><strong>Кэш нестабилен.</strong> <code>obj/project.assets.json</code> и
+        <code>obj/*.cache</code> переписываются при каждой локальной сборке. Значит слой
+        <code>COPY . .</code> считается изменённым, <em>даже если вы не тронули ни строки кода</em>.</li>
+    </ul>
+    <p>Лечится файлом <code>.dockerignore</code> в корне контекста (рядом с <code>Dockerfile</code>).
+      Синтаксис — как у <code>.gitignore</code>: по одному шаблону в строке, <code>#</code> — комментарий,
+      <code>!</code> в начале — исключение из правила.</p>
+    <div class="codewrap">
+      <p class="cap">.dockerignore для .NET-проекта</p>
+      <pre><code class="language-text"># артефакты локальной сборки — они появятся внутри образа заново
+**/bin/
+**/obj/
+
+# git-история и настройки IDE: к сборке отношения не имеют
+.git/
+.gitignore
+.vs/
+.vscode/
+*.user
+*.suo
+
+# тесты и их данные — в продакшен-образ не нужны
+tests/
+**/*Tests*/
+
+# локальные секреты и файлы окружения
+.env
+appsettings.Development.json
+
+# сам Dockerfile и этот файл копировать в образ незачем
+Dockerfile
+.dockerignore
+
+# документация и мусор ОС
+*.md
+.DS_Store</code></pre>
+    </div>
+    <ul>
+      <li><code>**/bin/</code> — «папка <code>bin</code> на любой глубине»: <code>**</code> означает любое
+        число вложенных папок. Без звёздочек пришлось бы писать путь для каждого проекта.</li>
+      <li>Слэш в конце (<code>bin/</code>) — «только папка», а не файл с таким именем.</li>
+      <li><code>!</code> работает в обратную сторону — например, исключить всё из <code>docs</code>, кроме
+        схемы: <code>docs/</code> и <code>!docs/schema.json</code> (порядок важен: правило ниже
+        перекрывает правило выше).</li>
+    </ul>
+    <div class="codewrap">
+      <p class="cap">Тот же проект с <code>.dockerignore</code></p>
+      <pre><code class="language-text">$ docker build -t orders-api:1.4.2 .
+#1 [internal] load .dockerignore
+#1 transferring context: 2B done
+#2 [internal] load build context
+#2 transferring context: 4.12MB 0.1s done       ← было 1.21GB / 38.4s
+#2 DONE 0.2s</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Что в <code>.dockerignore</code> класть нельзя</span>
+      <p>Всё, что нужно самой сборке: <code>*.csproj</code>, <code>*.sln</code>,
+        <code>Directory.Build.props</code>, <code>Directory.Packages.props</code>,
+        <code>nuget.config</code>, <code>global.json</code>. Если исключить их «на всякий случай», сборка
+        упадёт на <code>dotnet restore</code> — причём с сообщением про отсутствующий проект, а не про
+        <code>.dockerignore</code>. Исключённый файл <strong>не существует</strong> для
+        <code>COPY</code>: попытка скопировать его даёт ошибку
+        <code>"/x.csproj": not found</code>.</p>
+      <p>Ещё одна тонкость: <code>.dockerignore</code> ищется в корне контекста. Если Dockerfile лежит в
+        подпапке (<code>-f docker/Api.Dockerfile</code>), а контекст — корень репозитория, файл всё равно
+        должен быть в корне. BuildKit дополнительно понимает файл с именем
+        <code>Api.Dockerfile.dockerignore</code> рядом с самим Dockerfile — это удобно, когда Dockerfile'ов
+        несколько.</p>
+    </div>
+    <h2>Кэш пакетов NuGet: <code>--mount=type=cache</code></h2>
+    <p>Слой <code>RUN dotnet restore</code> кэшируется целиком, но у него есть слабое место: как только
+      меняется хоть один <code>.csproj</code>, слой пересобирается — и restore заново скачивает все пакеты
+      из сети. Пакеты при этом <strong>не менялись</strong>, качается то же самое по сто раз.</p>
+    <p>BuildKit умеет выносить папку из слоя в отдельный кэш: инструкция <code>RUN --mount=type=cache</code>
+      монтирует папку <code>target</code> внутрь шага, но <em>не сохраняет её в образ</em>. Живёт такая
+      папка в кэше демона и переживает между сборками.</p>
+    <div class="codewrap">
+      <p class="cap">Dockerfile с кэшем пакетов</p>
+      <pre><code class="language-dockerfile"># syntax=docker/dockerfile:1
+#  ↑ первая строка файла: «какую версию языка Dockerfile использовать».
+#    Нужна для новых возможностей вроде --mount; требует BuildKit (он по умолчанию в Docker 23+)
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+WORKDIR /src
+
+COPY Orders.sln ./
+COPY Orders.Api/Orders.Api.csproj Orders.Api/
+COPY Orders.Domain/Orders.Domain.csproj Orders.Domain/
+
+# папка /root/.nuget/packages — это и есть локальный «склад» пакетов NuGet.
+# target=...   — что монтировать (путь внутри контейнера)
+# sharing=locked — не давать двум одновременным сборкам писать в один кэш
+RUN --mount=type=cache,target=/root/.nuget/packages,sharing=locked \
+    dotnet restore
+
+COPY . .
+# --no-restore обязателен: иначе publish сделает restore заново, уже без кэша-монтирования
+RUN dotnet publish Orders.Api/Orders.Api.csproj -c Release -o /app --no-restore</code></pre>
+    </div>
+    <p>Что меняется на практике: первая сборка качает пакеты (как раньше), а все следующие — даже после
+      правки <code>.csproj</code> — берут их с диска.</p>
+    <div class="codewrap">
+      <p class="cap">Изменили <code>.csproj</code>: restore выполняется, но без сети</p>
+      <pre><code class="language-text">#9 [6/8] RUN --mount=type=cache,target=/root/.nuget/packages ... dotnet restore
+#9 DONE 3.2s          ← без кэша пакетов здесь было бы 28.4s</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Три вещи, которые здесь легко понять неправильно</span>
       <ul>
-        <li>Как Docker решает, что слой можно взять из кэша: контрольная сумма содержимого, а не время
-          изменения файла.</li>
-        <li>Что инвалидирует кэш: <code>COPY</code>/<code>ADD</code>, <code>RUN</code>, смена базового
-          образа, <code>--no-cache</code>.</li>
-        <li>Порядок инструкций: сначала то, что меняется редко (файлы проектов → <code>restore</code> →
-          остальной код).</li>
-        <li><code>.dockerignore</code>: <code>bin</code>, <code>obj</code>, <code>.git</code>,
-          <code>.vs</code>, тесты — и как он влияет на контекст и на кэш.</li>
-        <li>Кэш NuGet между сборками: <code>RUN --mount=type=cache,target=/root/.nuget/packages</code>.</li>
-        <li>Замер «до/после» на реальном проекте и кэш в CI (registry cache, inline cache).</li>
+        <li><strong>Слой всё равно пересобирается.</strong> Кэш пакетов экономит <em>скачивание</em>, а не
+          сам <code>restore</code>. Поэтому порядок «сначала <code>.csproj</code>, потом код» из
+          предыдущего раздела всё равно нужен.</li>
+        <li><strong>Пакетов в образе не будет.</strong> В образ попадает результат — папка <code>/app</code>
+          с уже собранными dll. Именно поэтому <code>publish</code> идёт с <code>--no-restore</code>: иначе
+          он не найдёт пакетов (их нет в слое) и полезет в сеть.</li>
+        <li><strong>Кэш общий на машину, а не на проект.</strong> Два разных проекта с одной версией
+          пакета скачают его один раз — это плюс, но и причина, по которой кэш может занять гигабайты
+          (см. <code>docker system df</code> в начале главы).</li>
       </ul>
+    </div>
+    <p>Если контейнер работает не от <code>root</code> (глава 5, <code>USER</code>), путь другой:
+      <code>/home/app/.nuget/packages</code>. Проверить, где NuGet держит пакеты внутри контейнера, можно
+      так:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ docker run --rm mcr.microsoft.com/dotnet/sdk:8.0 \
+    dotnet nuget locals global-packages --list
+global-packages: /root/.nuget/packages/</code></pre>
+    </div>
+    <ul>
+      <li><code>docker run --rm &lt;образ&gt; &lt;команда&gt;</code> — запустить одноразовый контейнер и удалить
+        его после выхода (<code>--rm</code>); удобно, чтобы что-то посмотреть внутри образа.</li>
+      <li><code>dotnet nuget locals global-packages --list</code> — «покажи путь, где NuGet хранит пакеты»
+        (<code>locals</code> — локальные хранилища, <code>--list</code> — только вывести, не чистить).</li>
+    </ul>
+    <h2>Кэш в CI: почему на сервере всё медленно</h2>
+    <p>Локально кэш живёт в демоне на вашей машине. В CI каждый запуск — <strong>новый чистый раннер</strong>
+      (виртуальная машина, которая создаётся под задачу и потом уничтожается), поэтому кэша там нет и
+      сборка каждый раз холодная. Отсюда классическая жалоба «локально 20 секунд, в пайплайне 5 минут».</p>
+    <p>Решение: <strong>вынести кэш наружу</strong> — в реестр образов, который переживает раннер. Собирать
+      нужно через <code>docker buildx build</code> (<code>buildx</code> — плагин сборки на BuildKit;
+      обычный <code>docker build</code> — его упрощённая обёртка, у которой нет флагов
+      <code>--cache-to</code>/<code>--cache-from</code>):</p>
+    <div class="codewrap">
+      <p class="cap">Сборка в CI с кэшем в реестре</p>
+      <pre><code class="language-bash">$ docker buildx build \
+    --cache-from type=registry,ref=ghcr.io/acme/orders-api:buildcache \
+    --cache-to   type=registry,ref=ghcr.io/acme/orders-api:buildcache,mode=max \
+    --pull \
+    -t ghcr.io/acme/orders-api:1.4.2 \
+    --push .</code></pre>
+    </div>
+    <ul>
+      <li><code>--cache-from type=registry,ref=…</code> — «возьми кэш из образа
+        <code>…:buildcache</code> в реестре». В первый раз его там нет — сборка просто холодная.</li>
+      <li><code>--cache-to …,mode=max</code> — «положи кэш обратно в реестр». <code>mode=max</code>
+        кэширует <em>все</em> стадии сборки, а не только финальный образ; для multi-stage (глава 7) это
+        важно, иначе кэш стадии компиляции не сохранится.</li>
+      <li><code>--pull</code> — «проверь, не обновился ли базовый образ». Без него <code>FROM</code> может
+        годами браться из локального кэша, и security-патчи в образ не приезжают.</li>
+      <li><code>--push</code> — сразу отправить результат в реестр (глава 3).</li>
+      <li>Нужен <code>docker login</code> к этому реестру — <code>--cache-to</code> пишет туда, а не к
+        вам на диск.</li>
+    </ul>
+    <p>Более дешёвый вариант — <strong>inline cache</strong>: метаданные кэша встраиваются в сам образ,
+      отдельный образ-кэш не нужен.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># при сборке: встроить метаданные кэша в образ
+$ docker buildx build --build-arg BUILDKIT_INLINE_CACHE=1 -t ghcr.io/acme/orders-api:1.4.2 --push .
+
+# при следующей сборке: взять кэш из предыдущего образа
+$ docker buildx build --cache-from ghcr.io/acme/orders-api:1.4.2 -t ghcr.io/acme/orders-api:1.4.3 --push .</code></pre>
+    </div>
+    <p>Минус inline-варианта: кэшируются только слои, попавшие в финальный образ. Если финальная стадия —
+      маленький <code>aspnet</code>-образ, то слой с <code>dotnet restore</code> и компиляцией в него не
+      попадёт, и кэша не будет. Поэтому в реальных пайплайнах чаще берут <code>type=registry,mode=max</code>.</p>
+    <p>В GitHub Actions то же самое настраивается двумя строками в <code>docker/build-push-action</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-yaml">- uses: docker/build-push-action@v6
+  with:
+    context: .
+    push: true
+    tags: ghcr.io/acme/orders-api:1.4.2
+    cache-from: type=gha
+    cache-to: type=gha,mode=max</code></pre>
+    </div>
+    <p><code>type=gha</code> — кэш силами самого GitHub Actions (отдельного реестра не нужно); работает то
+      же <code>mode=max</code>.</p>
+    <div class="box warn">
+      <span class="t">Когда кэш мешает</span>
+      <p>Кэш — это доверие к прошлым результатам. Если в образ «не приехало» изменение, которое точно
+        закоммичено, первым делом собирают с <code>--no-cache</code> (или чистят кэш в CI) — и смотрят,
+        воспроизводится ли проблема. Частые причины: файл попал в <code>.dockerignore</code>; кэш в реестре
+        остался от другой ветки с тем же тегом; сборка идёт с <code>context</code> не из той папки.</p>
+    </div>
+    <h2>Замер: до и после</h2>
+    <p>Демо-проект: solution из шести проектов, 183 пакета NuGet, ноутбук на Ryzen 5, канал 100 Мбит/с.
+      Ваши числа будут другими — важно <strong>соотношение</strong>.</p>
+    <table>
+      <tr><th>Что делаем</th><th>Время</th><th>Почему так</th></tr>
+      <tr><td>Первая сборка, кэша нет</td><td>4 мин 12 с</td>
+        <td>всё с нуля, включая скачивание пакетов</td></tr>
+      <tr><td>Повторная сборка, ничего не меняли</td><td>1.8 с</td>
+        <td>все шаги <code>CACHED</code></td></tr>
+      <tr><td>Правка одного <code>.cs</code><br>«<code>COPY . .</code> → restore → publish»</td>
+        <td>3 мин 47 с</td>
+        <td>restore и компиляция заново из-за одного файла</td></tr>
+      <tr><td>Правка одного <code>.cs</code><br>«csproj → restore → <code>COPY . .</code>»</td>
+        <td>24 с</td>
+        <td>восстановление пакетов взято из кэша</td></tr>
+      <tr><td>Правка <code>.csproj</code>, без кэша пакетов</td><td>1 мин 41 с</td>
+        <td>restore пересобирается и снова качает пакеты</td></tr>
+      <tr><td>Правка <code>.csproj</code>, с <code>--mount=type=cache</code></td><td>31 с</td>
+        <td>пакеты берутся с диска, а не из сети</td></tr>
+      <tr><td>Любая сборка без <code>.dockerignore</code></td><td>+38 с</td>
+        <td>передача контекста 1.21 ГБ вместо 4 МБ</td></tr>
+    </table>
+    <p>Вывод простой: <strong>четыре изменения в Dockerfile и один новый файл</strong> дают разницу в
+      порядке десяти раз на самой частой операции — «поправил код, пересобрал, запустил».</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>Кэш слоёв — это готовые слои в демоне. Ключ слоя = <strong>родительский слой + текст
+          инструкции + содержимое файлов</strong>, а не дата изменения.</li>
+        <li>Кэш <strong>рвётся цепочкой</strong>: на первом несовпадении пересобирается этот шаг и все
+          следующие. Поэтому порядок инструкций — главный рычаг.</li>
+        <li>Правильный порядок для .NET: <code>csproj</code>/<code>sln</code> → <code>dotnet restore</code> →
+          <code>COPY . .</code> → <code>dotnet publish --no-restore</code>.</li>
+        <li><code>.dockerignore</code> с <code>**/bin/</code>, <code>**/obj/</code>, <code>.git/</code>:
+          контекст падает с гигабайта до мегабайт, и кэш перестаёт дёргаться от локальных сборок.</li>
+        <li><code>RUN --mount=type=cache,target=/root/.nuget/packages</code> — пакеты не перекачиваются; сам
+          <code>restore</code> при изменении <code>.csproj</code> всё равно выполнится.</li>
+        <li>В CI кэша нет по определению: его выносят в реестр через
+          <code>--cache-to/--cache-from type=registry,mode=max</code> и добавляют <code>--pull</code>.</li>
+        <li>Диагностика одной командой: <code>docker build --progress=plain</code> — ищите, с какого шага
+          пропало <code>CACHED</code>; там и причина.</li>
+      </ul>
+    </div>
+
+    <div class="box tip">
+      <span class="t">Проверить свой проект за пять минут</span>
+      <ol>
+        <li><code>docker system df</code> — сколько сейчас занимает <code>Build Cache</code>.</li>
+        <li>Добавьте <code>.dockerignore</code> из этой главы и соберите: строка
+          <code>transferring context</code> должна упасть в десятки раз.</li>
+        <li>Поставьте в Dockerfile порядок «<code>csproj</code> → restore → <code>COPY . .</code>» и
+          <code>--no-restore</code> в <code>publish</code>.</li>
+        <li>Соберите с <code>--progress=plain</code> и запомните время. Поправьте один <code>.cs</code>,
+          соберите снова — шаг <code>RUN dotnet restore</code> должен стать <code>CACHED</code>.</li>
+        <li>Добавьте <code># syntax=docker/dockerfile:1</code> и <code>--mount=type=cache</code> для NuGet;
+          проверьте, что <code>publish</code> с <code>--no-restore</code> не падает.</li>
+      </ol>
+      <p>Дальше — глава 7: тот же приём, но уже с multi-stage, чтобы в финальный образ не попадали ни SDK,
+        ни исходники.</p>
     </div>
     <div class="pager">
       <a href="dk05-dockerfile.html">← <span class="sp">Глава 5. Dockerfile: инструкции и их смысл</span></a>
@@ -40,5 +500,7 @@
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
