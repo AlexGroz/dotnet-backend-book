@@ -100,7 +100,7 @@ public sealed class EfProductRepository(AppDbContext db) : IProductRepository
 
 // Декоратор: кэш, который ничего не знает про EF
 public sealed class CachedProductRepository(
-    IProductRepository inner,
+    IProductRepository inner,          // ← что это, решает регистрация в DI (см. ниже)
     IMemoryCache cache) : IProductRepository
 {
     public async Task&lt;Product?&gt; GetAsync(Guid id, CancellationToken ct)
@@ -117,14 +117,40 @@ public sealed class CachedProductRepository(
 
     public async Task SaveAsync(Product product, CancellationToken ct)
     {
-        await inner.SaveAsync(product, ct);      // сначала пишем в БД
+        await inner.SaveAsync(product, ct);      // пишет в БД тот, кто внутри: EfProductRepository
         cache.Remove($"product:{product.Id}");   // и инвалидируем кэш
     }
 }</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">Откуда берётся <code>inner</code>, если его нигде не присваивают</span>
+      <p>В коде нет ни одной строки вида <code>new CachedProductRepository(…)</code> — и это нормально: объект
+        создаёт <strong>DI-контейнер</strong> (в .NET — <code>IServiceProvider</code>), а не вы. Параметр
+        конструктора <code>IProductRepository inner</code> — это <em>требование</em>: «чтобы меня создать, дай
+        мне что-нибудь, реализующее <code>IProductRepository</code>».</p>
+      <p>Создавая объект, контейнер смотрит на его конструктор и для каждого параметра ищет
+        <strong>зарегистрированный</strong> тип. Что подставить вместо <code>inner</code>, решает одна строка
+        регистрации — она в блоке ниже:</p>
+      <pre><code class="language-csharp">sp =&gt; new CachedProductRepository(
+    sp.GetRequiredService&lt;EfProductRepository&gt;(),   // ← вот этот объект станет inner
+    sp.GetRequiredService&lt;IMemoryCache&gt;())</code></pre>
+      <p>То же с <code>AppDbContext db</code> внутри <code>EfProductRepository</code>: он приходит из
+        контейнера, потому что где-то в <code>Program.cs</code> вызван
+        <code>AddDbContext&lt;AppDbContext&gt;(…)</code>. Ни EF, ни кэш «сами не заводятся» — каждый объект в
+        цепочке существует потому, что для его типа есть регистрация.</p>
+      <p>Забыли регистрацию — приложение упадёт на первом же запросе:
+        <code>InvalidOperationException: Unable to resolve service for type 'IProductRepository' while
+        attempting to activate 'ProductsController'</code>. Это и есть доказательство, что <code>inner</code>
+        берётся не из воздуха.</p>
+    </div>
     <p>Сборка «слоёного» сервиса — простое оборачивание: сначала настоящий, потом кэш.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// 1) «настоящая» реализация: только про базу
+      <pre><code class="language-csharp">// 0) то, без чего не заработает ничего: контекст EF и сам кэш
+var cs = builder.Configuration.GetConnectionString("Default");   // строка подключения
+builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));
+builder.Services.AddMemoryCache();
+
+// 1) «настоящая» реализация: только про базу
 builder.Services.AddScoped&lt;EfProductRepository&gt;();
 
 // 2) декоратор — тоже обычный класс, его можно зарегистрировать
@@ -139,6 +165,27 @@ builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt;
     <p>Читается так: «на <code>IProductRepository</code> отдаём <code>CachedProductRepository</code>, а внутри у
       него — <code>EfProductRepository</code>». Добавить логи — ещё одна обёртка в этой же строке, остальной код
       не меняется.</p>
+    <p><strong>Почему нельзя короче — <code>AddScoped&lt;IProductRepository, CachedProductRepository&gt;()</code>?</strong>
+      Потому что тогда контейнер, создавая декоратор, попросил бы у себя же
+      <code>IProductRepository</code> — то есть тот же декоратор, и так по кругу
+      (<code>circular dependency</code>). Фабричный вариант круг разрывает: внутри явно назван
+      <code>EfProductRepository</code> — конкретный класс, а не интерфейс.</p>
+    <p>Что происходит при первом запросе — целиком:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">GET /products/42
+  └ ProductsController просит IProductRepository
+      └ контейнер находит регистрацию «IProductRepository → фабрика»
+          └ фабрика создаёт:
+              ├ EfProductRepository(db: AppDbContext)     ← станет inner
+              │     └ AppDbContext — из AddDbContext (своё подключение к базе)
+              └ CachedProductRepository(inner, cache)
+                    └ IMemoryCache — один на всё приложение (AddMemoryCache)
+
+  декоратор: промах кэша → inner.GetAsync → EF → SELECT … → в кэш → ответ</code></pre>
+    </div>
+    <p><code>AddScoped</code> значит «один экземпляр на HTTP-запрос»: контроллер, декоратор и контекст EF
+      внутри одного запроса — одна цепочка объектов, а следующий запрос получит новые. Чем
+      <code>AddScoped</code> отличается от <code>AddTransient</code> и <code>AddSingleton</code> — глава 15.</p>
     <div class="box tip">
       <span class="t">Почему это лучше</span>
       <ul>
