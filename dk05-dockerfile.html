@@ -522,28 +522,85 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
       не было — дописанное просто добавляется к <code>ENTRYPOINT</code>. Программу
       (<code>ENTRYPOINT</code>) так подменить нельзя: во второй строке «замена» случилась только потому,
       что программы в <code>ENTRYPOINT</code> нет вообще — её роль играл <code>CMD</code>.</p>
-    <p>Возьмём образ, в Dockerfile которого записаны <em>обе</em> инструкции:</p>
+    <p>Таблица объясняет правило, но не показывает, что вы увидите на экране. Поэтому те же три случая — так,
+      как они выглядят в терминале; в каждом сначала смотрим конфиг образа, потом запускаем:</p>
     <div class="codewrap">
-      <pre><code class="language-dockerfile">ENTRYPOINT ["dotnet", "Orders.Api.dll"]
-CMD ["--urls", "http://+:8080"]</code></pre>
-    </div>
-    <p>И запустим его три раза:</p>
-    <div class="codewrap">
-      <pre><code class="language-bash"># 1) ничего не дописали → работает CMD (аргументы по умолчанию)
-$ docker run --rm orders-api:1.4.2
-info: Now listening on: http://[::]:8080          ← порт пришёл из CMD --urls
+      <p class="cap">Случай 1: заданы и <code>ENTRYPOINT</code>, и <code>CMD</code></p>
+      <pre><code class="language-bash"># Dockerfile этого образа:
+#   ENTRYPOINT ["dotnet", "Orders.Api.dll"]
+#   CMD ["--urls", "http://+:8080"]
 
-# 2) дописали свой аргумент → CMD выброшен целиком
+$ docker image inspect orders-api:1.4.2 \
+    --format '{{json .Config.Entrypoint}} | {{json .Config.Cmd}}'
+["dotnet","Orders.Api.dll"] | ["--urls","http://+:8080"]
+#   в конфиге лежат ОБЕ части: программа и аргументы по умолчанию
+
+$ docker run --rm orders-api:1.4.2
+info: Now listening on: http://[::]:8080
+#   выполнилось: dotnet Orders.Api.dll --urls http://+:8080   ← ENTRYPOINT + CMD
+
 $ docker run --rm orders-api:1.4.2 --urls http://+:9000
 info: Now listening on: http://[::]:9000
+#   выполнилось: dotnet Orders.Api.dll --urls http://+:9000   ← CMD выброшен целиком
 
-# 3) дописали два аргумента → они тоже заняли место CMD, а не добавились к нему
 $ docker run --rm orders-api:1.4.2 --urls http://+:9000 --environment Development
 info: Now listening on: http://[::]:9000
-info: Hosting environment: Development</code></pre>
+info: Hosting environment: Development
+#   два аргумента — тоже вместо CMD, а не в дополнение к нему</code></pre>
     </div>
-    <p>Во втором запуске <code>--urls http://+:8080</code> из <code>CMD</code> исчез полностью, а не
-      «дополнился»: то, что вы написали в командной строке, встаёт на место <code>CMD</code> целиком.</p>
+    <div class="codewrap">
+      <p class="cap">Случай 2: задан только <code>CMD</code></p>
+      <pre><code class="language-bash"># Dockerfile этого образа:
+#   CMD ["dotnet", "Orders.Api.dll"]           ← ENTRYPOINT отсутствует
+
+$ docker image inspect orders-cmd:1.0 \
+    --format '{{json .Config.Entrypoint}} | {{json .Config.Cmd}}'
+null | ["dotnet","Orders.Api.dll"]
+#   Entrypoint = null: значит программой считается сам CMD, другой программы нет
+
+$ docker run --rm orders-cmd:1.0
+info: Now listening on: http://[::]:8080
+#   выполнилось: dotnet Orders.Api.dll
+
+$ docker run --rm orders-cmd:1.0 --help
+docker: Error response from daemon: … exec: "--help": executable file not found in $PATH.
+#   аргументы заменили CMD целиком, а ENTRYPOINT нет — значит подменилась и ПРОГРАММА:
+#   Docker попытался запустить "--help" как исполняемый файл
+
+$ docker run --rm -it orders-cmd:1.0 bash
+root@7d1e2f9a0c44:/app#
+#   а вот шелл здесь РАБОТАЕТ: bash занял место CMD и стал программой контейнера</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Случай 3: задан только <code>ENTRYPOINT</code></p>
+      <pre><code class="language-bash"># Dockerfile этого образа:
+#   ENTRYPOINT ["dotnet", "Orders.Api.dll"]    ← CMD отсутствует
+
+$ docker image inspect orders-entry:1.0 \
+    --format '{{json .Config.Entrypoint}} | {{json .Config.Cmd}}'
+["dotnet","Orders.Api.dll"] | null
+#   Cmd = null: заменять нечего
+
+$ docker run --rm orders-entry:1.0
+info: Now listening on: http://[::]:8080
+#   выполнилось: dotnet Orders.Api.dll
+#   порт 8080 здесь не из CMD, а из переменной ASPNETCORE_HTTP_PORTS базового образа
+
+$ docker run --rm orders-entry:1.0 --urls http://+:9000
+info: Now listening on: http://[::]:9000
+#   аргументы дописались в конец ENTRYPOINT: dotnet Orders.Api.dll --urls http://+:9000
+
+$ docker run --rm -it orders-entry:1.0 bash
+info: Now listening on: http://[::]:8080
+#   шелла НЕТ: bash стал аргументом → dotnet Orders.Api.dll bash
+#   приложение получило лишний аргумент и запустилось как обычно (выйти — Ctrl+C);
+#   внутрь пускает только --entrypoint bash (врезка ниже)</code></pre>
+    </div>
+    <p>Сравните последние строки случаев 2 и 3: одна и та же команда <code>docker run img bash</code> в одном
+      случае даёт шелл, в другом — лишний аргумент приложению. А случаи 1 и 3 внешне неотличимы, пока не
+      допишешь аргументы: разница лишь в том, что в первом есть значения по умолчанию, которые можно
+      потерять.</p>
+
     <p><strong>Зачем тогда две инструкции, если хватает одной?</strong> Они отвечают на разные вопросы, и в
       жизни это удобно:</p>
     <table>
