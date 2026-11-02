@@ -274,25 +274,51 @@ Dockerfile
 
 # документация и мусор ОС
 *.md
-.DS_Store</code></pre>
+.DS_Store
+
+# исключение из правила: вся папка docs/ не нужна, но одну схему отдаём в образ
+docs/
+!docs/schema.json</code></pre>
     </div>
     <ul>
       <li><code>**/bin/</code> — «папка <code>bin</code> на любой глубине»: <code>**</code> означает любое
         число вложенных папок. Без звёздочек пришлось бы писать путь для каждого проекта.</li>
       <li>Слэш в конце (<code>bin/</code>) — «только папка», а не файл с таким именем.</li>
-      <li><code>!</code> работает в обратную сторону — например, исключить всё из <code>docs</code>, кроме
-        схемы: <code>docs/</code> и <code>!docs/schema.json</code> (порядок важен: правило ниже
-        перекрывает правило выше).</li>
+      <li><code>!</code> — исключение из правила, работает в обратную сторону. В примере выше
+        <code>docs/</code> выбрасывает папку целиком, а следующая строка
+        <code>!docs/schema.json</code> возвращает из неё один файл. <strong>Порядок важен:</strong> правила
+        применяются сверху вниз, и побеждает последнее совпавшее. Поменяете эти две строки местами — схема
+        снова уедет в игнор.</li>
     </ul>
     <div class="codewrap">
-      <p class="cap">Тот же проект с <code>.dockerignore</code></p>
-      <pre><code class="language-text">$ docker build -t orders-api:1.4.2 .
+      <p class="cap">Тот же проект с <code>.dockerignore</code>: файл — рядом с результатом</p>
+      <pre><code class="language-bash"># .dockerignore рядом с Dockerfile (ключевые строки; целиком — выше)
+**/bin/
+**/obj/
+.git/
+tests/
+docs/
+!docs/schema.json
+
+$ docker build -t orders-api:1.4.2 .
 #1 [internal] load .dockerignore
 #1 transferring context: 2B done
 #2 [internal] load build context
 #2 transferring context: 4.12MB 0.1s done       ← было 1.21GB / 38.4s
 #2 DONE 0.2s</code></pre>
     </div>
+    <p>И та же разница в одном месте — чтобы не сверять два блока глазами по всей странице:</p>
+    <table>
+      <tr><th></th><th>без <code>.dockerignore</code></th><th>с <code>.dockerignore</code></th></tr>
+      <tr><td>контекст сборки</td><td>1.21 ГБ</td><td>4.12 МБ</td></tr>
+      <tr><td>передача демону</td><td>38.4 с</td><td>0.1 с</td></tr>
+      <tr><td>что видит <code>COPY . .</code></td><td><code>bin/</code>, <code>obj/</code>, <code>.git/</code>,
+        тесты</td><td>только исходники, проекты и конфиги</td></tr>
+      <tr><td>кэш слоя <code>COPY . .</code></td><td>ломается от любой локальной сборки (меняется
+        <code>obj</code>)</td><td>меняется только от правок, которые вы закоммитили</td></tr>
+      <tr><td>что окажется в образе</td><td>старые dll из <code>bin/Debug</code> рядом с новыми</td>
+        <td>только то, что собралось внутри</td></tr>
+    </table>
     <div class="box warn">
       <span class="t">Что в <code>.dockerignore</code> класть нельзя</span>
       <p>Всё, что нужно самой сборке: <code>*.csproj</code>, <code>*.sln</code>,
@@ -374,9 +400,11 @@ global-packages: /root/.nuget/packages/</code></pre>
         (<code>locals</code> — локальные хранилища, <code>--list</code> — только вывести, не чистить).</li>
     </ul>
     <h2>Кэш в CI: почему на сервере всё медленно</h2>
-    <p>Локально кэш живёт в демоне на вашей машине. В CI каждый запуск — <strong>новый чистый раннер</strong>
-      (виртуальная машина, которая создаётся под задачу и потом уничтожается), поэтому кэша там нет и
-      сборка каждый раз холодная. Отсюда классическая жалоба «локально 20 секунд, в пайплайне 5 минут».</p>
+    <p>Локально кэш живёт в демоне на вашей машине. В CI (continuous integration — сборка и тесты на
+      сервере; расшифровка и зачем это нужно — во врезке в <a href="docker.html">оглавлении раздела</a>) каждый
+      запуск — <strong>новый чистый раннер</strong> (виртуальная машина, которая создаётся под задачу и потом
+      уничтожается), поэтому кэша там нет и сборка каждый раз холодная. Отсюда классическая жалоба «локально
+      20 секунд, в пайплайне 5 минут».</p>
     <p>Решение: <strong>вынести кэш наружу</strong> — в реестр образов, который переживает раннер. Собирать
       нужно через <code>docker buildx build</code> (<code>buildx</code> — плагин сборки на BuildKit;
       обычный <code>docker build</code> — его упрощённая обёртка, у которой нет флагов
