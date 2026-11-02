@@ -218,8 +218,31 @@ RUN apt-get update &amp;&amp; apt-get install -y curl &amp;&amp; rm -rf /var/lib
 RUN ["dotnet", "restore"]
 #    restore — восстановить NuGet-пакеты проекта (аналог npm install)
 
-# так НЕ сработает: в exec-форме нет шелла, поэтому &amp;&amp; останется просто аргументом
-# RUN ["apt-get", "update", "&amp;&amp;", "apt-get", "install", "-y", "curl"]   ✘</code></pre>
+# --- та же установка curl, но в exec-форме: два рабочих способа ---
+
+# а) одна команда — одна инструкция: шелла нет, поэтому просто не склеиваем их
+RUN ["apt-get", "update"]
+RUN ["apt-get", "install", "-y", "curl"]
+
+# б) шелл вызвать явно: тогда &amp;&amp; и редиректы снова работают
+RUN ["/bin/sh", "-c", "apt-get update &amp;&amp; apt-get install -y curl &amp;&amp; rm -rf /var/lib/apt/lists/*"]
+
+# А ТАК НЕ СРАБОТАЕТ: нет шелла, поэтому "&amp;&amp;" останется обычным аргументом для apt-get
+# RUN ["apt-get", "update", "&amp;&amp;", "apt-get", "install", "-y", "curl"]   ✘
+#    apt-get получит первый аргумент update и лишние слова после него и ответит:
+#    E: The update command takes no arguments</code></pre>
+    </div>
+    <p>Отсюда правило: <strong>exec-форма — это «программа плюс список аргументов», а не строка</strong>.
+      Склеить две команды можно только тем, кто умеет это делать, — оболочкой. Поэтому либо по одной
+      команде на <code>RUN</code> (вариант «а»), либо явный вызов <code>/bin/sh -c</code> (вариант «б»).
+      Вариант «б» недоступен в образах без оболочки — там остаётся только «а».</p>
+    <div class="box note">
+      <span class="t">Тогда зачем вообще exec-форма, если shell удобнее?</span>
+      <p>Потому что она <strong>предсказуема</strong>: аргументы не проходят через разбор оболочкой, и
+        Docker не нужно, чтобы внутри образа был <code>/bin/sh</code>. В минимальных образах
+        (chiseled, distroless) оболочки нет вообще — там <code>RUN ["apt-get", …]</code> единственно
+        возможный вариант (и такие образы обычно ничего не устанавливают, а копируют готовое из стадии
+        сборки — глава 7).</p>
     </div>
     <p><strong>Почему установка и очистка — одной строкой:</strong> каждая <code>RUN</code> — отдельный
       слой, а слои не перезаписывают друг друга. Если разделить «поставил» и «удалил кэш» на два
@@ -246,10 +269,31 @@ RUN ["dotnet", "restore"]
         окружение, пути</td></tr>
     </table>
     <div class="codewrap">
-      <pre><code class="language-dockerfile">ARG APP_VERSION=1.0.0              # по умолчанию; docker build --build-arg APP_VERSION=1.4.2
+      <pre><code class="language-dockerfile">ARG APP_VERSION=1.0.0              # имя и значение придумываете ВЫ; Docker их не толкует
 ENV ASPNETCORE_HTTP_PORTS=8080     # попадёт в контейнер; docker run -e ASPNETCORE_HTTP_PORTS=9000
 
-RUN echo "собираем $APP_VERSION"   # ARG доступен на сборке</code></pre>
+RUN echo "собираем $APP_VERSION"   # ARG доступен на сборке
+LABEL version=$APP_VERSION         # LABEL пишет метку (ключ=значение) в конфиг образа
+
+RUN dotnet publish -c Release -o /app -p:Version=$APP_VERSION --no-restore</code></pre>
+    </div>
+    <p><strong>Что за версия в <code>APP_VERSION</code>.</strong> Это не версия Docker и не «версия
+      образа» — это <strong>произвольная переменная сборки, которую придумываете вы</strong>. Docker лишь
+      подставляет её значение везде, где встретит <code>$APP_VERSION</code>. Что туда класть — ваш выбор:</p>
+    <ul>
+      <li>версию приложения из <code>git tag</code>: тогда в <code>publish</code> уходит
+        <code>-p:Version=1.4.2</code>, и .NET записывает её в метаданные сборки (её видно в свойствах dll и в
+        эндпоинте <code>/info</code>, если вы его сделали);</li>
+      <li>номер сборки из CI — <code>1.4.2-241</code>: так потом понятно, из какого пайплайна образ;</li>
+      <li>что-то совсем служебное: адрес NuGet-фида, флаг <code>-p:ContinuousIntegrationBuild=true</code>.</li>
+    </ul>
+    <p>Значение после <code>=</code> — <strong>значение по умолчанию</strong>: если <code>--build-arg</code>
+      не передан, подставится <code>1.0.0</code>. Проверить, что именно попало в образ, проще всего по
+      метке:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ docker build --build-arg APP_VERSION=1.4.2 -t orders-api:1.4.2 .
+$ docker inspect --format '{{json .Config.Labels}}' orders-api:1.4.2
+{"version":"1.4.2"}</code></pre>
     </div>
     <p><strong>Что если не указать <code>ENV</code>:</strong> приложение возьмёт значения по умолчанию
       (порт 5000) — частая причина «контейнер запустился, а порт не отвечает».</p>
@@ -261,19 +305,110 @@ RUN echo "собираем $APP_VERSION"   # ARG доступен на сбор�
     </div>
 
     <h3><code>COPY</code> и <code>ADD</code>: файлы в образ</h3>
-    <p><code>COPY &lt;откуда&gt; &lt;куда&gt;</code> — простое копирование из контекста сборки (разбор
-      <code>COPY . .</code> — выше). <code>ADD</code> умеет то же плюс два неявных действия:
-      распаковывает локальные архивы <code>.tar</code>/<code>.tar.gz</code> и скачивает файл по URL.</p>
-    <p><strong>Почему советуют <code>COPY</code>:</strong> <code>ADD</code> делает неявные вещи. Нужен
-      архив — распакуйте явно (<code>RUN tar -xf</code>), нужен файл из сети — скачайте
-      <code>curl</code> и проверьте контрольную сумму. Так в Dockerfile видно, что происходит.</p>
+    <p><code>COPY &lt;откуда&gt; &lt;куда&gt;</code> — <strong>простое копирование</strong> из контекста
+      сборки в образ. Ничего не распаковывает и никуда не ходит по сети: взял файл — положил файл.
+      Разбор <code>COPY . .</code> был выше, а вот другие формы:</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">COPY Orders.Api/Orders.Api.csproj Orders.Api/   # файл → в папку Orders.Api/
+COPY appsettings.Production.json ./             # файл → в текущую папку (WORKDIR)
+COPY wwwroot ./wwwroot                          # папку целиком, со всем содержимым
+COPY --chown=$APP_UID:0 . .                     # скопировать и сразу сменить владельца</code></pre>
+    </div>
+    <ul>
+      <li>Пути <strong>внутри контекста</strong> (то, что вы передали в <code>docker build … .</code>).
+        Файл, исключённый в <code>.dockerignore</code>, скопировать нельзя — его «не существует» (глава 6).</li>
+      <li>Если <em>куда</em> кончается слэшем или это существующая папка — файл кладётся внутрь неё; иначе
+        <em>куда</em> считается именем файла.</li>
+      <li><code>--chown=uid:gid</code> — сменить владельца на лету; иначе файлы принадлежат
+        <code>root</code> (об этом — в разделе про <code>USER</code> и в главе 7).</li>
+    </ul>
+    <p><code>ADD</code> умеет то же самое <em>плюс</em> два действия, которые выполняет сам, без спроса:</p>
+    <table>
+      <tr><th>Что в источнике</th><th><code>ADD</code> делает сам</th><th>Чем это плохо</th></tr>
+      <tr><td>локальный архив <code>app.tar.gz</code></td>
+        <td>распаковывает его в целевую папку — самого архива в образе не остаётся</td>
+        <td>что и куда распаковалось, видно только после сборки: в Dockerfile написано «добавь
+          архив», а получилось «добавь содержимое»</td></tr>
+      <tr><td>URL <code>https://…/tool.tgz</code></td>
+        <td>скачивает по сети прямо во время сборки</td>
+        <td><strong>нет проверки</strong> того, что скачалось: подменённый на сервере файл никто не
+          заметит; к тому же обновили файл на сервере — Docker может этого и не увидеть: кэш такого слоя
+          зависит от заголовков удалённого сервера, а не от вашего Dockerfile</td></tr>
+    </table>
+    <p>То же самое, но <code>COPY</code> + явная команда — так видно каждое действие:</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile"># 1) архив: сначала копируем как файл, потом распаковываем отдельной командой
+COPY app.tar.gz /tmp/
+RUN tar -xzf /tmp/app.tar.gz -C /app &amp;&amp; rm /tmp/app.tar.gz
+#   tar -xzf  распаковать: -x извлечь, -z gzip, -f файл; -C /app — в какую папку
+#   &amp;&amp; rm      убрать сам архив в том же слое (иначе он останется в образе — глава 3)
+
+# 2) файл из сети: скачать, сверить контрольную сумму, только потом использовать
+RUN curl -fsSL -o /tmp/tool.tgz https://example.com/tool-1.2.3.tgz \
+ &amp;&amp; echo "9f2c1a4b8e6d0f3a5c7b9e1d2f4a6c8b0e2d4f6a8c0b2e4d6f8a0c2b4e6d8f0a  /tmp/tool.tgz" | sha256sum -c - \
+ &amp;&amp; tar -xzf /tmp/tool.tgz -C /usr/local/bin \
+ &amp;&amp; rm /tmp/tool.tgz</code></pre>
+    </div>
+    <ul>
+      <li><code>curl -fsSL</code>: <code>-f</code> — «HTTP-ошибка = ошибка» (без неё страница 404
+        сохранится как файл и сборка «удастся»), <code>-s</code> — без индикатора прогресса,
+        <code>-S</code> — но ошибки показывать, <code>-L</code> — идти по редиректам,
+        <code>-o &lt;файл&gt;</code> — куда сохранить.</li>
+      <li><code>sha256sum -c -</code> — «сверь файл с суммой из стандартного ввода» (<code>-c</code> =
+        check, <code>-</code> = читать список из stdin). Не совпало — команда вернёт ненулевой код, и
+        <code>&amp;&amp;</code> остановит сборку.</li>
+      <li>Сумму берут из документации проекта или со страницы релиза и <strong>вписывают в
+        Dockerfile</strong>. Тогда подмена файла на сервере ломает сборку, а не тихо попадает в прод.</li>
+    </ul>
+    <p><strong>Правило:</strong> <code>ADD</code> — только если он действительно нужен (например, распаковать
+      локальный архив в образе, где нет <code>tar</code>). Во всех остальных случаях — <code>COPY</code>.</p>
 
     <h3><code>EXPOSE</code>: заявить порт</h3>
-    <p><strong>Что делает:</strong> записывает в конфиг «приложение слушает этот порт» — документация для
-      людей и инструментов. <strong>Чего не делает:</strong> не публикует порт наружу, это делает
-      <code>-p</code> при запуске.</p>
-    <p><strong>Если не указать:</strong> ничего не сломается — трафик пойдёт, если порт опубликован. Но
-      читающему будет непонятно, куда стучаться.</p>
+    <p><strong>Что делает:</strong> записывает в конфиг образа «приложение слушает этот порт» — документация
+      для людей и подсказка инструментам. <strong>Чего не делает:</strong> не открывает порт наружу.</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">EXPOSE 8080         # один порт (протокол по умолчанию tcp)
+EXPOSE 8080/tcp     # то же самое, записано явно
+EXPOSE 8080/udp     # другой протокол — тоже можно заявить</code></pre>
+    </div>
+    <p>Заявленное видно в конфиге образа, а реально опубликованное — в <code>docker ps</code>. Сравните два
+      запуска <em>одного и того же</em> образа:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ docker image inspect orders-api:1.4.2 --format '{{json .Config.ExposedPorts}}'
+{"8080/tcp":{}}                     ← заявлено в образе
+
+# 1) запуск БЕЗ -p: порт заявлен, но снаружи закрыт
+$ docker run -d --name api-noport orders-api:1.4.2
+$ curl -s -m 2 http://localhost:8080/health
+curl: (7) Failed to connect to localhost port 8080
+$ docker ps --format '{{.Names}}\t{{.Ports}}'
+api-noport                            ← столбец портов пуст
+
+# 2) запуск С -p: тот же образ, тот же EXPOSE — и порт работает
+$ docker run -d --name api -p 8080:8080 orders-api:1.4.2
+$ curl -s http://localhost:8080/health
+{"status":"Healthy"}
+$ docker ps --format '{{.Names}}\t{{.Ports}}'
+api     0.0.0.0:8080->8080/tcp</code></pre>
+    </div>
+    <ul>
+      <li><code>0.0.0.0:8080-&gt;8080/tcp</code> читается как «порт 8080 на всех интерфейсах машины →
+        порт 8080 в контейнере».</li>
+      <li><code>curl -m 2</code> — ждать ответа не дольше двух секунд (<code>-m</code> = max time), иначе
+        команда висит.</li>
+      <li>Код выхода <code>7</code> у <code>curl</code> — «не удалось подключиться». Именно так выглядит
+        «порт не опубликован», в отличие от <code>404</code> (порт открыт, адрес неверный).</li>
+    </ul>
+    <p><strong>Если <code>EXPOSE</code> не указать:</strong> ничего не сломается — трафик пойдёт, если порт
+      опубликован <code>-p</code>. Но: <code>docker ps</code> не покажет порт, флаг <code>-P</code>
+      (заглавная) не будет знать, что публиковать, а человек, читающий Dockerfile, не поймёт, куда
+      стучаться.</p>
+    <ul>
+      <li><code>-p 8080:8080</code> — «опубликуй вот этот порт контейнера на вот этот порт машины».</li>
+      <li><code>-P</code> — «опубликуй <em>все</em> заявленные в <code>EXPOSE</code> порты, каждый на
+        случайный свободный порт машины». Поэтому <code>EXPOSE</code> — не только документация.</li>
+    </ul>
+    <p>Подробно про порты, интерфейсы и <code>localhost</code> — глава 8.</p>
 
     <h3><code>USER</code>: от какого пользователя работать</h3>
     <p><strong>Что делает:</strong> переключает пользователя для следующих инструкций и для запуска.
@@ -358,22 +493,28 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     <p>Зачем их две. <code>ENTRYPOINT</code> — «<strong>что за программа</strong>»: он не переопределяется
       аргументами в конце <code>docker run</code>. <code>CMD</code> — «<strong>аргументы по
       умолчанию</strong>»: их легко заменить.</p>
+    <p><strong>Что такое «аргументы».</strong> Это всё, что написано в командной строке <em>после имени
+      образа</em>. В строке
+      <code>docker run -d -p 8080:8080 orders-api:1.4.2 --urls http://+:9000</code> аргументы — только
+      <code>--urls http://+:9000</code>: всё до имени образа — флаги самого <code>docker run</code>
+      (<code>-d</code>, <code>-p</code>), а всё после — то, что получит программа внутри контейнера.</p>
     <p>В таблице два <em>разных</em> вопроса, и именно поэтому её раньше читали как противоречие:
       что запустится, <strong>если ничего не дописывать</strong>, и что запустится,
       <strong>если дописать аргументы в <code>docker run</code></strong>. Теперь это разные столбцы.</p>
     <table>
       <tr><th>ENTRYPOINT</th><th>CMD</th><th>По умолчанию:<br><code>docker run img</code></th>
         <th>С аргументами:<br><code>docker run img --help</code></th></tr>
-      <tr><td><code>["dotnet","Api.dll"]</code></td><td><code>["--urls","http://+:8080"]</code></td>
-        <td><code>dotnet Api.dll --urls http://+:8080</code></td>
-        <td><code>dotnet Api.dll --help</code><br>(CMD выброшен, его место заняли аргументы)</td></tr>
-      <tr><td>—</td><td><code>["dotnet","Api.dll"]</code></td>
-        <td><code>dotnet Api.dll</code></td>
+      <tr><td><code>["dotnet","Orders.Api.dll"]</code></td>
+        <td><code>["--urls","http://+:8080"]</code></td>
+        <td><code>dotnet Orders.Api.dll --urls http://+:8080</code></td>
+        <td><code>dotnet Orders.Api.dll --help</code><br>(CMD выброшен, его место заняли аргументы)</td></tr>
+      <tr><td>—</td><td><code>["dotnet","Orders.Api.dll"]</code></td>
+        <td><code>dotnet Orders.Api.dll</code></td>
         <td><code>--help</code> → ошибка «executable file not found»<br>(CMD был единственной командой,
           поэтому заменён целиком — вместе с программой)</td></tr>
-      <tr><td><code>["dotnet","Api.dll"]</code></td><td>—</td>
-        <td><code>dotnet Api.dll</code></td>
-        <td><code>dotnet Api.dll --help</code><br>(CMD не было, поэтому аргументы дописались в конец
+      <tr><td><code>["dotnet","Orders.Api.dll"]</code></td><td>—</td>
+        <td><code>dotnet Orders.Api.dll</code></td>
+        <td><code>dotnet Orders.Api.dll --help</code><br>(CMD не было, поэтому аргументы дописались в конец
           ENTRYPOINT)</td></tr>
     </table>
     <p><strong>Правило, из которого следуют все три строки:</strong> аргументы из <code>docker run</code>
@@ -381,6 +522,40 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
       не было — дописанное просто добавляется к <code>ENTRYPOINT</code>. Программу
       (<code>ENTRYPOINT</code>) так подменить нельзя: во второй строке «замена» случилась только потому,
       что программы в <code>ENTRYPOINT</code> нет вообще — её роль играл <code>CMD</code>.</p>
+    <p>Возьмём образ, в Dockerfile которого записаны <em>обе</em> инструкции:</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">ENTRYPOINT ["dotnet", "Orders.Api.dll"]
+CMD ["--urls", "http://+:8080"]</code></pre>
+    </div>
+    <p>И запустим его три раза:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># 1) ничего не дописали → работает CMD (аргументы по умолчанию)
+$ docker run --rm orders-api:1.4.2
+info: Now listening on: http://[::]:8080          ← порт пришёл из CMD --urls
+
+# 2) дописали свой аргумент → CMD выброшен целиком
+$ docker run --rm orders-api:1.4.2 --urls http://+:9000
+info: Now listening on: http://[::]:9000
+
+# 3) дописали два аргумента → они тоже заняли место CMD, а не добавились к нему
+$ docker run --rm orders-api:1.4.2 --urls http://+:9000 --environment Development
+info: Now listening on: http://[::]:9000
+info: Hosting environment: Development</code></pre>
+    </div>
+    <p>Во втором запуске <code>--urls http://+:8080</code> из <code>CMD</code> исчез полностью, а не
+      «дополнился»: то, что вы написали в командной строке, встаёт на место <code>CMD</code> целиком.</p>
+    <p><strong>Зачем тогда две инструкции, если хватает одной?</strong> Они отвечают на разные вопросы, и в
+      жизни это удобно:</p>
+    <table>
+      <tr><th>Что нужно</th><th>Как записать</th></tr>
+      <tr><td>«По умолчанию работает так, но адрес и флаги я смогу поменять без пересборки»</td>
+        <td><code>ENTRYPOINT</code> = программа, <code>CMD</code> = аргументы по умолчанию (наш случай)</td></tr>
+      <tr><td>«Хочу иметь возможность подменить саму программу» — например, тот же образ запустить как
+        миграции: <code>docker run img dotnet ef database update</code></td>
+        <td>только <code>CMD</code>, без <code>ENTRYPOINT</code></td></tr>
+      <tr><td>«Программа фиксирована, аргументов нет»</td>
+        <td>только <code>ENTRYPOINT</code></td></tr>
+    </table>
     <div class="box tip">
       <span class="t">Как всё-таки «залезть внутрь» образа, у которого есть <code>ENTRYPOINT</code></span>
       <p><code>docker run -it orders-api:1.4.2 bash</code> шелл не откроет: <code>bash</code> станет
@@ -395,7 +570,8 @@ root@4b1f9c2a7d31:/app#</code></pre>
           <code>-t</code> = выделить tty); без них шелл сразу закроется.</li>
         <li><code>--rm</code> — удалить контейнер после выхода, чтобы не копить остановленные.</li>
         <li>Если в образе задан ещё и <code>CMD</code>, его аргументы допишутся к новой команде — ровно по
-          правилу из таблицы выше. В нашем Dockerfile <code>CMD</code> нет, поэтому здесь всё чисто.</li>
+          правилу из таблицы выше. В Dockerfile из начала главы <code>CMD</code> нет, поэтому там всё
+          чисто.</li>
         <li>Для уже запущенного контейнера то же делают через
           <code>docker exec -it &lt;имя&gt; bash</code> (глава 4) — там <code>ENTRYPOINT</code> вообще ни при
           чём.</li>
@@ -416,9 +592,10 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]
 #   PID 1 = /bin/sh; плюс — раскрываются переменные, минус — сигналы часто не доходят
 ENTRYPOINT dotnet Orders.Api.dll</code></pre>
     </div>
-    <p><strong>Если не указать ни одну:</strong> контейнер выполнит <code>CMD</code> из базового образа
-      (у <code>aspnet</code> это <code>bash</code>) — ваше приложение просто не запустится, а контейнер
-      сразу завершится.</p>
+    <p><strong>Если в Dockerfile нет ни <code>ENTRYPOINT</code>, ни <code>CMD</code>:</strong> контейнер
+      выполнит <code>CMD</code> из <em>базового</em> образа — у <code>aspnet</code> это <code>bash</code>.
+      Приложение не запустится, а контейнер сразу завершится: <code>docker ps -a</code> покажет
+      <code>Exited (0)</code> через секунду после старта.</p>
 
     <h2>Сборка</h2>
     <p>Здесь Dockerfile из начала главы превращается в образ — это тот самый шаг 2.</p>
@@ -442,6 +619,7 @@ ENTRYPOINT dotnet Orders.Api.dll</code></pre>
       без цвета. Ровно такое же содержимое Docker печатает, когда вывод <em>не</em> терминал (например, лог
       в CI) или когда добавлен <code>--progress=plain</code>. То есть расхождение — про оформление, а не про
       смысл; во всей книге вывод сборки показан в этом виде.</p>
+    <p>Разберём команду по частям:</p>
     <ul>
       <li><code>docker build</code> — собрать образ по Dockerfile.</li>
       <li><code>-t orders-api:1.4.2</code> — имя и тег результата (<code>-t</code> = tag). Без него образ
@@ -455,10 +633,32 @@ ENTRYPOINT dotnet Orders.Api.dll</code></pre>
       <li>Число <code>(10/10)</code> в первой строке считает <strong>все</strong> шаги, включая внутренние:
         загрузку самого Dockerfile, запрос метаданных базового образа, экспорт результата. Ваших шагов из
         Dockerfile среди них пять — <code>[1/5] … [5/5]</code>, поэтому числа и не совпадают.</li>
-      <li><code>-f docker/Api.Dockerfile</code> — взять Dockerfile по другому пути (по умолчанию
-        <code>./Dockerfile</code>).</li>
-      <li><code>--progress=plain</code> — подробный текстовый лог; <code>--no-cache</code> — не
-        использовать кэш.</li>
+    </ul>
+    <p><strong>Флагов, которых в этой команде не было,</strong> но они понадобятся, — четыре. Каждый показан
+      со своей командой, чтобы было видно, куда он ставится:</p>
+    <div class="codewrap">
+      <p class="cap">Ещё четыре сборки — по одному новому флагу</p>
+      <pre><code class="language-bash"># 1) Dockerfile лежит не в корне, а в подпапке: -f = file
+$ docker build -f docker/Api.Dockerfile -t orders-api:1.4.2 .
+
+# 2) нужен читаемый текстовый лог вместо анимации (например, чтобы сохранить в CI)
+$ docker build --progress=plain -t orders-api:1.4.2 .
+
+# 3) собрать заново, не читая кэш (проверить, не «залип» ли он — глава 6)
+$ docker build --no-cache -t orders-api:1.4.2 .
+
+# 4) передать значение ARG из раздела выше
+$ docker build --build-arg APP_VERSION=1.4.2 -t orders-api:1.4.2 .</code></pre>
+    </div>
+    <ul>
+      <li><code>-f &lt;путь&gt;</code> — «взять этот файл вместо <code>./Dockerfile</code>». Контекст (точка в
+        конце) при этом не меняется: пути внутри <code>COPY</code> по-прежнему считаются от него.</li>
+      <li><code>--progress=plain</code> — печатать шаги строками, без анимации; то же самое Docker делает сам,
+        когда вывод перенаправлен в файл.</li>
+      <li><code>--no-cache</code> — не читать кэш при сборке (новые слои в кэш всё равно запишутся).</li>
+      <li><code>--build-arg ИМЯ=значение</code> — задать значение для <code>ARG</code> из Dockerfile. Имя
+        должно быть объявлено через <code>ARG</code>, иначе Docker предупредит, что аргумент не
+        используется.</li>
     </ul>
     <p>Что получилось:</p>
     <div class="codewrap">
