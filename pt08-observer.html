@@ -20,8 +20,8 @@
     <div class="part">Паттерны · Часть II · Шесть паттернов на каждый день</div>
     <h1>Глава 8. Наблюдатель: события, подписки и доменные события</h1>
     <p class="sublead">Один объект изменился — об этом должны узнать другие, но он <strong>не должен знать,
-      кто именно</strong>. Разберём `event` в C#, доменные события и главную ловушку: публикацию до
-      `SaveChanges`.</p>
+      кто именно</strong>. Разберём <code>event</code> в C#, доменные события и главную ловушку: публикацию до
+      <code>SaveChanges</code>.</p>
     <p><span class="tag core">основная глава</span></p>
 
     <h2>Разминка: идея на пятнадцати строках</h2>
@@ -57,6 +57,36 @@ order.Pay();</code></pre>
       <pre><code class="language-text">[письмо] оплачен заказ на 1500
 [склад] зарезервировать товары
 [аналитика] +1 оплата</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Разбор записи <code>(sender, total) =&gt; …</code>: что это и откуда берутся значения</span>
+      <p><code>(sender, total) =&gt; Console.WriteLine(…)</code> — это <strong>лямбда-выражение</strong>, то есть
+        метод без имени. <code>sender</code> и <code>total</code> — его <em>параметры</em>, и объявлены они
+        прямо здесь, в скобках; отдельно, где-то ещё, их писать не нужно и присваивать ничего не надо.
+        Одно и то же можно записать обычным методом:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">// лямбда: параметры объявлены на месте, типы выводит компилятор
+order.Paid += (sender, total) =&gt; Console.WriteLine($"[письмо] оплачен заказ на {total}");
+
+// ровно то же самое обычным методом
+order.Paid += OnPaid;
+void OnPaid(object? sender, decimal total) =&gt; Console.WriteLine($"[письмо] оплачен заказ на {total}");</code></pre>
+      </div>
+      <p>Типы не пишут, потому что они берутся из типа события:
+        <code>event EventHandler&lt;decimal&gt;? Paid</code> — это делегат
+        <code>void (object? sender, decimal total)</code>. Отсюда и роли: <code>sender</code> — «кто сообщил»
+        (сам заказ), <code>total</code> — полезная нагрузка (сумма).</p>
+      <p><strong>Кто кладёт в них значения?</strong> Тот, кто поднимает событие, — метод <code>Pay()</code>
+        внутри <code>Order</code>. Аргументы появляются в момент вызова, а не при подписке:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">Paid?.Invoke(this, Total);   //   this → sender,    Total (1500) → total</code></pre>
+      </div>
+      <p><code>Invoke</code> вызывает <em>все</em> подписанные делегаты и передаёт каждому одни и те же два
+        аргумента — поэтому все три строки на консоли «знают» про 1500. Ненужный параметр заменяют на
+        <code>_</code>: <code>(_, total) =&gt; …</code>.</p>
+      <p>Наконец, сам <code>+=</code>: у события внутри список делегатов, <code>+=</code> дописывает в него
+        ещё один (подписка), <code>-=</code> — убирает. Поэтому строки напечатались в порядке подписки; но
+        <em>полагаться</em> на порядок нельзя — это ловушка из таблицы ниже.</p>
     </div>
     <p>Что произошло по сути: <code>Order</code> сообщил «я оплачен» и <strong>не знает</strong>, кто на
       это отреагировал. Добавить нового слушателя — это одна строка <code>+=</code>, а класс заказа при этом
@@ -125,6 +155,39 @@ public sealed class OrderService(AppDbContext db, IEnumerable&lt;IOrderPaidHandl
     }
 }</code></pre>
     </div>
+    <div class="box note">
+      <span class="t">«Никакой логики» — а данные куда деваются? Разбор <code>record OrderPaid</code></span>
+      <p>«Без логики» значит «без <em>поведения</em>», а не «без содержимого». Это <strong>конверт с
+        фактом</strong>: три значения, описывающие, что произошло. Событие само ничего не делает, никого не
+        вызывает и ни в какую базу не пишет — логика (кому писать, что резервировать) живёт в обработчиках.</p>
+      <p>Строка <code>public sealed record OrderPaid(Guid OrderId, decimal Total, DateTimeOffset At);</code>
+        выглядит пустой, но компилятор по ней генерирует полноценный неизменяемый класс:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">// во что превращается эта одна строка (сокращённо)
+public sealed class OrderPaid : IEquatable&lt;OrderPaid&gt;
+{
+    public OrderPaid(Guid orderId, decimal total, DateTimeOffset at) { … }   // конструктор
+
+    public Guid OrderId { get; init; }             // свойства только для чтения:
+    public decimal Total { get; init; }            // после создания изменить нельзя
+    public DateTimeOffset At { get; init; }
+
+    public override string ToString() =&gt; $"OrderPaid {{ OrderId = …, Total = …, At = … }}";
+    // плюс сравнение по значениям (==) и деконструкция: var (id, total, at) = e;
+}</code></pre>
+      </div>
+      <p>Дальше данные просто <em>читают обработчики</em> — вот весь путь:</p>
+      <div class="codewrap">
+        <pre><code class="language-text">OrderService.PayAsync
+  └ new OrderPaid(order.Id, order.Total, DateTimeOffset.UtcNow)   ← положили данные в конверт
+      └ handler.HandleAsync(e, ct)                                ← отдали конверт каждому
+          ├ SendReceiptOnOrderPaid:  e.OrderId и e.Total  → письмо с суммой
+          └ ReserveStockOnOrderPaid: e.OrderId            → резерв на складе</code></pre>
+      </div>
+      <p>То есть <code>Total</code> не «уходит в никуда»: он попадает в письмо, потому что обработчик прочитал
+        <code>e.Total</code>. И наоборот — изменить поле он не может (свойства <code>init</code>): факт нельзя
+        подделать по дороге, в этом и смысл отдельного неизменяемого типа вместо передачи «просто заказа».</p>
+    </div>
     <div class="codewrap">
       <pre><code class="language-csharp">// 4) Реакции — отдельные классы, каждый со своей зависимостью.
 public sealed class SendReceiptOnOrderPaid(IEmail email) : IOrderPaidHandler
@@ -146,6 +209,48 @@ builder.Services.AddScoped&lt;IOrderPaidHandler, ReserveStockOnOrderPaid&gt;();<
     <p><code>IEnumerable&lt;IOrderPaidHandler&gt;</code> — это и есть «список подписчиков», который
       подставляет DI (механика — «Backend на .NET», глава 15). Новый подписчик = новый класс + одна строка
       регистрации; <code>OrderService</code> не меняется.</p>
+
+    <h3>Кто и когда вызывает <code>OrderService</code></h3>
+    <p><code>public sealed class OrderService(AppDbContext db, IEnumerable&lt;IOrderPaidHandler&gt; handlers)</code>
+      — это не вызов метода, а <strong>объявление класса</strong> с первичным конструктором (C# 12): в скобках
+      перечислены <em>зависимости</em>, а не аргументы. Объект создаёт DI-контейнер и он же подставляет
+      <code>db</code> и <code>handlers</code> — ровно так же, как <code>inner</code> в главе 5.</p>
+    <p>Вызывают сервис снаружи — из endpoint'а, который получает его из контейнера по типу:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt; o.UseNpgsql(cs));
+builder.Services.AddScoped&lt;OrderService&gt;();                                  // сам сервис оплаты
+builder.Services.AddScoped&lt;IOrderPaidHandler, SendReceiptOnOrderPaid&gt;();     // подписчик 1
+builder.Services.AddScoped&lt;IOrderPaidHandler, ReserveStockOnOrderPaid&gt;();    // подписчик 2
+
+app.MapPost("/orders/{id:guid}/pay", async (Guid id, OrderService orders, CancellationToken ct) =&gt;
+{
+    await orders.PayAsync(id, ct);      // ← вот здесь код класса и начинает исполняться
+    return Results.NoContent();
+});</code></pre>
+    </div>
+    <p>Параметры лямбды endpoint'а заполняет тот же контейнер: <code>id</code> — из адреса,
+      <code>orders</code> — объект <code>OrderService</code>, <code>ct</code> — токен запроса. Внутри
+      <code>PayAsync</code> исполняется ровно то, что написано в его теле:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">POST /orders/7f3a…/pay
+  └ контейнер создаёт OrderService(db: AppDbContext, handlers: [SendReceipt…, ReserveStock…])
+      └ PayAsync(orderId, ct):
+          1. читаем заказ из базы              db.Orders.FindAsync
+          2. ставим статус Paid                в памяти, ещё не в базе
+          3. UPDATE … COMMIT                   db.SaveChangesAsync
+          4. new OrderPaid(order.Id, Total, UtcNow)
+          5. foreach по handlers → HandleAsync(e, ct)
+               ├ письмо с суммой 1500
+               └ резерв товаров по OrderId
+          → 204 No Content
+
+если в HandleAsync добавить Console.WriteLine, в логе будет:
+  [письмо] заказ 7f3a… на 1500
+  [склад] зарезервировать товары по заказу 7f3a…</code></pre>
+    </div>
+    <p>Список <code>handlers</code> собирает DI: <code>IEnumerable&lt;IOrderPaidHandler&gt;</code> — это все
+      зарегистрированные реализации, в порядке регистрации. Пустой список тоже допустим — цикл просто не
+      выполнится (поэтому здесь не нужен <code>?</code>, как у <code>Paid?.Invoke</code>).</p>
     <div class="box tip">
       <span class="t">Почему в прикладном коде чаще берут интерфейс, а не <code>event</code></span>
       <p><code>event</code> — синхронный, привязан к конкретному экземпляру и не умеет <code>async</code>,
@@ -227,7 +332,12 @@ public sealed class PriceView : IDisposable
         <li>Наблюдатель — это <strong>один ко многим</strong>: издатель объявляет факт, подписчики
           реагируют, издатель их не знает.</li>
         <li><code>event</code> — встроенный вариант в C#; снаружи только <code>+=</code>/<code>-=</code>,
-          вызывает только владелец.</li>
+          вызывает только владелец. Параметры обработчика (<code>sender</code>, <code>total</code>) объявлены
+          в самой лямбде, а значения им передаёт <code>Invoke</code> в момент события.</li>
+        <li>Доменное событие (<code>record OrderPaid</code>) — <strong>конверт с данными</strong> и без
+          поведения: данные читают обработчики, изменить их нельзя.</li>
+        <li><code>OrderService(…)</code> — объявление класса с зависимостями в конструкторе; объект создаёт
+          DI, а исполняется код тогда, когда endpoint вызовет <code>PayAsync</code>.</li>
         <li>В прикладном коде чаще берут <strong>список обработчиков за интерфейсом</strong>: работает с
           DI, <code>async</code> и тестами.</li>
         <li><strong>Публикуйте после <code>SaveChanges</code></strong>, а внешние эффекты отправляйте
