@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs10-task-run.html">Далее →</a>
+  <a href="cs11-task-run.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
-    <div class="part">C# · Часть III · Типы и асинхронность</div>
-    <h1>Глава 9. Task, ValueTask и стейт-машина async/await</h1>
+    <div class="part">C# · Часть III · Типы, делегаты и асинхронность</div>
+    <h1>Глава 10. Task, ValueTask и стейт-машина async/await</h1>
     <p class="sublead">Что такое <code>Task</code> на самом деле, когда <code>ValueTask</code> экономит
       аллокацию, а когда превращается в скрытый баг, во что компилятор разворачивает <code>async/await</code>
       и что делает <code>ConfigureAwait(false)</code>.</p>
@@ -266,7 +266,7 @@ public async Task&lt;string&gt; GetAsync(string url, CancellationToken ct)
       <li><strong>В библиотеках — <code>ConfigureAwait(false)</code></strong> после каждого
         <code>await</code>.</li>
       <li><code>async void</code> — только для обработчиков событий: исключение из него не попадает в
-        задачу (гл. 10).</li>
+        задачу (гл. 11).</li>
     </ol>
 
     <h2>Что спросят на интервью</h2>
@@ -297,8 +297,8 @@ public async Task&lt;string&gt; GetAsync(string url, CancellationToken ct)
     </div>
 
     <div class="pager">
-      <a href="cs08-class-modifiers.html">← <span class="sp">Глава 8. Модификаторы типов: sealed, abstract, static, record</span></a>
-      <a href="cs10-task-run.html"><span class="sp">Глава 10. Task.Run: когда нужен и когда вредит</span> →</a>
+      <a href="cs09-class-modifiers.html">← <span class="sp">Глава 9. Модификаторы типов: sealed, abstract, static, record</span></a>
+      <a href="cs11-task-run.html"><span class="sp">Глава 11. Task.Run: когда нужен и когда вредит</span> →</a>
     </div>
   </div>
 </div>

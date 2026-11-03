@@ -17,8 +17,8 @@
 </div></div>
 <div class="container">
   <div class="chapter">
-    <div class="part">C# · Часть III · Типы и асинхронность</div>
-    <h1>Глава 12. Исключения: try/catch/finally, фильтры when, свои исключения</h1>
+    <div class="part">C# · Часть III · Типы, делегаты и асинхронность</div>
+    <h1>Глава 13. Исключения: try/catch/finally, фильтры when, свои исключения</h1>
     <p class="sublead"><code>try/catch</code> знают все, но <code>finally</code>, <code>throw;</code> против
       <code>throw ex;</code>, фильтры <code>when (…)</code> и «когда своё исключение не нужно» — уже нет.
       Разберём на реальных случаях из бэкенда.</p>
@@ -143,14 +143,14 @@ throw new PaymentFailedException("платёж отклонён", innerException
     <h2>Исключения и <code>async</code></h2>
     <ul>
       <li>Исключение внутри <code>async</code>-метода <strong>складывается в задачу</strong>, а не вылетает при
-        вызове: поймать его можно только через <code>await</code> (C# гл. 9).</li>
+        вызове: поймать его можно только через <code>await</code> (C# гл. 10).</li>
       <li><code>await</code> пробрасывает <em>первое</em> исключение как есть; <code>AggregateException</code>
         появляется при <code>Task.Wait()</code>/<code>Task.Result</code> — ещё одна причина их не
-        использовать (гл. 10).</li>
+        использовать (гл. 11).</li>
       <li>При <code>Task.WhenAll</code> задача падает с первым исключением, остальные доступны через
         <code>task.Exception</code> — если нужно, разбирайте их отдельно.</li>
       <li><code>async void</code> — исключение некуда положить: оно уходит в контекст и роняет процесс
-        (гл. 10).</li>
+        (гл. 11).</li>
     </ul>
 
     <h2>Что не делать</h2>
@@ -183,7 +183,7 @@ throw new PaymentFailedException("платёж отклонён", innerException
     </div>
 
     <div class="pager">
-      <a href="cs11-null-and-self-reference.html">← <span class="sp">Глава 11. null, ?. и ссылка на самого себя</span></a>
+      <a href="cs12-null-and-self-reference.html">← <span class="sp">Глава 12. null, <code>?.</code> и ссылка на самого себя</span></a>
       <a href="csharp.html"><span class="sp">Оглавление раздела</span> →</a>
     </div>
   </div>

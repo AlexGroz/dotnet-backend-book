@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 8 · Делегаты, лямбды и события: как метод становится значением</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs09-class-modifiers.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы, делегаты и асинхронность</div>
+    <h1>Глава 8. Делегаты, лямбды и события: как метод становится значением</h1>
+    <p class="sublead">Почему <code>(sender, total) =&gt; …</code> — это метод, а не «магия», откуда берутся
+      его параметры, что значит <code>+=</code> у события и где здесь утечка памяти.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Разминка: в переменной может лежать метод</h2>
+    <p>Обычно в переменной лежит <em>значение</em>: число, строка, ссылка на объект. Делегат — это тип,
+      переменная которого хранит <strong>метод</strong>. Объявляется он как любой другой тип, только вместо
+      полей и свойств описывает <em>сигнатуру</em> метода:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">delegate int Op(int x);        // «метод, который берёт int и возвращает int»
+
+static int Double(int x) =&gt; x * 2;
+static int Square(int x) =&gt; x * x;
+
+Op op = Double;                // в переменной лежит метод, а не число
+Console.WriteLine(op(21));     // 42   ← вызов через переменную
+
+op = Square;                   // та же переменная — другой метод
+Console.WriteLine(op(8));      // 64</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">42
+64</code></pre>
+    </div>
+    <p>Смысл в одной фразе: <strong>метод стал значением</strong>. Его можно передать в другой метод
+      параметром, положить в поле, вернуть из функции, сохранить в списке. Из этого «кирпичика» дальше
+      собираются LINQ, обработчики событий и регистрация в DI.</p>
+
+    <h2>Что такое делегат на самом деле</h2>
+    <p>Делегат — ссылочный тип. Внутри него две вещи: <em>на каком объекте</em> вызывать (<code>Target</code>) и
+      <em>какой метод</em> (<code>Method</code>). Для статического метода <code>Target</code> равен
+      <code>null</code>; для метода экземпляра там лежит сам объект — поэтому делегат, как и любой объект,
+      держит его в памяти (это пригодится в разделе про утечки).</p>
+    <p>Свои делегаты объявляют редко: в .NET уже есть стандартные, и их хватает почти всегда.</p>
+    <table>
+      <thead><tr><th>Делегат</th><th>Сигнатура</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>Action</code></td><td><code>void ()</code></td><td>действие без параметров</td></tr>
+        <tr><td><code>Action&lt;T&gt;</code>, <code>Action&lt;T1,T2&gt;</code></td><td><code>void (T)</code>,
+          <code>void (T1,T2)</code></td><td>действие с параметрами, ничего не возвращает</td></tr>
+        <tr><td><code>Func&lt;TResult&gt;</code></td><td><code>TResult ()</code></td><td>функция без параметров</td></tr>
+        <tr><td><code>Func&lt;T,TResult&gt;</code></td><td><code>TResult (T)</code></td><td>функция из одного
+          параметра (последний аргумент типа — то, что возвращается)</td></tr>
+        <tr><td><code>Predicate&lt;T&gt;</code></td><td><code>bool (T)</code></td><td>«подходит или нет»</td></tr>
+        <tr><td><code>Comparison&lt;T&gt;</code></td><td><code>int (T,T)</code></td><td>сравнение для сортировки
+          (меньше/равно/больше)</td></tr>
+        <tr><td><code>EventHandler</code></td><td><code>void (object?, EventArgs)</code></td><td>событие без
+          данных</td></tr>
+        <tr><td><code>EventHandler&lt;T&gt;</code></td><td><code>void (object?, T)</code></td><td>событие с данными
+          <code>T</code></td></tr>
+      </tbody>
+    </table>
+    <p><strong>Как читается <code>Func&lt;int, int&gt;</code>:</strong> последний параметр типа — результат, то
+      есть «дай мне <code>int</code>, верну <code>int</code>»: это метод <code>int F(int x)</code>. Именно
+      поэтому в <code>Where</code> стоит <code>Func&lt;T, bool&gt;</code> — он спрашивает «элемент подходит?»,
+      ответ булев.</p>
+    <p>Подстановка метода в переменную-делегат называется <strong>method group conversion</strong>: вы пишете
+      имя метода без скобок, а компилятор сам делает из него делегат.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Func&lt;int, int&gt; twice = Double;              // имя метода без скобок — стал делегатом
+Action&lt;string&gt; log = Console.WriteLine;      // работает и с чужим методом
+Predicate&lt;int&gt; positive = n =&gt; n &gt; 0;       // свой «фильтр»: лямбда, о ней ниже
+
+var nums = new List&lt;int&gt; { -2, 5, 0, 7 };
+Console.WriteLine(string.Join(", ", nums.Where(n =&gt; n &gt; 0)));   // Where ждёт Func&lt;int, bool&gt;</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">5, 7</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Зачем вообще нужны делегаты</span>
+      <p>Без них «передать поведение» можно было бы только наследованием: класс-параметр с единственным
+        методом. Делегат делает то же одной строкой — поэтому <code>Where</code>, <code>Select</code>,
+        обработчики событий и фабрики в DI выглядят так коротко.</p>
+    </div>
+
+    <h2>Лямбда: метод без имени</h2>
+    <p>Каждый раз писать <code>static int Double(int x) =&gt; x * 2;</code> ради одной строки неудобно. Лямбда —
+      это метод, объявленный <em>в том месте, где он нужен</em>, без имени:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Func&lt;int, int&gt; square = x =&gt; x * x;                  // (параметры) =&gt; выражение
+Func&lt;int, int, int&gt; add = (a, b) =&gt; a + b;           // параметров два
+Func&lt;int, int&gt; inc = x =&gt; { return x + 1; };         // тело-блок: можно несколько строк
+Action&lt;string&gt; print = s =&gt; Console.WriteLine(s);     // ничего не возвращает
+
+Console.WriteLine(square(9));    // 81
+Console.WriteLine(add(2, 3));    // 5</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">81
+5</code></pre>
+    </div>
+    <p>Читается так: слева от <code>=&gt;</code> — параметры, справа — тело. У лямбды нет собственного типа: она
+      получает его от того места, куда её кладут. Такое место называется <strong>целевым типом</strong> —
+      именно поэтому в примере выше не написано ни одного <code>int</code>.</p>
+    <div class="box note">
+      <span class="t">Почему в <code>(sender, total) =&gt; …</code> ничего не объявлено снаружи</span>
+      <p>Параметры лямбды <strong>объявлены в ней самой</strong>, в скобках, — как в обычном методе. Отдельной
+        строки «где-то задать <code>sender</code>» не нужно: значения приходят в момент вызова, а не при
+        подписке. Например, у события <code>event EventHandler&lt;decimal&gt; Paid</code> целевой тип —
+        <code>void (object? sender, decimal total)</code>, и значения в него кладёт тот, кто поднимает
+        событие: <code>Paid?.Invoke(this, Total)</code> — <code>this</code> уходит в <code>sender</code>,
+        <code>Total</code> — в <code>total</code>. Ненужный параметр заменяют на <code>_</code>:
+        <code>(_, total) =&gt; …</code>. Подробный разбор — «Паттерны в .NET», глава 8.</p>
+    </div>
+    <p><strong>Несколько параметров без скобок нельзя:</strong> <code>x =&gt; …</code> — один параметр,
+      <code>(a, b) =&gt; …</code> — два и больше (или ни одного: <code>() =&gt; …</code>). Типы можно указать
+      явно, если компилятор не догадывается: <code>(decimal a, decimal b) =&gt; a * b</code>.</p>
+
+    <h2>Замыкание: лямбда помнит переменные вокруг себя</h2>
+    <p>Лямбда может использовать локальные переменные метода, в котором написана. Компилятор при этом создаёт
+      в куче объект-«замыкание», кладёт туда эти переменные и передаёт его делегату в <code>Target</code> —
+      поэтому переменная живёт дольше своего метода:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static Func&lt;int&gt; MakeCounter()
+{
+    int count = 0;
+    return () =&gt; ++count;        // лямбда захватила count
+}
+
+var next = MakeCounter();
+Console.WriteLine(next());       // 1
+Console.WriteLine(next());       // 2   ← count жив, хотя MakeCounter уже завершился
+
+var other = MakeCounter();       // своё замыкание, свой count
+Console.WriteLine(other());      // 1</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">1
+2
+1</code></pre>
+    </div>
+    <p>Где что лежит при захвате — разобрано в главе 1. Здесь важен вывод: <strong>лямбда с захватом — это
+      лишний объект в куче на каждое создание</strong>. В горячем цикле это заметно, а лямбда без захвата
+      ничего не аллоцирует: компилятор кэширует её делегат в статическом поле.</p>
+    <p><strong>Классическая ловушка:</strong> у цикла <code>for</code> переменная одна на все итерации, поэтому
+      все лямбды видят её <em>последнее</em> значение:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var actions = new List&lt;Action&gt;();
+
+for (int i = 0; i &lt; 3; i++)
+    actions.Add(() =&gt; Console.WriteLine(i));   // ✘ все три захватили ОДНУ переменную i
+
+foreach (var a in actions) a();</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">3
+3
+3</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">for (int i = 0; i &lt; 3; i++)
+{
+    int copy = i;                                // ✔ копия внутри тела — у каждой лямбды своя
+    actions.Add(() =&gt; Console.WriteLine(copy));
+}</code></pre>
+    </div>
+    <p>Теперь печатается <code>0 1 2</code>. У <code>foreach</code> такой проблемы нет с C# 5: переменная
+      создаётся заново на каждой итерации. И ещё: начиная с C# 9 лямбду можно пометить <code>static</code> —
+      тогда захват запрещён и компилятор не даст случайно «притащить» переменную в кучу:
+      <code>static x =&gt; x * 2</code>.</p>
+
+    <h2>Мультикаст: несколько методов в одном делегате</h2>
+    <p>Делегат может хранить не один метод, а список. <code>+=</code> дописывает метод в конец списка,
+      <code>-=</code> убирает, а вызов обходит всех по очереди:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Action&lt;string&gt; log = Console.WriteLine;
+Action&lt;string&gt; toError = s =&gt; Console.Error.WriteLine($"[err] {s}");   // в переменной — чтобы потом снять
+log += toError;
+log += s =&gt; Console.WriteLine($"[file] {s}");
+
+log("готово");       // один вызов — три метода
+log -= toError;      // сняли подписку, осталось два
+log("ещё");</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли (порядок — как подписывались)</p>
+      <pre><code class="language-text">готово
+[err] готово
+[file] готово
+ещё
+[file] ещё</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Почему лямбду нельзя «отписать»</span>
+      <p><code>-=</code> ищет в списке <em>тот же самый</em> делегат. Лямбда, написанная в коде второй раз, —
+        это новый объект, поэтому <code>log -= s =&gt; …</code> ничего не снимет. Отсюда правило: если
+        подписка когда-нибудь будет сниматься, обработчик хранят в поле или переменной
+        (как <code>toError</code> выше). Именно на этом ломается отписка в <code>Dispose</code>.</p>
+    </div>
+    <p>Две ловушки, которые сразу видно на этом примере:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1) возвращается значение ПОСЛЕДНЕГО делегата, остальные результаты теряются
+Func&lt;int&gt; f = () =&gt; 1;
+f += () =&gt; 2;
+Console.WriteLine(f());     // 2, а не 3 и не «оба»
+
+// 2) исключение в середине списка обрывает остальные вызовы
+Action a = () =&gt; throw new InvalidOperationException("первый");
+a += () =&gt; Console.WriteLine("второй");
+a();                        // «второй» уже НЕ выполнится</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли (вторая часть)</p>
+      <pre><code class="language-text">2
+Unhandled exception. System.InvalidOperationException: первый
+   at Program.&lt;&lt;Main&gt;$&gt;b__0_0() in /app/Program.cs:line 7
+   at System.Action.Invoke()
+   at Program.&lt;Main&gt;$(String[] args) in /app/Program.cs:line 9</code></pre>
+    </div>
+    <p>Поэтому мультикаст берут там, где нужен «веер уведомлений» (события), а не «вычислить результат»: для
+      результата нужен один делегат.</p>
+
+    <h2>Событие: делегат, который нельзя дёрнуть снаружи</h2>
+    <p>Событие — это поле-делегат с замком: снаружи разрешены только <code>+=</code> и <code>-=</code>, а
+      вызвать (<code>Invoke</code>) может лишь сам класс-издатель. Объявляется словом <code>event</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Order
+{
+    public decimal Total { get; init; }
+
+    // EventHandler&lt;decimal&gt; = void (object? sender, decimal total)
+    public event EventHandler&lt;decimal&gt;? Paid;
+
+    public void Pay()
+    {
+        Console.WriteLine($"списываем {Total}");
+        Paid?.Invoke(this, Total);      // this → sender, Total → total
+    }                                   // ?. — если подписчиков нет, ничего не падает
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var order = new Order { Total = 1500m };
+
+order.Paid += (sender, total) =&gt; Console.WriteLine($"[письмо] оплачен заказ на {total}");
+order.Paid += (sender, total) =&gt; Console.WriteLine($"[склад] зарезервировать товары");
+order.Paid += (_, total) =&gt; Console.WriteLine($"[аналитика] +1 оплата на {total}");
+
+order.Pay();
+
+// order.Paid = null;        // ✘ CS0070: снаружи только += и -=
+// order.Paid.Invoke(…);     // ✘ CS0070: поднять событие может только сам Order</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">списываем 1500
+[письмо] оплачен заказ на 1500
+[склад] зарезервировать товары
+[аналитика] +1 оплата на 1500</code></pre>
+    </div>
+    <p>Три вещи, которые здесь стоит проговорить явно:</p>
+    <ul>
+      <li><strong>Параметры <code>(sender, total)</code> объявлены в самой лямбде</strong>, а значения им
+        передаёт <code>Invoke</code> в момент события. <code>sender</code> — это <code>this</code>, то есть сам
+        заказ: в обработчике его можно проверить через <code>if (sender is Order o)</code>.</li>
+      <li><strong><code>?.Invoke</code> вместо <code>Invoke</code></strong> — потому что поле-делегат равно
+        <code>null</code>, пока нет ни одного подписчика: без <code>?</code> был бы
+        <code>NullReferenceException</code> на первом же вызове.</li>
+      <li><strong>Порядок вызовов = порядок подписки</strong>, но полагаться на это нельзя: подписчики — чужая
+        зона ответственности (в книге «Паттерны в .NET», глава 8, это отдельная ловушка).</li>
+    </ul>
+    <p>Второй параметр вовсе не обязан быть <code>decimal</code>: если данных несколько, берут свой класс или
+      <code>record</code> и <code>EventHandler&lt;OrderPaid&gt;</code>. Но помните: тип <code>T</code> в
+      <code>EventHandler&lt;T&gt;</code> по соглашению наследуют от <code>EventArgs</code> только в старом коде —
+      современный .NET это не требует.</p>
+    <div class="box note">
+      <span class="t"><code>event</code> против списка обработчиков за интерфейсом</span>
+      <p>Событие удобно внутри процесса: оно синхронное, дёшевое и не требует DI. Но у него нет
+        <code>async</code>, его нельзя получить из контейнера и трудно подменить в тесте. Поэтому в прикладном
+        коде чаще пишут <code>IEnumerable&lt;IHandler&gt;</code> и регистрируют обработчики в DI —
+        сравнение и примеры: «Паттерны в .NET», глава 8.</p>
+    </div>
+
+    <h2>Лямбда, локальная функция или обычный метод</h2>
+    <p>Одно и то же поведение в C# можно записать четырьмя способами. Разница не «в стиле», а в том, что
+      сгенерирует компилятор:</p>
+    <table>
+      <thead><tr><th>Форма</th><th>Как выглядит</th><th>Когда брать</th></tr></thead>
+      <tbody>
+        <tr><td>Обычный метод</td><td><code>order.Paid += OnPaid;</code></td><td>Подписка, которую потом
+          снимают; нужен читаемый стек в исключении; метод нужен в тестах</td></tr>
+        <tr><td>Лямбда</td><td><code>nums.Where(n =&gt; n &gt; 0)</code></td><td>Короткая логика «здесь и
+          сейчас», LINQ, подписки без отписки</td></tr>
+        <tr><td>Локальная функция</td><td><code>int Twice(int x) =&gt; x * 2;</code> внутри метода</td>
+          <td>Нужно имя (рекурсия) или <code>ref</code>/<code>out</code>/<code>Span</code> — в лямбду такое не
+          передать</td></tr>
+        <tr><td><code>static</code>-лямбда</td><td><code>static x =&gt; x * 2</code></td><td>Захват запрещён
+          намеренно: меньше объектов в куче, компилятор проверит за вас</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static int SumPositive(List&lt;int&gt; nums)
+{
+    int total = 0;
+
+    void Add(int n) =&gt; total += n;        // локальная функция: тоже захватывает total
+
+    foreach (var n in nums)
+        if (n &gt; 0) Add(n);
+
+    return total;
+}
+
+Console.WriteLine(SumPositive(new List&lt;int&gt; { -2, 5, 0, 7 }));   // 12</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">12</code></pre>
+    </div>
+    <p>Локальная функция дешевле лямбды в одном важном случае: если её <em>не</em> превращать в делегат, она
+      остаётся обычным методом (иногда даже без замыкания — захваченные переменные передаются параметрами).
+      Как только вы написали <code>Action a = Add;</code> — создаётся делегат, и разница исчезает.</p>
+
+    <h2>Где это уже работает в .NET</h2>
+    <table>
+      <thead><tr><th>Место</th><th>Делегат в сигнатуре</th><th>Что это даёт</th></tr></thead>
+      <tbody>
+        <tr><td>LINQ: <code>Where</code>, <code>Select</code>, <code>OrderBy</code></td>
+          <td><code>Func&lt;T,bool&gt;</code>, <code>Func&lt;T,TResult&gt;</code>, <code>Func&lt;T,TKey&gt;</code></td>
+          <td>Поведение передаётся в метод, а не наследуется классом</td></tr>
+        <tr><td><code>List&lt;T&gt;.ForEach</code>, <code>Array.Sort(arr, cmp)</code></td>
+          <td><code>Action&lt;T&gt;</code>, <code>Comparison&lt;T&gt;</code></td><td>Свой обход и своё сравнение</td></tr>
+        <tr><td>DI-фабрика <code>AddScoped&lt;T&gt;(sp =&gt; …)</code></td>
+          <td><code>Func&lt;IServiceProvider,T&gt;</code></td><td>Контейнер вызывает ваш код, когда нужно создать
+          объект (глава 15 .NET-раздела)</td></tr>
+        <tr><td><code>CancellationToken.Register(Action)</code></td><td><code>Action</code></td>
+          <td>«Сделай это, если отменят» — без наследования</td></tr>
+        <tr><td><code>FileSystemWatcher.Changed</code>, <code>AppDomain.UnhandledException</code></td>
+          <td><code>FileSystemEventHandler</code>, <code>UnhandledExceptionEventHandler</code></td>
+          <td>События платформы: подписка вместо опроса</td></tr>
+        <tr><td><code>INotifyPropertyChanged.PropertyChanged</code></td>
+          <td><code>PropertyChangedEventHandler</code></td><td>Модель сообщает об изменении, UI перерисовывается</td></tr>
+        <tr><td>ASP.NET Core: <code>app.MapGet(…)</code>, middleware</td>
+          <td><code>RequestDelegate</code>, <code>Func&lt;HttpContext,Task&gt;</code></td>
+          <td>Конвейер обработки запроса — цепочка делегатов</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Ловушки, на которых ломается реальный код</h2>
+    <table>
+      <thead><tr><th>Ловушка</th><th>Что происходит</th><th>Как не попасть</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Забытая отписка</strong></td><td>Издатель живёт дольше подписчика и держит его через
+          <code>Target</code> делегата — утечка</td><td>Отписываться в <code>Dispose</code>, а делегат для
+          этого хранить в поле</td></tr>
+        <tr><td><strong><code>async void</code></strong></td><td>Обработчик события не может вернуть
+          <code>Task</code>: исключение никто не ждёт и оно роняет процесс</td><td><code>try/catch</code>
+          внутри обработчика, ошибку — в лог</td></tr>
+        <tr><td><strong>Повторная подписка</strong></td><td>Подписались в методе, который вызывается несколько
+          раз, — обработчик сработает N раз</td><td>Подписка в конструкторе, отписка в
+          <code>Dispose</code>, а не «по ходу дела»</td></tr>
+        <tr><td><strong><code>-=</code> новой лямбдой</strong></td><td>Ничего не снимается: это другой
+          объект-делегат</td><td>Хранить делегат в поле (пример ниже)</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class PriceView : IDisposable
+{
+    private readonly PriceCache _cache;                      // singleton: живёт всё приложение
+    private readonly EventHandler&lt;decimal&gt; _onInvalidated;   // ← храним, чтобы было чем отписаться
+
+    public PriceView(PriceCache cache)
+    {
+        _cache = cache;
+        _onInvalidated = (_, price) =&gt; Render(price);
+        _cache.Invalidated += _onInvalidated;
+    }
+
+    public void Dispose() =&gt; _cache.Invalidated -= _onInvalidated;   // без этой строки PriceView жив вечно
+    private void Render(decimal price) { /* перерисовать цену */ }
+}</code></pre>
+    </div>
+    <p>Так же выглядит и «правильный» <code>async</code>-обработчик события — исключение остаётся внутри:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">order.Paid += async (_, total) =&gt;          // это async void: никто не ждёт этот Task
+{
+    try
+    {
+        await email.SendReceiptAsync(total);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "письмо по заказу не ушло");   // иначе ошибка уронит процесс
+    }
+};</code></pre>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Делегат — тип, значением которого является метод.</strong> <code>Func&lt;…&gt;</code> и
+          <code>Action&lt;…&gt;</code> покрывают почти всё, свой делегат нужен редко.</li>
+        <li><strong>Лямбда — метод без имени</strong>: параметры объявлены в ней самой, типы берутся из целевого
+          делегата, а значения приходят в момент вызова (<code>Invoke</code>), а не при подписке.</li>
+        <li><strong>Захват переменной = объект в куче.</strong> Переменная цикла <code>for</code> одна на все
+          итерации — копируйте её внутрь тела; <code>static</code>-лямбда запрещает захват.</li>
+        <li><strong><code>+=</code> — это мультикаст:</strong> возвращается результат последнего делегата, а
+          исключение в середине списка обрывает остальные вызовы.</li>
+        <li><strong><code>event</code> = делегат + инкапсуляция:</strong> снаружи только <code>+=</code> и
+          <code>-=</code>, поднимает событие только владелец и почти всегда через <code>?.Invoke</code>.</li>
+        <li><strong>Отписывайтесь</strong> и держите делегат в поле, если подписка снимается; для
+          <code>async</code>-реакций берите список обработчиков за интерфейсом, а не <code>event</code>
+          («Паттерны в .NET», глава 8).</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs07-ienumerable.html">← <span class="sp">Глава 7. IEnumerable, yield и IAsyncEnumerable</span></a>
+      <a href="cs09-class-modifiers.html"><span class="sp">Глава 9. Модификаторы типов: sealed, abstract, static, record</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
+
+
