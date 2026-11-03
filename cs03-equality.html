@@ -241,37 +241,95 @@ Console.WriteLine(ReferenceEquals(a, b)); // False — это два разны�
       <code>new Order { Id = id, Total = 100 }</code>. <code>init</code> разрешает присвоить свойство
       <em>только</em> в конструкторе, в инициализаторе и в <code>with</code>:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">public sealed class Order
+      <pre><code class="language-csharp">public sealed class Order                          // заказ классом, а не записью: своего конструктора нет
 {
-    public required Guid Id { get; init; }     // обязательно задать, потом нельзя менять
-    public decimal Total { get; init; }        // можно не задавать → останется 0
+    public Guid Id { get; init; }                  // можно задать только при создании
+    public decimal Total { get; init; }            // и это тоже
 }
 
-var o = new Order { Id = id, Total = 100 };    // ✔ создание через инициализатор
-// o.Total = 200;                              // ✘ ошибка компиляции: свойство только init</code></pre>
+var id = Guid.NewGuid();
+
+var o = new Order { Id = id, Total = 100 };        // ✔ инициализатор — разрешённое место
+// o.Total = 200;                                  // ✘ CS8852: свойство объявлено init
+
+var forgotten = new Order();                       // ✔ компилируется! Никто не помешал забыть Id
+Console.WriteLine(forgotten.Id);                   // 00000000-0000-0000-0000-000000000000
+Console.WriteLine(forgotten.Total);                // 0</code></pre>
     </div>
+    <p>Обратите внимание на последние две строки: <code>init</code> отвечает на вопрос «<em>когда</em> можно
+      задать», но не на вопрос «<em>обязательно ли</em>». Объект собрался без <code>Id</code> — и это тихая
+      ошибка: вместо идентификатора <code>Guid.Empty</code>. Ровно эту дырку закрывает <code>required</code>.</p>
     <p><strong>Чем <code>init</code> лучше <code>set</code>:</strong> объект нельзя случайно изменить после
       создания — ни в методе, ни в другом потоке. Именно поэтому <code>with</code> имеет смысл: «изменить»
       можно только создав копию.</p>
 
     <h2><code>required</code>: компилятор проверит, что поле задано</h2>
-    <p>Без <code>required</code> свойство можно забыть — и получить <code>null</code> или <code>0</code> в
-      самом неудобном месте. <code>required</code> превращает это в ошибку компиляции:</p>
+    <p><code>required</code> отвечает на другой вопрос: <em>обязательно ли</em> задать член. Объявление
+      показано целиком, чтобы не приходилось листать назад и догадываться, откуда взялось «требуется
+      <code>Id</code>»:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var bad = new Order { Total = 100 };              // ✘ CS9035: требуется Id
-var ok  = new Order { Id = id, Total = 100 };     // ✔
+      <pre><code class="language-csharp">public sealed class Order
+{
+    public required Guid Id { get; init; }         // required + init: задать обязательно, менять нельзя
+    public decimal Total { get; init; }            // не required: можно забыть → 0
+}
 
-// в позиционном record required не нужен: параметры конструктора уже обязательны
-public record Order(Guid Id, decimal Total);</code></pre>
+var id = Guid.NewGuid();
+
+var bad = new Order { Total = 100 };               // ✘ компилятор: Id не задан
+var ok  = new Order { Id = id, Total = 100 };      // ✔</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что скажет компилятор на строку с <code>bad</code> — программа даже не запустится</p>
+      <pre><code class="language-text">error CS9035: Required member 'Order.Id' must be set in the object initializer
+or attribute constructor.
+
+(русская локаль IDE: «Обязательный член "Order.Id" должен быть задан в инициализаторе
+ объекта или в конструкторе с атрибутом»)</code></pre>
+    </div>
+    <p>Проверка живёт <strong>в компиляторе</strong>: ошибка появляется на сборке, а не в рантайме, и
+      «забыть» поле физически нельзя. Три следствия, которые стоит проговорить:</p>
+    <ul>
+      <li><strong><code>required</code> — не про «когда», а про «обязательно».</strong> Он ставится и с
+        <code>init</code>, и с <code>set</code>, и на обычное поле; гарантия одна — объект нельзя создать,
+        не задав член.</li>
+      <li><strong>Конструктор может взять обязательность на себя:</strong> его помечают
+        <code>[SetsRequiredMembers]</code>, и тогда инициализатор не нужен.</li>
+      <li><strong>Появился в C# 11 (.NET 7).</strong> До этого тот же эффект получали через
+        <code>null!</code>, <code>default!</code> и проверки в конструкторе.</li>
+    </ul>
+    <p>Если обязательное поле задаёт сам конструктор, его помечают атрибутом
+      <code>[SetsRequiredMembers]</code> (пространство имён <code>System.Diagnostics.CodeAnalysis</code>) —
+      компилятор верит конструктору и инициализатор не требует:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Order
+{
+    public required Guid Id { get; init; }
+
+    [SetsRequiredMembers]
+    public Order(Guid id) =&gt; Id = id;               // конструктор сам задаёт обязательное поле
+}
+
+var a = new Order(id);                              // ✔ ошибки нет
+var b = new Order();                                // ✘ CS7036: нет аргумента для параметра "id"</code></pre>
+    </div>
+    <p><strong>Позиционному <code>record</code> <code>required</code> не нужен</strong>: параметры его
+      конструктора обязательны по определению, объект без них просто не собрать. Если тот же заказ объявить
+      записью, получится ровно то же ограничение, но из конструктора:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public record Order(Guid Id, decimal Total);        // required не пишут — конструктор уже обязательный
+
+var r = new Order(id, 100m);                        // ✔
+// var e = new Order();                             // ✘ CS7036: нет аргумента для параметра "Id"</code></pre>
     </div>
     <table>
       <tr><th>Модификатор</th><th>Когда можно задать</th><th>Что гарантирует</th></tr>
-      <tr><td><code>set</code></td><td>всегда</td><td>ничего — можно менять в любой момент (и сломать
-        инварианты)</td></tr>
-      <tr><td><code>init</code></td><td>при создании, в конструкторе и в <code>with</code></td>
-        <td>после создания значение не изменится</td></tr>
-      <tr><td><code>required</code></td><td>вместе с <code>init</code> (или <code>set</code>)</td>
-        <td>компилятор не даст создать объект, не задав поле</td></tr>
+      <tr><td><code>set</code></td><td>в любой момент</td><td>ничего — можно менять когда угодно и сломать
+        инварианты</td></tr>
+      <tr><td><code>init</code></td><td>в конструкторе, в инициализаторе <code>new Order { … }</code> и в
+        <code>with</code></td><td>после создания значение не изменится</td></tr>
+      <tr><td><code>required</code></td><td>не про «когда»: ставится вместе с <code>init</code> или
+        <code>set</code></td><td>объект нельзя создать, не задав член, — ошибка компиляции CS9035</td></tr>
     </table>
 
     <h2><code>ToString</code>: третья функция того же набора</h2>

@@ -236,7 +236,10 @@ var c = a with { Total = 200m };        // копия с изменением �
 {
     public required int Id { get; init; }        // обязательно указать
     public required string Name { get; init; }
-}</code></pre>
+}
+
+var dto = new UserDto { Id = 1, Name = "Аня" };   // ✔
+// var bad = new UserDto { Id = 1 };              // ✘ CS9035: Name не задан</code></pre>
       </div>
     </div>
 
