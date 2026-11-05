@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 12 · LinkedList: связный список</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs13-ienumerable.html"><span class="sp">Глава 13. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть II · Коллекции и перечисления</div>
+    <h1>Глава 12. LinkedList: связный список</h1>
+    <p class="sublead">Коллекция, которую почти не берут в руки, но почти всегда спрашивают: как устроен связный
+      список, что даёт <code>LinkedListNode&lt;T&gt;</code>, почему O(1) на вставке так редко помогает, где
+      <code>LinkedList</code> действительно незаменим (LRU-кэш) и чем он отличается от <code>List</code>,
+      <code>Queue</code> и <code>Stack</code>.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>До этого вся часть II работала с одной идеей: <strong>элементы лежат в массиве подряд</strong>. Так
+      устроены <code>List&lt;T&gt;</code>, <code>Queue&lt;T&gt;</code>, <code>Stack&lt;T&gt;</code>,
+      <code>Dictionary</code> (массив корзин) и даже куча внутри <code>PriorityQueue</code>.
+      <code>LinkedList&lt;T&gt;</code> — исключение: элементов в массиве нет вообще. Есть отдельные объекты-узлы,
+      связанные ссылками, и это меняет всё: доступ, вставку, память, скорость перебора.</p>
+
+    <h2>Два способа хранить список</h2>
+    <table>
+      <thead><tr><th></th><th><code>List&lt;T&gt;</code></th><th><code>LinkedList&lt;T&gt;</code></th></tr></thead>
+      <tbody>
+        <tr><td>Внутри</td><td>один массив <code>T[]</code> (+ запас ёмкости)</td>
+          <td>двусвязный список: у каждого элемента свой объект-узел со ссылками на соседей</td></tr>
+        <tr><td>Доступ по номеру</td><td>O(1): <code>list[5]</code></td><td>нет индексатора вообще; «пятый
+          элемент» — это проход с начала</td></tr>
+        <tr><td>Добавить в конец</td><td>амортизированно O(1), но иногда копирование всего массива</td>
+          <td>O(1) всегда: новый узел и две ссылки</td></tr>
+        <tr><td>Вставить в середину</td><td>O(n) — сдвиг хвоста</td><td>O(1), <em>если узел уже найден</em>;
+          поиск узла — O(n)</td></tr>
+        <tr><td>Память</td><td>4 байта на <code>int</code> в массиве</td><td>отдельный объект на элемент:
+          заголовок + значение + две ссылки</td></tr>
+        <tr><td>Перебор</td><td>очень быстрый: элементы подряд, процессор читает их пачками</td>
+          <td>медленнее: каждый переход по ссылке — потенциальный промах кэша (глава 1)</td></tr>
+        <tr><td>Когда брать</td><td>по умолчанию, почти всегда</td><td>редко: вставки и удаления по уже
+          найденному узлу</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Аналогия, которая помогает на собеседовании</span>
+      <p><code>List</code> — это полка с пронумерованными ячейками: чтобы поставить предмет в середину, надо
+        сдвинуть всё, что правее, зато «дай мне пятый» — мгновенно.
+        <code>LinkedList</code> — это цепочка вагонов: чтобы попасть в середину, надо пройти от головы, зато
+        прицепить новый вагон между двумя уже найденными — две операции, без сдвигов.</p>
+    </div>
+    <h2>Узлы: <code>LinkedListNode&lt;T&gt;</code></h2>
+    <p>Главное отличие от всех остальных коллекций части II: <strong>узел — это объект, который можно держать
+      в руках</strong>. Методы возвращают не «позицию» или «индекс», а сам узел, и пока вы держите узел, вы
+      можете вставлять и удалять рядом с ним за O(1), не ища ничего заново.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var list = new LinkedList&lt;string&gt;();
+list.AddLast("b");
+list.AddFirst("a");
+list.AddLast("c");
+
+var nodeB = list.Find("b");        // O(n): проходит по списку и возвращает узел
+list.AddAfter(nodeB!, "b2");       // O(1): узел уже известен
+
+Console.WriteLine(string.Join(",", list));
+Console.WriteLine("Count=" + list.Count);
+Console.WriteLine("First=" + list.First!.Value + " Last=" + list.Last!.Value);
+Console.WriteLine("nodeB.Value=" + nodeB!.Value
+    + " Next=" + nodeB.Next!.Value + " Prev=" + nodeB.Previous!.Value);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">a,b,b2,c
+Count=4
+First=a Last=c
+nodeB.Value=b Next=b2 Prev=a</code></pre>
+    </div>
+    <p>У узла четыре члена: <code>Value</code> (данные), <code>Next</code> и <code>Previous</code> (соседи или
+      <code>null</code> на концах) и <code>List</code> (какому списку принадлежит, или <code>null</code>, если
+      узел удалён). Ссылки <code>Next</code>/<code>Previous</code> — это и есть весь список: пройти от
+      <code>list.First</code> по <code>Next</code> до <code>null</code> — значит перебрать всё.</p>
+    <table>
+      <thead><tr><th>Член</th><th>Что делает</th><th>Стоимость</th></tr></thead>
+      <tbody>
+        <tr><td><code>AddFirst(v)</code>, <code>AddLast(v)</code></td><td>Добавить в начало / в конец</td>
+          <td>O(1)</td></tr>
+        <tr><td><code>AddBefore(node, v)</code>, <code>AddAfter(node, v)</code></td><td>Добавить рядом с
+          узлом</td><td>O(1)</td></tr>
+        <tr><td><code>RemoveFirst()</code>, <code>RemoveLast()</code></td><td>Убрать крайний</td><td>O(1)</td></tr>
+        <tr><td><code>Remove(node)</code></td><td>Убрать узел</td><td>O(1)</td></tr>
+        <tr><td><code>Remove(value)</code></td><td>Найти по значению и убрать</td><td>O(n)</td></tr>
+        <tr><td><code>Find(value)</code>, <code>FindLast(value)</code></td><td>Найти узел (сравнение через
+          <code>EqualityComparer&lt;T&gt;.Default</code>, глава 3)</td><td>O(n)</td></tr>
+        <tr><td><code>Contains(value)</code></td><td>Есть ли значение</td><td>O(n)</td></tr>
+        <tr><td><code>First</code>, <code>Last</code>, <code>Count</code></td><td>Голова, хвост,
+          длина</td><td>O(1)</td></tr>
+        <tr><td><code>CopyTo(array, index)</code>, <code>Clear()</code></td><td>Скопировать в массив /
+          очистить</td><td>O(n) / O(n)</td></tr>
+      </tbody>
+    </table>
+    <p>Отдельно стоит запомнить: <code>ICollection&lt;T&gt;.Add</code> у <code>LinkedList</code> — это
+      <code>AddLast</code> (проверено: <code>asCollection.Add("c")</code> в <code>{"a","b"}</code> даёт
+      <code>a,b,c</code>), поэтому он спокойно работает в коде, написанном под интерфейс.</p>
+
+    <h2>O(1) — только когда узел уже в руках</h2>
+    <p>Это главное недопонимание про <code>LinkedList</code>. «Вставка O(1)» относится к операции <em>по
+      узлу</em>: список не ищет ничего, он просто переставляет две ссылки. Вопрос всегда в одном — откуда
+      берётся узел. Если его надо найти по значению, к O(1) добавляется O(n) на поиск, и вся выгода
+      исчезает:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var list = new LinkedList&lt;string&gt;(new[] { "a", "b", "c" });
+
+// «удалить значение b» — это ДВА шага: найти (O(n)) и удалить (O(1))
+Console.WriteLine(list.Remove("b"));      // True
+Console.WriteLine(list.Remove("нет"));    // False — и это не ошибка
+
+// а вот если узел сохранён заранее, повторные операции бесплатны
+var node = list.Find("c");
+Console.WriteLine(node!.List is not null ? "узел в списке" : "узел свободен");</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True
+False
+узел в списке</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Что делаем</th><th>Стоимость</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td><code>list.AddLast(v)</code></td><td>O(1)</td><td>Голова и хвост известны всегда</td></tr>
+        <tr><td><code>list.Remove(node)</code> при готовом узле</td><td>O(1)</td><td>Нужно переписать две
+          ссылки у соседей</td></tr>
+        <tr><td><code>list.Remove(value)</code></td><td>O(n)</td><td>Сначала <code>Find</code>, потом удаление
+          по узлу</td></tr>
+        <tr><td><code>list.Find(v)</code>, <code>Contains(v)</code>, <code>ElementAt(i)</code></td><td>O(n)</td>
+          <td>Только проходом: массива с индексами нет</td></tr>
+      </tbody>
+    </table>
+    <p>Отсюда практическое правило: <strong><code>LinkedList</code> имеет смысл, когда узлы хранятся отдельно —
+      в словаре, в поле класса, в другом списке</strong>, и вы возвращаетесь к ним снова и снова. Ровно так
+      устроен LRU-кэш ниже.</p>
+
+    <h2>Узел из прошлого: что будет после удаления</h2>
+    <p>Удалённый узел не «умирает» — объект жив, если вы держите на него ссылку, но из списка он выпадает:
+      <code>List</code> становится <code>null</code>, а попытка использовать его в операциях списка даёт
+      исключение (проверено на .NET 8):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var list = new LinkedList&lt;string&gt;(new[] { "a", "b", "c" });
+var nodeB = list.Find("b")!;
+list.Remove(nodeB);
+
+Console.WriteLine("nodeB.List is null: " + (nodeB.List is null));
+
+try { list.AddBefore(nodeB, "x"); }
+catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }
+
+try { new LinkedList&lt;string&gt;().RemoveFirst(); }
+catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">nodeB.List is null: True
+InvalidOperationException: The LinkedList node does not belong to current LinkedList.
+InvalidOperationException: The LinkedList is empty.</code></pre>
+    </div>
+    <p>То же исключение — если попытаться подставить узел из <em>другого</em> списка. Проверка дешёвая:
+      <code>node.List == list</code>, и её полезно делать в коде, который держит узлы «между вызовами».</p>
+
+    <h2>Чего у него нет</h2>
+    <ul>
+      <li><strong>Индексатора.</strong> <code>list[0]</code> не компилируется:
+        <code>error CS0021: Cannot apply indexing with [] to an expression of type 'LinkedList&lt;string&gt;'</code>.</li>
+      <li><strong>Быстрого «дай i-й элемент».</strong> <code>list.ElementAt(2)</code> — это LINQ, и он идёт
+        от головы: O(n). Цикл вида <code>for (int i = 0; i &lt; list.Count; i++) list.ElementAt(i)</code> —
+        O(n²).</li>
+      <li><strong>Обратного перебора через <code>foreach</code>.</strong> Есть только вперёд; назад — вручную:
+        от <code>list.Last</code> по <code>Previous</code>.</li>
+      <li><strong>Изменений во время <code>foreach</code>.</strong> Даже <code>AddLast</code> в теле цикла
+        рвёт перебор: <code>InvalidOperationException: Collection was modified after the enumerator was
+        instantiated.</code> Нужно добавлять — собирайте узлы и меняйте список после цикла.</li>
+      <li><strong>Потокобезопасности.</strong> Как и <code>List</code>, <code>LinkedList</code> не защищён:
+        одновременное добавление из двух потоков может порвать ссылки и «потерять» часть элементов без
+        единого исключения.</li>
+    </ul>
+
+    <h2>Сколько это стоит: замер</h2>
+    <p>Цифры важнее слов, поэтому — один и тот же миллион <code>int</code> в двух коллекциях:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">const int N = 1_000_000;
+
+// память считаем вместе с созданием самой коллекции — иначе сравнение нечестное
+long before = GC.GetAllocatedBytesForCurrentThread();
+var list = new List&lt;int&gt;(N);
+for (int i = 0; i &lt; N; i++) list.Add(i);
+long listBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+before = GC.GetAllocatedBytesForCurrentThread();
+var linked = new LinkedList&lt;int&gt;();
+for (int i = 0; i &lt; N; i++) linked.AddLast(i);
+long linkedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+static long SumList(List&lt;int&gt; xs) { long s = 0; foreach (var x in xs) s += x; return s; }
+static long SumLinked(LinkedList&lt;int&gt; xs) { long s = 0; foreach (var x in xs) s += x; return s; }
+
+SumList(list); SumLinked(linked);              // прогрев: JIT и кэши
+
+var sw = Stopwatch.StartNew();
+SumList(list);
+sw.Stop();
+var listMs = sw.Elapsed.TotalMilliseconds;
+
+sw.Restart();
+SumLinked(linked);
+sw.Stop();
+
+Console.WriteLine($"перебор: List {listMs:F2} ms, LinkedList {sw.Elapsed.TotalMilliseconds:F2} ms");
+Console.WriteLine($"память:  List {listBytes / 1024 / 1024.0:F1} МБ, LinkedList {linkedBytes / 1024 / 1024.0:F1} МБ");</code></pre>
+      <p class="cap">Вывод (net8.0, Release)</p>
+      <pre><code class="language-text">перебор: List 0.85 ms, LinkedList 4.19 ms
+память:  List 3.8 МБ, LinkedList 45.8 МБ</code></pre>
+    </div>
+    <p>Почему перебор медленнее, хотя «просто идём по ссылкам»: элементы <code>List</code> лежат подряд, и
+      процессор читает их пачками из кэша; каждый узел <code>LinkedList</code> — отдельный объект в куче, и
+      переход по <code>Next</code> часто означает промах кэша (глава 1). Почему память в 12 раз больше: на
+      каждый <code>int</code> приходится объект-узел (заголовок + значение + две ссылки) плюс работа для GC.</p>
+    <p>И честная обратная сторона — 20 000 вставок в середину, когда узел уже найден: <code>List</code> ≈ 0,7 с
+      (каждый раз сдвиг половины массива), <code>LinkedList</code> ≈ 1 мс. То есть в «своём» сценарии
+      <code>LinkedList</code> быстрее на три порядка.</p>
+
+    <h2>Где он действительно нужен: LRU-кэш</h2>
+    <p>Классическая задача: кэш фиксированной ёмкости, из которого вылетает то, что дольше всего не
+      использовали (<em>least recently used</em>). Нужны три операции: найти по ключу за ~O(1), сделать запись
+      «самой свежей» и выбросить самую старую — всё без сдвигов. Словарь даёт первую, связный список — две
+      другие, если хранить в словаре не значения, а <strong>узлы</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class LruCache&lt;TKey, TValue&gt; where TKey : notnull
+{
+    private readonly int _capacity;
+    private readonly Dictionary&lt;TKey, LinkedListNode&lt;(TKey Key, TValue Value)&gt;&gt; _map = new();
+    private readonly LinkedList&lt;(TKey Key, TValue Value)&gt; _order = new();   // голова — самый свежий
+
+    public LruCache(int capacity) =&gt; _capacity = capacity;
+
+    public IEnumerable&lt;TKey&gt; Keys =&gt; _order.Select(e =&gt; e.Key);
+
+    public TValue Get(TKey key)
+    {
+        if (!_map.TryGetValue(key, out var node))
+            throw new KeyNotFoundException($"нет ключа {key}");
+
+        _order.Remove(node);        // O(1): узел уже известен, искать не надо
+        _order.AddFirst(node);      // теперь он самый свежий
+        return node.Value.Value;
+    }
+
+    public void Set(TKey key, TValue value)
+    {
+        if (_map.TryGetValue(key, out var node))
+        {
+            _order.Remove(node);
+            _map.Remove(key);
+        }
+        else if (_map.Count == _capacity)
+        {
+            var oldest = _order.Last!;              // хвост — то, что дольше всего не трогали
+            _map.Remove(oldest.Value.Key);
+            _order.RemoveLast();
+        }
+
+        var fresh = new LinkedListNode&lt;(TKey, TValue)&gt;((key, value));
+        _order.AddFirst(fresh);
+        _map[key] = fresh;
+    }
+}</code></pre>
+      <p class="cap">Проверка: ёмкость 2, «a» и «b», затем читаем «a», затем добавляем «c»</p>
+      <pre><code class="language-text">ключи: b,a
+ключи: c,a
+b в кэше: False, a в кэше: True</code></pre>
+    </div>
+    <p>Разбор: после <code>Set("a")</code> и <code>Set("b")</code> свежий — «b», он в голове. <code>Get("a")</code>
+      переставил «a» в голову, поэтому при добавлении «c» места не хватило именно «b» — он оказался в хвосте.
+      Все операции — O(1), и всё это держится на одном свойстве: <strong>словарь хранит узлы, а не
+      значения</strong>. Если хранить значения и искать «а который из них самый старый», каждый
+      <code>Get</code> станет O(n) и смысл пропадёт.</p>
+
+    <h2>Две задачи, которые любят давать на собеседовании</h2>
+    <p><strong>1. Найти середину за один проход.</strong> Соблазн — узнать <code>Count</code> и пройти
+      <code>Count / 2</code> шагов, но это два прохода. Классика — «медленный и быстрый» указатели:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var nums = new LinkedList&lt;int&gt;(new[] { 1, 2, 3, 4, 5, 6 });
+Console.WriteLine("середина: " + Middle(nums));
+
+static int Middle(LinkedList&lt;int&gt; list)
+{
+    var slow = list.First!;
+    var fast = list.First!;
+
+    while (fast.Next is not null &amp;&amp; fast.Next.Next is not null)
+    {
+        slow = slow.Next!;          // шаг 1
+        fast = fast.Next.Next!;     // шаг 2
+    }
+
+    return slow.Value;
+}</code></pre>
+      <p class="cap">Вывод (у чётного списка берётся левая середина)</p>
+      <pre><code class="language-text">середина: 3</code></pre>
+    </div>
+    <p><strong>2. Развернуть список.</strong> Здесь видно главное преимущество: узлы можно переставлять, не
+      создавая новых объектов — ни одной аллокации на весь разворот:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var list = new LinkedList&lt;int&gt;(new[] { 1, 2, 3, 4 });
+Reverse(list);
+Console.WriteLine(string.Join(",", list));
+
+static void Reverse(LinkedList&lt;int&gt; list)
+{
+    var node = list.First;
+    while (node is not null)
+    {
+        var next = node.Next;   // запомнили, иначе потеряем хвост
+        list.Remove(node);      // O(1): узел уже в руках
+        list.AddFirst(node);    // тот же самый узел, без new
+        node = next;
+    }
+}</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">4,3,2,1</code></pre>
+    </div>
+
+    <h2>Что спрашивают на собеседовании</h2>
+    <table>
+      <thead><tr><th>Вопрос</th><th>Короткий ответ</th></tr></thead>
+      <tbody>
+        <tr><td>Чем отличается от <code>List&lt;T&gt;</code>?</td><td>Устройством: массив против узлов со
+          ссылками. У <code>List</code> доступ по индексу O(1) и быстрый перебор; у <code>LinkedList</code> —
+          O(1) на вставку/удаление <em>по узлу</em>, но поиск O(n), индекса нет, память и перебор хуже.</td></tr>
+        <tr><td>Когда выберете <code>LinkedList</code>?</td><td>Когда узлы хранятся отдельно (в словаре, в
+          поле) и операции идут по ним: LRU-кэш, очередь с удалением из середины, подписки с отпиской по
+          узлу.</td></tr>
+        <tr><td>Почему его почти не используют?</td><td>В обычных задачах нужен поиск или индекс — а это O(n).
+          Плюс в 12 раз больше памяти и в 5 раз медленнее перебор из-за локальности кэша.</td></tr>
+        <tr><td>Сложность операций?</td><td><code>AddFirst</code>/<code>AddLast</code>/<code>Remove(node)</code>
+          — O(1); <code>Find</code>/<code>Contains</code>/<code>Remove(value)</code>/<code>ElementAt</code> —
+          O(n).</td></tr>
+        <tr><td>Как найти середину за один проход?</td><td>Два указателя: один идёт на шаг, второй на два;
+          когда быстрый упрётся в конец, медленный — в середине.</td></tr>
+        <tr><td>Чем отличается от <code>Queue</code>/<code>Stack</code>?</td><td>Те внутри — массив, работать
+          умеют только с краями (зато O(1) и без объектов-узлов). <code>LinkedList</code> даёт доступ к любому
+          узлу, если вы его сохранили.</td></tr>
+        <tr><td>Можно ли сделать из него очередь?</td><td>Да: <code>AddLast</code> + <code>RemoveFirst</code>.
+          Но <code>Queue&lt;T&gt;</code> проще, экономнее и быстрее (глава 11).</td></tr>
+        <tr><td>Потокобезопасен?</td><td>Нет. Как и <code>List</code>: нужен <code>lock</code> или другая
+          коллекция.</td></tr>
+        <tr><td>Зачем в словаре хранят <code>LinkedListNode</code>?</td><td>Чтобы получать узел за ~O(1) и
+          дальше работать с ним за O(1) — на этом стоит LRU-кэш.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong>Ждать от него скорости на поиске.</strong> <code>Find</code>, <code>Contains</code>,
+        <code>Remove(value)</code> — O(n), как у <code>List</code>, только с большей константой.</li>
+      <li><strong>Пытаться индексировать.</strong> <code>list[i]</code> не компилируется (<code>CS0021</code>),
+        а <code>ElementAt(i)</code> в цикле превращает обход в O(n²).</li>
+      <li><strong>Держать узел после удаления.</strong> <code>node.List</code> станет <code>null</code>, а
+        операции с этим узлом бросят <code>InvalidOperationException: The LinkedList node does not belong to
+        current LinkedList.</code> Проверяйте <code>node.List == list</code>.</li>
+      <li><strong>Менять список внутри <code>foreach</code></strong> — <code>InvalidOperationException:
+        Collection was modified after the enumerator was instantiated.</code></li>
+      <li><strong><code>RemoveFirst</code>/<code>RemoveLast</code> на пустом списке</strong> —
+        <code>InvalidOperationException: The LinkedList is empty.</code> В цикле сначала проверяйте
+        <code>list.First is not null</code>.</li>
+      <li><strong>Забыть про память.</strong> Каждый элемент — объект: миллион <code>int</code> даёт ~46 МБ
+        вместо 3,8 МБ и лишнюю работу сборщику мусора.</li>
+      <li><strong>Использовать его «по умолчанию».</strong> Нужен список — нужен <code>List&lt;T&gt;</code>;
+        <code>LinkedList</code> — инструмент под конкретную задачу, а не «более умный список».</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Связный список:</strong> элементов в массиве нет, каждый элемент — объект-узел со ссылками
+          <code>Next</code>/<code>Previous</code>. Индекса нет вообще.</li>
+        <li><strong>O(1) — только по узлу:</strong> <code>AddFirst</code>/<code>AddLast</code>/
+          <code>AddBefore</code>/<code>AddAfter</code>/<code>Remove(node)</code>. Поиск и
+          <code>Remove(value)</code> — O(n).</li>
+        <li><strong>Узел — это <code>LinkedListNode&lt;T&gt;</code>:</strong> <code>Value</code>,
+          <code>Next</code>, <code>Previous</code>, <code>List</code>. Удалённый узел выпадает из списка
+          (<code>List == null</code>), и операции с ним бросают исключение.</li>
+        <li><strong>Цена:</strong> перебор ~в 5 раз медленнее <code>List</code> (локальность кэша), память ~в
+          12 раз больше (по объекту на элемент).</li>
+        <li><strong>Его сценарий — LRU-кэш:</strong>
+          <code>Dictionary&lt;TKey, LinkedListNode&lt;TValue&gt;&gt;</code> + <code>LinkedList</code>, где голова
+          — самый свежий элемент, хвост — кандидат на вылет.</li>
+        <li><strong>Сравнение:</strong> <code>List</code> — по умолчанию; <code>Queue</code>/<code>Stack</code> —
+          только края на массиве (глава 11); <code>LinkedList</code> — вставки и удаления по уже известному
+          узлу.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs11-queues-stacks.html">← <span class="sp">Глава 11. Очереди и стеки: Queue, Stack, PriorityQueue</span></a>
+      <a href="cs13-ienumerable.html"><span class="sp">Глава 13. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>

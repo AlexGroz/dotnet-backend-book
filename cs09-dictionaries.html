@@ -515,8 +515,9 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
 
     <p>Куда смотреть дальше: общий разбор «что хорошо / что дорого» и выбор интерфейса для сигнатуры
       (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — глава 6;
-      множества — <strong>глава 10</strong>; очереди и стеки — <strong>глава 11</strong>, и там же, в конце, —
-      сводная шпаргалка «операция → коллекция» по всей части II.</p>
+      множества — <strong>глава 10</strong>; очереди и стеки — <strong>глава 11</strong>; связный список —
+      <strong>глава 12</strong>, и там же, в конце главы 11, — сводная шпаргалка «операция → коллекция» по всей
+      части II.</p>
 
 
     <h2>Чего не делать</h2>
@@ -530,7 +531,7 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
       <li><strong>Не звать <code>ToDictionary</code> на данных с дублями</strong> — <code>ToLookup</code> или
         <code>GroupBy</code>.</li>
       <li><strong>Не менять коллекцию во время <code>foreach</code></strong> —
-        <code>InvalidOperationException</code> (глава 12).</li>
+        <code>InvalidOperationException</code> (глава 13).</li>
       <li><strong>Не передавать <code>Dictionary</code> между потоками без синхронизации.</strong></li>
     </ul>
 

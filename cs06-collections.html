@@ -235,7 +235,7 @@ the usage. Try specifying the type arguments explicitly.</code></pre>
     <p>Это только те ограничения, которые нужны, чтобы читать код. Все виды <code>where</code>,
       <code>T?</code> и <code>notnull</code>, вариантность <code>in</code>/<code>out</code> и generic math —
       в <strong>главе 7</strong>; сортировка и <code>IComparable&lt;T&gt;</code> — в главе 8; рефлексия, которой
-      <code>Activator</code> ищет конструктор, — в главе 19.</p>
+      <code>Activator</code> ищет конструктор, — в главе 20.</p>
     <p>И последнее в этом блоке — про <em>открытый</em> тип. Объект <code>List&lt;&gt;</code> создать нельзя:
       подставлять нечего. А <strong><code>new List&lt;T&gt;()</code> — можно</strong>, если <code>T</code>
       объявлен в текущем методе или классе: это уже не определение типа, а «список, тип элементов которого
@@ -348,7 +348,7 @@ to 'System.IComparable&lt;object&gt;'.</code></pre>
         <tr><td><code>Queue</code>, <code>Stack</code></td><td><code>Queue&lt;T&gt;</code>, <code>Stack&lt;T&gt;</code></td><td>То же плюс отсутствие бокса</td></tr>
         <tr><td><code>SortedList</code></td><td><code>SortedList&lt;TKey, TValue&gt;</code>, <code>SortedDictionary&lt;TKey, TValue&gt;</code></td><td>Типизация; разная внутренняя структура и сложность</td></tr>
         <tr><td><code>CollectionBase</code></td><td><code>Collection&lt;T&gt;</code></td><td>Готовые проверки и уведомления об изменениях</td></tr>
-        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 12)</td></tr>
+        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 13)</td></tr>
       </tbody>
     </table>
     <p>Non-generic-версии остались ради совместимости. В новом коде их не используют — исключение только
@@ -358,7 +358,7 @@ to 'System.IComparable&lt;object&gt;'.</code></pre>
     <table>
       <thead><tr><th>Интерфейс</th><th>Что умеет</th><th>Когда использовать в сигнатуре</th></tr></thead>
       <tbody>
-        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 12)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
+        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 13)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
         <tr><td><code>IReadOnlyCollection&lt;T&gt;</code></td><td>Перечисление + <code>Count</code></td><td>Чтение набора</td></tr>
         <tr><td><code>IReadOnlyList&lt;T&gt;</code></td><td>Плюс доступ по индексу</td><td>Результат выборки, который нельзя менять</td></tr>
         <tr><td><code>ICollection&lt;T&gt;</code>, <code>IList&lt;T&gt;</code></td><td>Добавление, удаление, индексатор</td><td>Когда вызывающий действительно должен менять коллекцию</td></tr>
@@ -397,7 +397,7 @@ public decimal Sum(IEnumerable&lt;OrderRow&gt; rows) =&gt; rows.Sum(r =&gt; r.To
         <tr><td><code>HashSet&lt;T&gt;</code></td><td>«Есть ли элемент» ~O(1), пересечения</td><td>Нет индексов и порядка</td></tr>
         <tr><td><code>SortedSet&lt;T&gt;</code></td><td>То же плюс порядок: <code>Min</code>/<code>Max</code>, диапазон через <code>GetViewBetween</code></td><td>O(log n) на операцию вместо ~O(1)</td></tr>
         <tr><td><code>Queue&lt;T&gt;</code> / <code>Stack&lt;T&gt;</code></td><td>FIFO / LIFO за O(1)</td><td>Нет доступа к произвольному элементу</td></tr>
-        <tr><td><code>LinkedList&lt;T&gt;</code></td><td>Вставка/удаление по узлу O(1)</td><td>Плохая локальность памяти, нет индексов</td></tr>
+        <tr><td><code>LinkedList&lt;T&gt;</code> (глава 12)</td><td>Вставка/удаление по узлу O(1)</td><td>Плохая локальность памяти, нет индексов</td></tr>
         <tr><td><code>SortedDictionary&lt;TKey,TValue&gt;</code></td><td>Всегда отсортировано, O(log n)</td><td>Медленнее <code>Dictionary</code></td></tr>
         <tr><td><code>ConcurrentDictionary</code>, <code>ConcurrentQueue</code></td><td>Безопасны для нескольких потоков</td><td>Дороже обычных из-за синхронизации</td></tr>
       </tbody>
