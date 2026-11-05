@@ -166,13 +166,27 @@ public async IAsyncEnumerable&lt;OrderRow&gt; StreamAsync(
 {
     await foreach (var order in db.Orders.AsAsyncEnumerable().WithCancellation(ct))
     {
-        yield return Map(order);          // отдаём по одному, не загружая всё в память
+        yield return ToRow(order);        // отдаём по одному, не загружая всё в память
     }
 }
+
+// ToRow — обычный метод-преобразователь: сущность → строка отчёта.
+// Типа «Map» в .NET нет: в чужих примерах так называют такой же метод.
+static OrderRow ToRow(Order order)
+    =&gt; new OrderRow(order.Id, order.Total, order.CreatedAt);
 
 // потребитель
 await foreach (var row in StreamAsync(ct))
     await WriteAsync(row, ct);</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Слова, похожие на коллекции, но ими не являющиеся</span>
+      <p><code>Map</code>, <code>ToRow</code>, <code>Convert</code> — это <em>методы</em> «превратить
+        один объект в другой»; в LINQ то же делает <code>Select(order =&gt; …)</code>. Имя пришло из
+        функциональных языков, а в .NET его закрепили библиотеки маппинга (в AutoMapper есть интерфейс
+        <code>IMapper</code>). Типа-коллекции <code>Map</code> в BCL нет: встретили <code>Map(x)</code> —
+        ищите объявление, это всегда чей-то метод. С главой 6 его роднит только то, что такой метод часто
+        принимает и возвращает <code>IEnumerable&lt;T&gt;</code>.</p>
     </div>
     <ul>
       <li><strong><code>await foreach</code></strong> — аналог <code>foreach</code>, но каждый шаг может ждать,
