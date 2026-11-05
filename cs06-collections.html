@@ -26,8 +26,9 @@
     <h2>Что такое generic</h2>
     <p><strong>Generic</strong> («обобщённый тип») — это тип с <em>параметром типа</em>. Вы пишете
       <code>List&lt;T&gt;</code>, а при использовании подставляете конкретный тип: <code>List&lt;int&gt;</code>,
-      <code>List&lt;Order&gt;</code>. Компилятор создаёт «специализацию» и знает <strong>точный тип
-      элементов</strong>.</p>
+      <code>List&lt;Order&gt;</code>. Компилятор подставляет тип-аргумент и создаёт «специализацию», поэтому
+      знает <strong>точный тип элементов</strong>. Как выглядит сама подстановка и что из неё получается в
+      рантайме — в разделе «<code>&lt;T&gt;</code> в объявлении и конкретный тип в использовании».</p>
     <div class="codewrap">
       <pre><code class="language-csharp">// generic: тип элемента известен компилятору
 var numbers = new List&lt;int&gt;();
@@ -59,6 +60,120 @@ foreach (object item in list)
 var list2 = new List&lt;int&gt;();
 list2.Add("два");                   // ошибка компиляции</code></pre>
     </div>
+
+    <h2><code>&lt;T&gt;</code> в объявлении и конкретный тип в использовании</h2>
+    <p>Выше сказано: «пишете <code>List&lt;T&gt;</code>, а подставляете <code>List&lt;int&gt;</code>».
+      Разберём это буквально — где стоит <code>T</code>, что появляется вместо него и <em>кто</em> это делает.
+      Возьмём свой generic-класс: с <code>List&lt;T&gt;</code> происходит ровно то же самое, просто его
+      объявление написано в BCL, а не у вас в файле.</p>
+    <div class="codewrap">
+      <p class="cap">1. Объявление: <code>T</code> — параметр типа, «местозаполнитель»</p>
+      <pre><code class="language-csharp">public sealed class Box&lt;T&gt;                       // ← T здесь ещё не тип, а имя для него
+{
+    private readonly List&lt;T&gt; _items = new();      // T стоит вместо типа элемента
+    public void Add(T item) =&gt; _items.Add(item);   // T — тип параметра
+    public T Get(int index) =&gt; _items[index];      // T — тип результата
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">2. Использование: вместо <code>T</code> подставлен конкретный тип</p>
+      <pre><code class="language-csharp">var ints = new Box&lt;int&gt;();      // компилятор подставил T = int
+ints.Add(42);
+int x = ints.Get(0);            // Get вернул int — как будто так и было написано
+
+var names = new Box&lt;string&gt;();  // другой закрытый тип: T = string
+names.Add("Аня");
+string s = names.Get(0);
+// names.Add(42);               // ✘ CS1503: cannot convert from 'int' to 'string'</code></pre>
+    </div>
+    <p><strong>Что именно делает компилятор.</strong> Он подставляет тип-аргумент во <em>все</em> места, где
+      в объявлении стоял <code>T</code>, и получает <strong>закрытый</strong> (constructed) generic type —
+      <code>Box&lt;int&gt;</code>, <code>Box&lt;string&gt;</code>. Это обычные типы: у
+      <code>Box&lt;int&gt;</code> методы выглядят как <code>void Add(int item)</code> и
+      <code>int Get(int index)</code>, никаких приведений и упаковок нет. Проверка типов идёт на этой
+      подстановке — поэтому <code>names.Add(42)</code> не компилируется, а не падает в рантайме. Типы, где
+      параметр ещё не подставлен (<code>Box&lt;&gt;</code>, <code>List&lt;&gt;</code>), называют
+      <strong>открытыми</strong> (generic type definition).</p>
+    <p><code>T</code> — не <code>object</code> и не «любой тип»: пока подстановки не было, компилятор о нём
+      почти ничего не знает. Отсюда две ошибки, на которых спотыкаются чаще всего:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public static T Make&lt;T&gt;() =&gt; new T();   // ✘ CS0304: Cannot create an instance of the variable
+                                        //   type 'T' because it does not have the new() constraint
+
+public static T Zero&lt;T&gt;() =&gt; default!;  // ✔ default(T): 0 для int, null для string
+Console.WriteLine(Zero&lt;int&gt;());                    // 0
+Console.WriteLine(Zero&lt;string&gt;() ?? "&lt;null&gt;");      // &lt;null&gt;
+
+var raw = new List&lt;&gt;();                 // ✘ CS7003: Unexpected use of an unbound generic name
+                                        //   открытый тип создать нельзя — параметр не подставлен</code></pre>
+    </div>
+    <p>Это и есть ответ на вопрос «почему <code>new T()</code> не работает, а <code>default(T)</code>
+      работает»: <code>T</code> — не тип, а <em>переменная типа</em>, и известно о ней немного
+      (<code>default</code> есть у любого типа, конструктор — не у любого).</p>
+
+
+    <h2>Специализация: что из этого получается в рантайме</h2>
+    <p>В .NET тип-аргумент <strong>не стирается</strong>: он часть типа и лежит в метаданных, поэтому
+      <code>List&lt;int&gt;</code> — настоящий, отдельный тип. Это видно одним <code>typeof</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(typeof(List&lt;&gt;));        // открытый
+Console.WriteLine(typeof(List&lt;int&gt;));     // закрытый
+Console.WriteLine(typeof(List&lt;string&gt;));
+Console.WriteLine(typeof(Box&lt;int&gt;) == typeof(Box&lt;string&gt;));    // это разные типы?
+Console.WriteLine(typeof(Box&lt;int&gt;) == typeof(Box&lt;int&gt;));       // а это тот же самый?
+Console.WriteLine(typeof(Box&lt;int&gt;).GetGenericArguments()[0]);  // что подставлено</code></pre>
+      <p class="cap">Реальный вывод (net8.0)</p>
+      <pre><code class="language-text">System.Collections.Generic.List`1[T]
+System.Collections.Generic.List`1[System.Int32]
+System.Collections.Generic.List`1[System.String]
+False
+True
+System.Int32</code></pre>
+    </div>
+    <p><code>List`1</code> — так тип записан в метаданных: обратная кавычка и число параметров типа.
+      <code>[T]</code> означает «параметр не подставлен», <code>[System.Int32]</code> — подставлен. Отсюда
+      термин <strong>reification</strong>: обобщение в .NET «овеществлено», тип-аргумент существует в
+      рантайме. В Java его, для сравнения, стирают (erasure), и <code>List&lt;int&gt;</code> там не отличить
+      от <code>List&lt;string&gt;</code>.</p>
+    <p><strong>Про «специализацию» из первого абзаца</strong> — это про машинный код, который генерирует JIT:</p>
+    <ul>
+      <li><strong>Значимые типы</strong> — отдельный код на каждую подстановку: <code>List&lt;int&gt;</code> и
+        <code>List&lt;long&gt;</code> — разные специализации, внутри массив нужного размера, элементы лежат
+        без упаковки.</li>
+      <li><strong>Ссылочные типы</strong> — код общий: все ссылки одного размера, поэтому
+        <code>List&lt;string&gt;</code> и <code>List&lt;object&gt;</code> исполняют один и тот же
+        скомпилированный код и различаются только объектом <code>Type</code>.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Зачем это знать на практике</span>
+      <p>Любой <code>&lt;T&gt;</code> в вашем коде — такая же подстановка: <code>IRepository&lt;Order&gt;</code>,
+        <code>IOptions&lt;MySettings&gt;</code>, <code>Task&lt;decimal&gt;</code>. Отсюда три бытовых вывода:
+        generic по значимым типам даёт <em>больше</em> кода в образе (не заводите десяток разных числовых
+        аргументов), по ссылочным почти бесплатен, а DI и рефлексия видят настоящий тип-аргумент и умеют
+        различать по нему регистрации (<code>IOptions&lt;A&gt;</code> и <code>IOptions&lt;B&gt;</code> — разные
+        сервисы).</p>
+    </div>
+
+    <h2><code>&lt;T&gt;</code> у метода: вывод типа из аргументов</h2>
+    <p>Параметр типа бывает не только у класса. У метода его часто даже не пишут руками — компилятор выводит
+      подстановку из аргументов:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public static T Max&lt;T&gt;(T a, T b) where T : IComparable&lt;T&gt;
+    =&gt; a.CompareTo(b) &gt;= 0 ? a : b;
+
+var m1 = Max(3, 5);           // T выведен из аргументов: int → и результат int
+var m2 = Max("a", "b");       // T = string
+var m3 = Max&lt;double&gt;(3, 5);   // T указан явно: double
+// var m4 = Max&lt;object&gt;(1, 2); // ✘ CS0311: нет неявного преобразования object → IComparable&lt;object&gt;
+
+Console.WriteLine(m1);        // 5
+Console.WriteLine(m2);        // b</code></pre>
+    </div>
+    <p><code>where T : IComparable&lt;T&gt;</code> — <strong>ограничение</strong> (constraint). Оно говорит
+      компилятору, что у <code>T</code> точно есть <code>CompareTo</code>: без него <code>a.CompareTo(b)</code>
+      не скомпилируется, ведь о параметре типа известно только то, что это значение, совместимое с
+      <code>object</code>. Ограничения проверяются в момент подстановки — поэтому <code>Max&lt;object&gt;</code>
+      отвергается компилятором, а не падает в рантайме.</p>
 
     <h2>Кто на кого заменяется</h2>
     <table>
@@ -178,6 +293,13 @@ void Print(IEnumerable&lt;Order&gt; orders)
       <span class="t">★ Что запомнить из главы</span>
       <ul>
         <li><strong>Generic</strong> — тип с параметром типа: компилятор знает точный тип элементов.</li>
+        <li><code>List&lt;T&gt;</code> — <strong>открытый</strong> тип (форма), <code>List&lt;int&gt;</code> —
+          <strong>закрытый</strong>: подстановку делает компилятор, ошибки типов видны на ней же;
+          <code>new T()</code> без ограничения <code>new()</code> не собрать (CS0304), открытый тип создать
+          нельзя (CS7003).</li>
+        <li>В рантайме тип-аргумент <strong>сохраняется</strong> (<code>typeof(List&lt;int&gt;)</code> —
+          настоящий тип, reification): JIT делает отдельный код на каждый значимый тип и общий — на
+          ссылочные.</li>
         <li>Generic-коллекции дают <strong>отсутствие упаковки</strong>, отсутствие приведений и ошибки на
           компиляции.</li>
         <li>Возвращайте <strong>самый узкий интерфейс, которого хватает вызывающему</strong> — обычно
