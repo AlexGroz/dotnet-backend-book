@@ -90,10 +90,32 @@ for f in pages:
         if h1s[href] and text != h1s[href]:
             bad.append((f, 'pager-label', href, text[:45], h1s[href][:45]))
 
-# оглавления разделов: запись обязана иметь номер и название,
-# и все главы раздела должны быть в нём перечислены
+# порядок глав в оглавлении = порядок листания: соседи в пейджере и верхней панели
 PREFIX = {'csharp.html': 'cs', 'net.html': 'ch', 'sql.html': 'sql',
           'docker.html': 'dk', 'patterns.html': 'pt'}
+for toc, pref in PREFIX.items():
+    tocs = open(toc, encoding='utf-8').read()
+    order = re.findall(r'<a href="(%s\d{2}-[^"]+\.html)"><span class="n">Глава' % pref, tocs)
+    for i, f in enumerate(order):
+        if f not in pages:
+            continue
+        s = open(f, encoding='utf-8').read()
+        m = re.search(r'<div class="pager">(.*?)</div>', s, re.S)
+        links = re.findall(r'href="([^"]+)"', m.group(1)) if m else []
+        got = [h for h in links if re.match(r'%s\d{2}-' % pref, h)]  # ссылки на оглавление игнорируем
+        want = [x for x in [order[i - 1] if i else None,
+                            order[i + 1] if i + 1 < len(order) else None] if x]
+        if got != want:
+            bad.append((f, 'pager-neighbors', got, want))
+        top = re.search(r'<div class="topbar">.*?</div></div>', s, re.S)
+        if top and i + 1 < len(order):
+            nxt = [h for h in re.findall(r'href="([^"]+)"', top.group(0))
+                   if re.match(r'%s\d{2}-' % pref, h)]
+            if not nxt or nxt[-1] != order[i + 1]:
+                bad.append((f, 'topbar-next', nxt[-1] if nxt else None, order[i + 1]))
+
+# оглавления разделов: запись обязана иметь номер и название,
+# и все главы раздела должны быть в нём перечислены
 for toc, pref in PREFIX.items():
     s = open(toc, encoding='utf-8').read()
     for block in re.findall(r'<div class="toc">(.*?)</div>', s, re.S):
