@@ -90,6 +90,21 @@ for f in pages:
         if h1s[href] and text != h1s[href]:
             bad.append((f, 'pager-label', href, text[:45], h1s[href][:45]))
 
+# оглавления разделов: запись обязана иметь номер и название,
+# и все главы раздела должны быть в нём перечислены
+PREFIX = {'csharp.html': 'cs', 'net.html': 'ch', 'sql.html': 'sql',
+          'docker.html': 'dk', 'patterns.html': 'pt'}
+for toc, pref in PREFIX.items():
+    s = open(toc, encoding='utf-8').read()
+    for block in re.findall(r'<div class="toc">(.*?)</div>', s, re.S):
+        for inner in re.findall(r'<a [^>]*>(.*?)</a>', block, re.S):
+            if 'class="n"' not in inner or 'class="t"' not in inner:
+                bad.append((toc, 'toc-entry-shape', re.sub(r'<[^>]+>', '', inner)[:40]))
+    listed = set(re.findall(r'href="(%s\d{2}-[^"]+\.html)"' % pref, s))
+    for missing in sorted({os.path.basename(f) for f in pages
+                           if os.path.basename(f).startswith(pref)} - listed):
+        bad.append((toc, 'toc-missing-page', missing))
+
 print('pages:', len(pages), '| PROBLEMS:', len(bad))
 for b in bad[:25]:
     print(' -', b)

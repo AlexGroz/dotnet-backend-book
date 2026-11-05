@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 7 · Словари, множества и очереди на практике</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs08-ienumerable.html"><span class="sp">Глава 8. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть II · Коллекции и перечисления</div>
+    <h1>Глава 7. Словари, множества и очереди на практике</h1>
+    <p class="sublead">Как на самом деле пользоваться <code>Dictionary</code>, <code>HashSet</code>,
+      <code>Queue</code> и <code>PriorityQueue</code>: что бросает исключение, что молча возвращает
+      <code>null</code>, почему порядок перебора нельзя считать порядком вставки и почему изменяемый ключ
+      теряет запись.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>Глава 6 объясняла, <em>почему</em> generic-коллекции лучше non-generic, и давала таблицу «что выбрать».
+      Здесь — вторая половина: <strong>как этим пользоваться</strong>, не наступая на грабли. Каждый пример
+      ниже прогнан на .NET 8, в блоках «вывод» — реальный результат, а не пересказ.</p>
+    <p>Коллекции из этой главы объединяет одно: они построены на <strong>хеш-таблице</strong>
+      (<code>Dictionary</code>, <code>HashSet</code>) или на <strong>индексах и куче</strong>
+      (<code>Queue</code>, <code>Stack</code>, <code>PriorityQueue</code>). Отсюда их главное свойство —
+      операции «положить», «найти», «взять крайний» стоят в среднем O(1), а вот <em>поиск по значению</em>,
+      <em>порядок</em> и <em>изменение ключа</em> — как раз то, чего они не умеют.</p>
+
+    <h2><code>Dictionary</code>: положить, перезаписать, достать</h2>
+    <p>У словаря два «пишущих» входа с разным поведением, и это первая ловушка:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var byId = new Dictionary&lt;int, string&gt;();
+
+byId[1] = "один";          // индексатор: вставит ИЛИ перезапишет — ошибки не будет
+byId.Add(2, "два");        // Add: вставит, а если ключ уже есть — исключение
+byId[1] = "ОДИН";          // ✔ тихо перезаписали значение
+Console.WriteLine(byId[1]);          // ОДИН
+Console.WriteLine(byId.Count);       // 2
+
+byId.Add(2, "снова");      // ✘ ключ занят</code></pre>
+      <p class="cap">Вывод: исключение на последней строке</p>
+      <pre><code class="language-text">Unhandled exception. System.ArgumentException: An item with the same key has already
+been added. Key: 2</code></pre>
+    </div>
+    <p>Отсюда правило: <code>d[key] = value</code> — это <strong>upsert</strong> («вставь или обнови»),
+      <code>d.Add(key, value)</code> — «вставь строго новый». В прикладном коде почти всегда нужен первый:
+      он же и быстрее (одно обращение вместо проверки + вставки).</p>
+    <p>А теперь обратная сторона: <strong>чтение индексатором ключа, которого нет, бросает исключение, а не
+      возвращает <code>null</code></strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">string v = byId[1];        // ✔ ОДИН
+string x = byId[3];        // ✘ падение</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Unhandled exception. System.Collections.Generic.KeyNotFoundException:
+The given key '3' was not present in the dictionary.</code></pre>
+    </div>
+    <p>Это самая частая ошибка тех, кто пришёл из языков, где словарь на отсутствующем ключе отдаёт
+      <code>undefined</code>/<code>null</code>. В C# <code>null</code> в словаре — это <em>значение</em>,
+      которое кто-то положил; отличить его от «ключа нет» можно только методами ниже.</p>
+
+    <h2>Чтение без исключений: <code>TryGetValue</code>, <code>GetValueOrDefault</code></h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">if (byId.TryGetValue(1, out var name))
+    Console.WriteLine($"нашли: {name}");     // нашли: ОДИН
+else
+    Console.WriteLine("ключа нет");
+
+// ✘ так делать не нужно: два поиска вместо одного
+if (byId.ContainsKey(1))
+{
+    string value = byId[1];                   // второй проход по хеш-таблице
+}
+
+// «нет ключа» — нормальная ситуация: значения по умолчанию
+Console.WriteLine(byId.GetValueOrDefault(3) ?? "нет");      // нет
+Console.WriteLine(byId.GetValueOrDefault(3, "нет"));        // нет</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Как читать</th><th>Если ключа нет</th><th>Когда использовать</th></tr></thead>
+      <tbody>
+        <tr><td><code>d[key]</code></td><td><code>KeyNotFoundException</code></td>
+          <td>Ключ обязан быть — ошибка означает баг</td></tr>
+        <tr><td><code>TryGetValue(key, out var v)</code></td><td><code>false</code>, <code>v</code> =
+          <code>default</code></td><td>Обычный путь: и проверка, и значение за одно обращение</td></tr>
+        <tr><td><code>GetValueOrDefault(key[, fallback])</code></td><td><code>default</code> или
+          <code>fallback</code></td><td>Отсутствие — штатная ситуация, ветвление не нужно</td></tr>
+        <tr><td><code>ContainsKey(key)</code></td><td><code>false</code></td><td>Нужен только ответ «есть
+          ли», само значение не нужно</td></tr>
+      </tbody>
+    </table>
+    <p><code>TryGetValue</code> экономит не только строки: он делает <strong>одно</strong> вычисление хеша и
+      один проход по корзине. Связка <code>ContainsKey</code> + <code>d[key]</code> — два. На одном запросе
+      это незаметно, в цикле на миллион элементов — вполне.</p>
+
+    <h2>Изменение: <code>TryAdd</code>, <code>Remove</code> и идиома счётчика</h2>
+    <p>«Не бросать исключение» — общий стиль у <code>Try*</code>-методов: они возвращают <code>bool</code> и
+      говорят, случилось ли изменение.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(byId.TryAdd(2, "x"));        // False — ключ занят, словарь не изменился
+Console.WriteLine(byId.TryAdd(9, "девять"));   // True  — добавилось
+
+Console.WriteLine(byId.Remove(9, out var removed));   // True, removed = "девять"
+Console.WriteLine(byId.Remove(42));                   // False — и это не ошибка
+
+byId.Clear();                                  // опустошить, ёмкость остаётся
+Console.WriteLine(byId.Count);                 // 0</code></pre>
+    </div>
+    <p><code>Remove(key, out var value)</code> удобен, когда нужно <em>и</em> убрать, <em>и</em> забрать
+      значение. Без второй перегрузки пришлось бы сначала читать <code>TryGetValue</code>, потом удалять —
+      снова два прохода.</p>
+    <p>Классическая идиома на <code>GetValueOrDefault</code> — <strong>счётчик без ветвления</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var hits = new Dictionary&lt;string, int&gt;();
+
+foreach (var url in new[] { "/a", "/b", "/a" })
+    hits[url] = hits.GetValueOrDefault(url) + 1;   // «нет ключа» = 0, дальше просто +1
+
+foreach (var (url, count) in hits)
+    Console.WriteLine($"{url} = {count}");</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">/a = 2
+/b = 1</code></pre>
+    </div>
+    <p>Второй аргумент <code>GetValueOrDefault</code> здесь не нужен: у <code>int</code> значение по
+      умолчанию — <code>0</code>. Для строк так писать нельзя: <code>null + "x"</code> случайно даст
+      <code>"x"</code>, а <code>null.Length</code> упадёт — там нужен явный fallback.</p>
+
+    <h2>Порядок перебора — не порядок вставки</h2>
+    <p>Контракт <code>Dictionary</code> <strong>не обещает</strong> никакого порядка. В текущей реализации он
+      обычно совпадает с порядком добавления, но стоит что-то удалить — и совпадение заканчивается:
+      освободившуюся ячейку переиспользует следующий добавленный элемент.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var d = new Dictionary&lt;int, string&gt;();
+for (int i = 1; i &lt;= 5; i++) d[i] = "v" + i;
+
+d.Remove(1);
+d[6] = "v6";
+
+Console.WriteLine(string.Join(",", d.Keys));</code></pre>
+      <p class="cap">Вывод (net8.0): шестёрка встала на место удалённой единицы</p>
+      <pre><code class="language-text">6,2,3,4,5</code></pre>
+    </div>
+    <p>Три вывода из этого:</p>
+    <ul>
+      <li><strong>Не опирайтесь на порядок</strong> в тестах и в логике: сегодня «по вставке», завтра — другая
+        реализация или другое число удалений.</li>
+      <li><strong>Нужен порядок по ключу</strong> — <code>SortedDictionary&lt;TKey, TValue&gt;</code>
+        (O(log n) на операцию) или <code>SortedList&lt;TKey, TValue&gt;</code> (то же на массиве: меньше
+        памяти, дороже вставка в середину).</li>
+      <li><strong>Нужен именно порядок вставки</strong> — это <code>List&lt;T&gt;</code> плюс
+        <code>Dictionary</code> для поиска.</li>
+    </ul>
+    <p>Перебор при этом удобен: <code>KeyValuePair&lt;TKey, TValue&gt;</code> поддерживает
+      <code>Deconstruct</code>, поэтому <code>foreach (var (key, value) in d)</code> компилируется и без
+      <code>kvp.Key</code>/<code>kvp.Value</code>.</p>
+
+
+    <h2>Ключ: хеш, мутация и <code>IEqualityComparer</code></h2>
+    <p>Словарь находит значение по <strong>хешу ключа</strong> (глава 3). Значит, ключ обязан быть таким,
+      чтобы <code>GetHashCode</code> не менялся, пока он лежит в словаре. Нарушение — тихая потеря записи:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public record Key { public int Id { get; set; } }   // хеш считается по Id
+
+var key = new Key { Id = 1 };
+var map = new Dictionary&lt;Key, string&gt; { [key] = "a" };
+
+key.Id = 2;                                        // хеш изменился — запись «уехала»
+
+Console.WriteLine(map.Count);                      // 1 — запись никуда не делась
+Console.WriteLine(map.TryGetValue(key, out _));    // False — найти её уже нельзя</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Count=1, TryGetValue=False</code></pre>
+    </div>
+    <p>Правило: <strong>ключ должен быть неизменяемым</strong> — <code>int</code>, <code>string</code>,
+      <code>Guid</code>, <code>enum</code>, <code>record</code> с <code>init</code>-свойствами. Если сущность
+      изменяемая (модель EF Core), ключом делают её <code>Id</code>, а не сам объект. Иначе получается словарь,
+      из которого нельзя достать часть значений — и никакой ошибки при этом не будет.</p>
+    <p>Второй инструмент — <strong>компаратор</strong>: он задаёт, какие ключи считать одинаковыми.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var byName = new Dictionary&lt;string, int&gt;(StringComparer.OrdinalIgnoreCase);
+byName["Аня"] = 1;
+
+Console.WriteLine(byName.TryGetValue("АНЯ", out var n) + " " + n);   // True 1
+
+var plain = new Dictionary&lt;string, int&gt; { ["Аня"] = 1 };
+Console.WriteLine(plain.ContainsKey("АНЯ"));                        // False</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True 1
+False</code></pre>
+    </div>
+    <p>Что брать: <code>StringComparer.Ordinal</code> — по умолчанию, и это правильно для идентификаторов,
+      ключей, e-mail (быстро, без культур); <code>OrdinalIgnoreCase</code> — когда регистр не должен
+      различать («Аня» и «АНЯ» — один пользователь); <code>InvariantCulture*</code> — только если так
+      требует бизнес-правило. Тот же компаратор принимает и <code>HashSet&lt;T&gt;</code>.</p>
+
+    <h2>LINQ → словарь: <code>ToDictionary</code> и <code>ToLookup</code></h2>
+    <p>Самый частый способ получить словарь — свернуть последовательность. Здесь спрятана ловушка:
+      <code>ToDictionary</code> требует <strong>уникальных</strong> ключей и падает на дублях.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var orders = new[] { (Id: 1, Name: "a"), (Id: 2, Name: "b"), (Id: 1, Name: "c") };
+
+var byKey = orders.ToDictionary(o =&gt; o.Id);          // ✘ Id = 1 встречается дважды
+Console.WriteLine(byKey.Count);</code></pre>
+      <p class="cap">Вывод: то же исключение, что у <code>Add</code></p>
+      <pre><code class="language-text">Unhandled exception. System.ArgumentException: An item with the same key has already
+been added. Key: 1</code></pre>
+    </div>
+    <p>Три правильных варианта — по смыслу задачи:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1. дубли — ошибка данных: пусть падает как можно раньше (ToDictionary без прикрас)
+var byId = orders.ToDictionary(o =&gt; o.Id, o =&gt; o.Name);
+
+// 2. дубли допустимы, но на ключ нужно ОДНО значение — правило выбираем сами
+var last = orders.GroupBy(o =&gt; o.Id).ToDictionary(g =&gt; g.Key, g =&gt; g.Last().Name);
+Console.WriteLine(last[1]);                          // c — «последний победил»
+
+// 3. на ключ приходится несколько значений — GroupBy + ToDictionary
+var grouped = orders.GroupBy(o =&gt; o.Id)
+                    .ToDictionary(g =&gt; g.Key, g =&gt; g.Select(o =&gt; o.Name).ToList());
+Console.WriteLine(string.Join(",", grouped[1]));     // a,c
+
+// 4. читать «по ключу → много значений» — сразу ILookup, без промежуточного словаря
+ILookup&lt;int, string&gt; lookup = orders.ToLookup(o =&gt; o.Id, o =&gt; o.Name);
+Console.WriteLine(string.Join(",", lookup[1]));      // a,c
+Console.WriteLine(lookup.Count);                     // 2 — число ключей, а не элементов
+Console.WriteLine(lookup[99].Count());               // 0 — пустая последовательность, не null</code></pre>
+    </div>
+    <p>Разница, которую стоит проговорить: <code>Dictionary</code> — «один ключ = одно значение»,
+      <code>ILookup&lt;TKey, TElement&gt;</code> — «один ключ = много значений», причём
+      <strong>отсутствующий ключ возвращает пустую последовательность</strong>, а не исключение и не
+      <code>null</code>. Перепутать их — типичная причина <code>ArgumentException</code> в отчётах.</p>
+
+
+    <h2><code>HashSet&lt;T&gt;</code>: «есть ли элемент» за O(1)</h2>
+    <p><code>HashSet</code> — это <code>Dictionary</code>, у которого выкинули значения и оставили ключи.
+      Поэтому у него та же ловушка с изменяемым элементом, а взамен — «множественные» операции:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var set = new HashSet&lt;int&gt; { 1, 2, 3 };
+
+Console.WriteLine(set.Add(3));      // False — такой элемент уже есть (Dictionary.Add бросил бы)
+Console.WriteLine(set.Add(4));      // True
+
+set.UnionWith(new[] { 4, 5, 6 });        // объединение:       1,2,3,4,5,6
+set.IntersectWith(new[] { 2, 3, 4, 7 }); // пересечение:       2,3,4
+set.ExceptWith(new[] { 2 });             // вычитание:         3,4
+
+Console.WriteLine(set.SetEquals(new HashSet&lt;int&gt; { 3, 4 }));   // True — те же элементы
+Console.WriteLine(new[] { 1, 1, 2 }.ToHashSet().Count);        // 2 — дедупликация</code></pre>
+    </div>
+    <p>Где он реально нужен: дедупликация (<code>ToHashSet()</code>), «уже видели этот id», проверка
+      пересечения прав/тегов, <code>HashSet.Add</code> как «вставить, если новый».
+      Для сортированного варианта есть <code>SortedSet&lt;T&gt;</code> — O(log n) и всегда по порядку.</p>
+    <div class="box tip">
+      <span class="t">Трюк: <code>TryGetValue</code> у множества</span>
+      <p><code>Contains</code> отвечает только «да/нет», но иногда нужен <em>сам хранимый экземпляр</em>. Тогда
+        <code>set.TryGetValue(probe, out var stored)</code> вернёт объект, который лежит в множестве, — и по
+        <code>ReferenceEquals</code> видно, что это именно он, а не «равный по значению» аргумент:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public sealed class Item                                  // равенство по Id (глава 3)
+{
+    public int Id { get; init; }
+    public override bool Equals(object? o) =&gt; o is Item i &amp;&amp; i.Id == Id;
+    public override int GetHashCode() =&gt; Id;
+}
+
+var set = new HashSet&lt;Item&gt; { new Item { Id = 1 } };
+var probe = new Item { Id = 1 };                  // новый объект, равен только по Id
+
+set.Contains(probe);                              // True — равенство по значению
+set.TryGetValue(probe, out var stored);           // stored — ТОТ САМЫЙ объект из множества
+Console.WriteLine(ReferenceEquals(stored, set.First()));   // True</code></pre>
+      </div>
+      <p>Так кэши и «нормализаторы» данных возвращают канонический экземпляр, не заводя второй такой же.</p>
+    </div>
+
+    <h2><code>Queue</code>, <code>Stack</code> и <code>PriorityQueue</code></h2>
+    <p>Три коллекции «взять крайний», с разными правилами:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var q = new Queue&lt;string&gt;();          // FIFO: кто первый пришёл, тот первый вышел
+q.Enqueue("первый");
+q.Enqueue("второй");
+
+Console.WriteLine(q.Peek());          // первый  — посмотреть, не убирая
+Console.WriteLine(q.Dequeue());       // первый
+Console.WriteLine(q.Dequeue());       // второй
+
+var st = new Stack&lt;int&gt;();            // LIFO: последний пришёл — первый вышел
+st.Push(1);
+st.Push(2);
+
+Console.WriteLine(st.Peek());         // 2
+Console.WriteLine(st.Pop());          // 2
+Console.WriteLine(st.Pop());          // 1</code></pre>
+    </div>
+    <p>На пустой коллекции <code>Dequeue</code>/<code>Pop</code>/<code>Peek</code> бросают
+      <code>InvalidOperationException</code> (у очереди это <code>Queue empty.</code>). Есть безопасные
+      варианты — <code>TryDequeue</code>, <code>TryPop</code>, <code>TryPeek</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">while (q.TryDequeue(out var item))     // цикл закончится сам, когда очередь опустеет
+    Console.WriteLine(item);</code></pre>
+    </div>
+    <p><strong><code>PriorityQueue&lt;TElement, TPriority&gt;</code></strong> (с .NET 6) отдаёт элемент с
+      <em>наименьшим</em> приоритетом — то есть это min-heap, а не «первый в списке»:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var pq = new PriorityQueue&lt;string, int&gt;();   // элемент, приоритет
+pq.Enqueue("низкий", 5);
+pq.Enqueue("критичный", 1);
+pq.Enqueue("средний", 3);
+
+while (pq.TryDequeue(out var task, out var priority))
+    Console.Write($"{task}({priority}) ");</code></pre>
+      <p class="cap">Вывод: порядок — по приоритету, а не по добавлению</p>
+      <pre><code class="language-text">критичный(1) средний(3) низкий(5)</code></pre>
+    </div>
+    <ul>
+      <li><strong>«Чем меньше, тем важнее»</strong> — берите обычный конструктор и кладите
+        <code>1</code> для критичного. Нужен максимум — передайте обратный компаратор:
+        <code>new PriorityQueue&lt;string, int&gt;(Comparer&lt;int&gt;.Create((a, b) =&gt; b.CompareTo(a)))</code>.</li>
+      <li><strong>Порядок равных приоритетов не гарантирован</strong>: это куча, а не стабильная сортировка.
+        Нужна стабильность — добавляйте в приоритет счётчик (<code>(priority, seq)</code> как составной ключ).</li>
+      <li>Вставка и извлечение — O(log n), в отличие от O(1) у <code>Queue</code>/<code>Stack</code>.</li>
+    </ul>
+
+
+    <h2>Словарь и несколько потоков</h2>
+    <p><code>Dictionary</code> <strong>не потокобезопасен</strong>: одновременная запись (и даже запись при
+      чтении) может испортить внутренние структуры — исключения не будет, будет «странное» поведение.
+      Порядок такой:</p>
+    <ul>
+      <li><strong>Только чтение после заполнения</strong> — обычный <code>Dictionary</code> подходит:
+        конкурентные чтения безопасны. Чтобы это было видно по типу, наружу отдают
+        <code>IReadOnlyDictionary&lt;TKey, TValue&gt;</code> (глава 6).</li>
+      <li><strong>Изменение из нескольких потоков</strong> — <code>ConcurrentDictionary&lt;TKey,
+        TValue&gt;</code>: атомарные операции вместо «прочитать-изменить-записать».</li>
+      <li><strong>Редкие изменения, много чтений</strong> — <code>ImmutableDictionary</code> (изменение
+        создаёт новую версию) или <code>FrozenDictionary</code> (.NET 8): оптимизирован под чтение, создаётся
+        один раз при старте.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var cache = new ConcurrentDictionary&lt;int, int&gt;();
+
+Console.WriteLine(cache.GetOrAdd(1, _ =&gt; 1));                  // 1 — положил
+Console.WriteLine(cache.GetOrAdd(1, _ =&gt; 999));                // 1 — уже есть, значение не меняется
+Console.WriteLine(cache.AddOrUpdate(1, 10, (_, old) =&gt; old + 10));  // 11 — «прочитать и изменить» атомарно
+Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Ловушка <code>GetOrAdd</code></span>
+      <p>Делегат-фабрика при гонке может быть вызван <strong>несколько раз</strong> (победит один результат), а
+        в сценариях с <code>Lazy&lt;T&gt;</code> это значит «создание объекта заказали дважды». Поэтому в
+        фабрику не кладут тяжёлых side effect-ов; для дорогой инициализации берут
+        <code>GetOrAdd(key, k =&gt; new Lazy&lt;T&gt;(() =&gt; …))</code> и читают <code>.Value</code>.</p>
+    </div>
+
+
+    <h2>Шпаргалка: операция → коллекция</h2>
+    <table>
+      <thead><tr><th>Что нужно</th><th>Чем пользоваться</th><th>Стоимость</th></tr></thead>
+      <tbody>
+        <tr><td>Взять значение по ключу</td><td><code>Dictionary&lt;TKey, TValue&gt;</code></td>
+          <td>~O(1)</td></tr>
+        <tr><td>«Есть ли элемент», дедупликация</td><td><code>HashSet&lt;T&gt;</code></td><td>~O(1)</td></tr>
+        <tr><td>Ключи по порядку, диапазон</td><td><code>SortedDictionary</code>,
+          <code>SortedList</code></td><td>O(log n)</td></tr>
+        <tr><td>Порядок добавления + индекс</td><td><code>List&lt;T&gt;</code></td>
+          <td>индекс O(1), поиск O(n)</td></tr>
+        <tr><td>FIFO: обработка по очереди</td><td><code>Queue&lt;T&gt;</code>,
+          <code>Channel&lt;T&gt;</code> (между потоками)</td><td>O(1)</td></tr>
+        <tr><td>LIFO: «отменить последнее»</td><td><code>Stack&lt;T&gt;</code></td><td>O(1)</td></tr>
+        <tr><td>Каждый раз самый важный</td><td><code>PriorityQueue&lt;TElement, TPriority&gt;</code></td>
+          <td>O(log n)</td></tr>
+        <tr><td>Один ключ → много значений</td><td><code>ILookup&lt;TKey, TElement&gt;</code>
+          (<code>ToLookup</code>)</td><td>построение O(n)</td></tr>
+        <tr><td>Запись из разных потоков</td><td><code>ConcurrentDictionary</code>,
+          <code>ConcurrentQueue</code></td><td>~O(1) + синхронизация</td></tr>
+        <tr><td>«Заполнили один раз и только читаем»</td><td><code>FrozenDictionary</code>,
+          <code>FrozenSet</code> (.NET 8)</td><td>чтение быстрее, чем у <code>Dictionary</code></td></tr>
+      </tbody>
+    </table>
+    <p>Таблица «что хорошо / что дорого» для тех же коллекций и выбор интерфейса для сигнатуры
+      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — в главе 6.</p>
+
+
+    <h2>Чего не делать</h2>
+    <ul>
+      <li><strong>Не читать <code>d[key]</code>, не будучи уверенным, что ключ есть</strong> — это
+        <code>KeyNotFoundException</code>, а не <code>null</code>. Сомневаетесь — <code>TryGetValue</code>.</li>
+      <li><strong>Не проверять <code>ContainsKey</code> перед <code>d[key]</code></strong>, если нужно само
+        значение: два прохода вместо одного.</li>
+      <li><strong>Не делать ключом изменяемый объект</strong> — запись «потеряется» без единой ошибки.</li>
+      <li><strong>Не полагаться на порядок перебора</strong> <code>Dictionary</code> и <code>HashSet</code>.</li>
+      <li><strong>Не звать <code>ToDictionary</code> на данных с дублями</strong> — <code>ToLookup</code> или
+        <code>GroupBy</code>.</li>
+      <li><strong>Не менять коллекцию во время <code>foreach</code></strong> —
+        <code>InvalidOperationException</code> (глава 8).</li>
+      <li><strong>Не передавать <code>Dictionary</code> между потоками без синхронизации.</strong></li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><code>d[k] = v</code> — upsert, <code>d.Add(k, v)</code> — «только новый» (иначе
+          <code>ArgumentException</code>); чтение отсутствующего ключа индексатором —
+          <code>KeyNotFoundException</code>.</li>
+        <li>Обычный путь чтения — <code>TryGetValue</code>; «отсутствие — норма» —
+          <code>GetValueOrDefault</code>; <code>ContainsKey</code> — только если значение не нужно.</li>
+        <li>Порядок перебора не гарантирован: после удаления элемента порядок вставки уже не соблюдается.</li>
+        <li>Ключ должен быть неизменяемым: мутация ломает <code>GetHashCode</code>, и запись становится
+          недостижимой. Одинаковость ключей задаёт <code>IEqualityComparer</code>.</li>
+        <li><code>HashSet&lt;T&gt;</code> — про «есть ли» и операции над множествами;
+          <code>Queue</code>/<code>Stack</code> — FIFO/LIFO за O(1); <code>PriorityQueue</code> — минимум
+          приоритета первым, O(log n).</li>
+        <li>Дубли ключей — <code>ToLookup</code>/<code>GroupBy</code>, а не <code>ToDictionary</code>;
+          запись из нескольких потоков — <code>ConcurrentDictionary</code>, «только чтение» —
+          <code>FrozenDictionary</code>.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs06-collections.html">← <span class="sp">Глава 6. Коллекции: generic против non-generic</span></a>
+      <a href="cs08-ienumerable.html"><span class="sp">Глава 8. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

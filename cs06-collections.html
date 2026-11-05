@@ -13,7 +13,7 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs07-ienumerable.html">Далее →</a>
+  <a href="cs07-dictionaries-sets-queues.html"><span class="sp">Глава 7. Словари, множества и очереди на практике</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
@@ -43,7 +43,7 @@ int old = (int)legacy[0];      // приведение вручную</code></pr
     <p>Отсюда три выгоды generic-коллекций, и все три — про надёжность и скорость:</p>
     <ol>
       <li><strong>Нет упаковки</strong> для значимых типов: <code>List&lt;int&gt;</code> хранит <code>int</code>,
-        а <code>ArrayList</code> — <code>object</code>, то есть каждый элемент упаковывается (глава 2).</li>
+        а <code>ArrayList</code> — <code>object</code>, то есть каждый элемент упаковывается (глава 4).</li>
       <li><strong>Нет приведений</strong> при чтении: тип известен, приведение не нужно.</li>
       <li><strong>Ошибки видно на компиляции</strong>, а не в рантайме.</li>
     </ol>
@@ -184,7 +184,7 @@ Console.WriteLine(m2);        // b</code></pre>
         <tr><td><code>Queue</code>, <code>Stack</code></td><td><code>Queue&lt;T&gt;</code>, <code>Stack&lt;T&gt;</code></td><td>То же плюс отсутствие бокса</td></tr>
         <tr><td><code>SortedList</code></td><td><code>SortedList&lt;TKey, TValue&gt;</code>, <code>SortedDictionary&lt;TKey, TValue&gt;</code></td><td>Типизация; разная внутренняя структура и сложность</td></tr>
         <tr><td><code>CollectionBase</code></td><td><code>Collection&lt;T&gt;</code></td><td>Готовые проверки и уведомления об изменениях</td></tr>
-        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 7)</td></tr>
+        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 8)</td></tr>
       </tbody>
     </table>
     <p>Non-generic-версии остались ради совместимости. В новом коде их не используют — исключение только
@@ -194,7 +194,7 @@ Console.WriteLine(m2);        // b</code></pre>
     <table>
       <thead><tr><th>Интерфейс</th><th>Что умеет</th><th>Когда использовать в сигнатуре</th></tr></thead>
       <tbody>
-        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 7)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
+        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 8)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
         <tr><td><code>IReadOnlyCollection&lt;T&gt;</code></td><td>Перечисление + <code>Count</code></td><td>Чтение набора</td></tr>
         <tr><td><code>IReadOnlyList&lt;T&gt;</code></td><td>Плюс доступ по индексу</td><td>Результат выборки, который нельзя менять</td></tr>
         <tr><td><code>ICollection&lt;T&gt;</code>, <code>IList&lt;T&gt;</code></td><td>Добавление, удаление, индексатор</td><td>Когда вызывающий действительно должен менять коллекцию</td></tr>
@@ -314,7 +314,7 @@ void Print(IEnumerable&lt;Order&gt; orders)
 
     <div class="pager">
       <a href="cs05-ref-struct-span.html">← <span class="sp">Глава 5. ref struct и Span: окно в память без аллокаций</span></a>
-      <a href="cs07-ienumerable.html"><span class="sp">Глава 7. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+      <a href="cs07-dictionaries-sets-queues.html"><span class="sp">Глава 7. Словари, множества и очереди на практике</span> →</a>
     </div>
   </div>
 </div>
