@@ -19,9 +19,10 @@
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
     <h1>Глава 9. Словари: Dictionary на практике</h1>
-    <p class="sublead">Полный разбор <code>Dictionary</code>: что бросает исключение, что молча возвращает
-      <code>null</code>, почему порядок перебора нельзя считать порядком вставки, почему изменяемый ключ
-      теряет запись и как этого не допустить. Множества — глава 10, очереди и стеки — глава 11.</p>
+    <p class="sublead">Полный разбор <code>Dictionary</code>: что бросает исключение, а что молча возвращает
+      <code>default</code> (и чему он равен), из чего состоит элемент перебора, почему порядок перебора нельзя
+      считать порядком вставки, почему изменяемый ключ теряет запись и как этого не допустить. Множества —
+      глава 10, очереди и стеки — глава 11.</p>
     <p><span class="tag core">основная глава</span></p>
 
     <p>Глава 6 объясняла, <em>почему</em> generic-коллекции лучше non-generic, и давала таблицу «что выбрать».
@@ -77,9 +78,15 @@ if (byId.ContainsKey(1))
     string value = byId[1];                   // второй проход по хеш-таблице
 }
 
-// «нет ключа» — нормальная ситуация: значения по умолчанию
-Console.WriteLine(byId.GetValueOrDefault(3) ?? "нет");      // нет
-Console.WriteLine(byId.GetValueOrDefault(3, "нет"));        // нет</code></pre>
+// «нет ключа» — нормальная ситуация: у метода две перегрузки
+Console.WriteLine(byId.GetValueOrDefault(3) ?? "нет");      // одна: вместо значения — default(string)
+Console.WriteLine(byId.GetValueOrDefault(3, "нет"));        // две: вместо default — своё значение
+Console.WriteLine(byId.GetValueOrDefault(1, "нет"));        // ключ есть — второе значение не нужно</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">нашли: ОДИН
+нет
+нет
+ОДИН</code></pre>
     </div>
     <table>
       <thead><tr><th>Как читать</th><th>Если ключа нет</th><th>Когда использовать</th></tr></thead>
@@ -88,8 +95,10 @@ Console.WriteLine(byId.GetValueOrDefault(3, "нет"));        // нет</code><
           <td>Ключ обязан быть — ошибка означает баг</td></tr>
         <tr><td><code>TryGetValue(key, out var v)</code></td><td><code>false</code>, <code>v</code> =
           <code>default</code></td><td>Обычный путь: и проверка, и значение за одно обращение</td></tr>
-        <tr><td><code>GetValueOrDefault(key[, fallback])</code></td><td><code>default</code> или
-          <code>fallback</code></td><td>Отсутствие — штатная ситуация, ветвление не нужно</td></tr>
+        <tr><td><code>GetValueOrDefault(key)</code><br>
+          <code>GetValueOrDefault(key, defaultValue)</code></td><td><code>default(TValue)</code> — или
+          <code>defaultValue</code>, если он передан</td><td>Отсутствие — штатная ситуация, ветвление не
+          нужно</td></tr>
         <tr><td><code>ContainsKey(key)</code></td><td><code>false</code></td><td>Нужен только ответ «есть
           ли», само значение не нужно</td></tr>
       </tbody>
@@ -97,6 +106,90 @@ Console.WriteLine(byId.GetValueOrDefault(3, "нет"));        // нет</code><
     <p><code>TryGetValue</code> экономит не только строки: он делает <strong>одно</strong> вычисление хеша и
       один проход по корзине. Связка <code>ContainsKey</code> + <code>d[key]</code> — два. На одном запросе
       это незаметно, в цикле на миллион элементов — вполне.</p>
+
+    <h3>Чему равен <code>default</code></h3>
+    <p>У <code>GetValueOrDefault</code> в названии стоит <code>default</code> — это <code>default(TValue)</code>,
+      и он разный для разных типов. Не «<code>null</code>» и не «<code>0</code>», а именно «значение по
+      умолчанию для <code>TValue</code>»:</p>
+    <table>
+      <thead><tr><th><code>TValue</code></th><th>Что вернётся, если ключа нет</th></tr></thead>
+      <tbody>
+        <tr><td><code>int</code>, <code>long</code>, <code>double</code>, <code>decimal</code></td>
+          <td><code>0</code></td></tr>
+        <tr><td><code>bool</code></td><td><code>false</code></td></tr>
+        <tr><td><code>char</code></td><td><code>'\0'</code></td></tr>
+        <tr><td><code>string</code>, <code>int[]</code>, любой класс или интерфейс</td><td><code>null</code></td></tr>
+        <tr><td><code>int?</code>, <code>DateTime?</code> — любой <code>Nullable&lt;T&gt;</code></td>
+          <td><code>null</code></td></tr>
+        <tr><td><code>DateTime</code></td><td><code>01.01.0001 00:00:00</code>
+          (<code>DateTime.MinValue</code>)</td></tr>
+        <tr><td>свой <code>struct</code>, <code>Guid</code>, <code>TimeSpan</code></td>
+          <td>структура, где <em>все</em> поля обнулены (<code>Guid.Empty</code>,
+          <code>TimeSpan.Zero</code>) — это не <code>null</code></td></tr>
+      </tbody>
+    </table>
+    <p>Отсюда главное ограничение: если <code>default</code> для типа — «нормальное» значение, то ответ
+      «ключа нет» <strong>неотличим</strong> от ответа «ключ есть, значение по умолчанию»:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var counters = new Dictionary&lt;string, int&gt; { ["есть"] = 0 };
+var texts = new Dictionary&lt;string, string&gt; { ["есть"] = null };
+
+Console.WriteLine(counters.GetValueOrDefault("есть"));            // 0 — ключ есть, значение 0
+Console.WriteLine(counters.GetValueOrDefault("нет"));             // 0 — ключа нет: то же самое
+Console.WriteLine(texts.GetValueOrDefault("есть") ?? "null");     // null — значение в словаре
+Console.WriteLine(texts.GetValueOrDefault("нет") ?? "null");      // null — ключа нет
+
+// различить два случая можно только отдельной проверкой
+Console.WriteLine(counters.ContainsKey("есть") + " " + counters.ContainsKey("нет"));</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">0
+0
+null
+null
+True False</code></pre>
+    </div>
+    <p>Правило: <code>GetValueOrDefault</code> — когда «нет ключа» и «значение по умолчанию» обрабатываются
+      <em>одинаково</em> (счётчик, накопитель, кэш). Если разница важна — <code>TryGetValue</code>. И ещё:
+      <code>??</code> работает только с ссылочными и <code>Nullable&lt;T&gt;</code>-типами, поэтому
+      <code>counters.GetValueOrDefault("нет") ?? 0</code> для <code>int</code> не скомпилируется
+      (<code>error CS0019: Operator '??' cannot be applied to operands of type 'int' and 'int'</code>) — там
+      нужна вторая перегрузка.</p>
+
+    <h2>Перебор: <code>KeyValuePair&lt;TKey, TValue&gt;</code> и <code>Deconstruct</code></h2>
+    <p>Когда вы пишете <code>foreach</code> по словарю, каждый элемент — не «ключ» и не «значение», а пара:
+      <code>KeyValuePair&lt;TKey, TValue&gt;</code>. Это маленькая структура с двумя свойствами,
+      <code>Key</code> и <code>Value</code> (в примерах переменную обычно называют <code>kvp</code> — от
+      <em>key-value pair</em>):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var hits = new Dictionary&lt;string, int&gt; { ["/a"] = 2 };
+
+// 1. полная форма: тип элемента указан явно
+foreach (KeyValuePair&lt;string, int&gt; kvp in hits)
+    Console.WriteLine(kvp.Key + " = " + kvp.Value);
+
+// 2. то же, но тип выведен — самая частая запись
+foreach (var kvp in hits)
+    Console.WriteLine(kvp.Key + " = " + kvp.Value);
+
+// 3. Deconstruct: пара раскладывается на две переменные
+foreach (var (url, count) in hits)
+    Console.WriteLine(url + " = " + count);</code></pre>
+      <p class="cap">Вывод: три одинаковые строки</p>
+      <pre><code class="language-text">/a = 2
+/a = 2
+/a = 2</code></pre>
+    </div>
+    <p>Третий вариант — не «другой <code>foreach</code>», а вызов метода <code>Deconstruct</code>, который у
+      <code>KeyValuePair</code> раскладывает пару на ключ и значение. Порядок не произвольный: первая
+      переменная получает <code>Key</code>, вторая — <code>Value</code>. Работает это и вне цикла:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var pair = new KeyValuePair&lt;string, int&gt;("/b", 5);
+var (key, value) = pair;
+
+Console.WriteLine(key + " = " + value);      // /b = 5</code></pre>
+    </div>
+    <p>Что брать: <code>kvp.Key</code>/<code>kvp.Value</code> — когда пара нужна целиком (передать в метод,
+      положить в список); <code>var (key, value)</code> — когда в теле цикла нужны только имена.</p>
 
     <h2>Изменение: <code>TryAdd</code>, <code>Remove</code> и идиома счётчика</h2>
     <p>«Не бросать исключение» — общий стиль у <code>Try*</code>-методов: они возвращают <code>bool</code> и
@@ -129,7 +222,7 @@ foreach (var (url, count) in hits)
     </div>
     <p>Второй аргумент <code>GetValueOrDefault</code> здесь не нужен: у <code>int</code> значение по
       умолчанию — <code>0</code>. Для строк так писать нельзя: <code>null + "x"</code> случайно даст
-      <code>"x"</code>, а <code>null.Length</code> упадёт — там нужен явный fallback.</p>
+      <code>"x"</code>, а <code>null.Length</code> упадёт — там нужен второй аргумент с явным значением.</p>
 
     <h2>Порядок перебора — не порядок вставки</h2>
     <p>Контракт <code>Dictionary</code> <strong>не обещает</strong> никакого порядка. В текущей реализации он
@@ -156,9 +249,86 @@ Console.WriteLine(string.Join(",", d.Keys));</code></pre>
       <li><strong>Нужен именно порядок вставки</strong> — это <code>List&lt;T&gt;</code> плюс
         <code>Dictionary</code> для поиска.</li>
     </ul>
-    <p>Перебор при этом удобен: <code>KeyValuePair&lt;TKey, TValue&gt;</code> поддерживает
-      <code>Deconstruct</code>, поэтому <code>foreach (var (key, value) in d)</code> компилируется и без
-      <code>kvp.Key</code>/<code>kvp.Value</code>.</p>
+
+    <h3>Порядок по ключу: <code>SortedDictionary</code> и <code>SortedList</code></h3>
+    <p>Оба держат ключи отсортированными не «когда-нибудь при переборе», а всегда, поэтому перебор идёт по
+      возрастанию ключа, а поиск и вставка стоят O(log n) вместо O(1):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var dict = new Dictionary&lt;int, string&gt; { [3] = "c", [1] = "a", [2] = "b" };
+var sortedDict = new SortedDictionary&lt;int, string&gt; { [3] = "c", [1] = "a", [2] = "b" };
+var sortedList = new SortedList&lt;int, string&gt; { [3] = "c", [1] = "a", [2] = "b" };
+
+Console.WriteLine(string.Join(",", dict.Keys));          // у Dictionary порядка нет
+Console.WriteLine(string.Join(",", sortedDict.Keys));    // всегда по возрастанию ключа
+Console.WriteLine(string.Join(",", sortedList.Keys));
+
+// обратный порядок задаётся компаратором (глава 8)
+var desc = new SortedDictionary&lt;int, string&gt;(Comparer&lt;int&gt;.Create((a, b) =&gt; b.CompareTo(a)));
+desc[1] = "a"; desc[2] = "b"; desc[3] = "c";
+Console.WriteLine(string.Join(",", desc.Keys));
+
+// у SortedList есть доступ по номеру — он и есть массив
+Console.WriteLine(sortedList.Keys[0] + " = " + sortedList.Values[0]);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">3,1,2
+1,2,3
+1,2,3
+3,2,1
+1 = a</code></pre>
+    </div>
+    <p>Первая строка — ровно то, о чём предупреждение выше: у <code>Dictionary</code> совпало с порядком
+      вставки, и строить логику на этом нельзя. Дальше — чем два сортированных типа отличаются:</p>
+    <table>
+      <thead><tr><th></th><th><code>SortedDictionary&lt;TKey, TValue&gt;</code></th>
+        <th><code>SortedList&lt;TKey, TValue&gt;</code></th></tr></thead>
+      <tbody>
+        <tr><td>Внутри</td><td>красно-чёрное дерево</td><td>два массива: ключи и значения</td></tr>
+        <tr><td>Поиск по ключу</td><td>O(log n)</td><td>O(log n) — бинарный поиск</td></tr>
+        <tr><td>Вставка и удаление</td><td>O(log n)</td><td>O(n) — сдвиг хвоста массива</td></tr>
+        <tr><td>Доступ по номеру</td><td>нет</td><td>есть: <code>Keys[i]</code>, <code>Values[i]</code></td></tr>
+        <tr><td>Память, скорость перебора</td><td>дороже: узлы дерева</td><td>дешевле и быстрее: массивы</td></tr>
+        <tr><td>Когда брать</td><td>вставок и удалений много</td><td>заполнили один раз и в основном
+          читаете или перебираете</td></tr>
+      </tbody>
+    </table>
+    <p>Обоим нужны <em>сравнимые</em> ключи — <code>IComparable&lt;T&gt;</code> или компаратор в конструкторе
+      (глава 8). Ключ без сравнения упадёт только на второй вставке, когда появится с чем сравнивать, причём
+      разными исключениями: <code>SortedDictionary</code> — <code>ArgumentException: At least one object must
+      implement IComparable.</code>, <code>SortedList</code> — <code>InvalidOperationException: Failed to
+      compare two elements in the array.</code></p>
+
+    <h3>Порядок вставки: <code>List&lt;T&gt;</code> + <code>Dictionary</code></h3>
+    <p>Готового generic-словаря с порядком вставки в .NET 8 нет: тип
+      <code>OrderedDictionary&lt;TKey, TValue&gt;</code> на net8.0 не компилируется (<code>error CS0246: The type
+      or namespace name 'OrderedDictionary&lt;,&gt;' could not be found</code>). Порядок хранят рядом — список для
+      порядка, словарь для доступа:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var order = new List&lt;string&gt;();              // порядок вставки
+var byKey = new Dictionary&lt;string, int&gt;();   // поиск за ~O(1)
+
+void Set(string key, int value)
+{
+    if (!byKey.ContainsKey(key)) order.Add(key);   // новый ключ — в конец списка
+    byKey[key] = value;                            // существующий — обновляем на месте
+}
+
+Set("a", 1); Set("b", 2); Set("c", 3); Set("a", 10);
+
+Console.WriteLine(string.Join(" ", order.Select(k =&gt; k + "=" + byKey[k])));
+
+order.Remove("b");
+byKey.Remove("b");
+Console.WriteLine(string.Join(" ", order.Select(k =&gt; k + "=" + byKey[k])) + " | " + byKey.Count);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">a=10 b=2 c=3
+a=10 c=3 | 2</code></pre>
+    </div>
+    <p>Ключ <code>a</code> остался на первом месте, хотя записан дважды, — ровно то, что нужно от «порядка
+      вставки». Цена: перебор идёт по списку, значит <code>order.Remove("b")</code> — это O(n) (сдвиг
+      элементов). Такую конструкцию берут, когда порядок нужен, а удаления редки или их нет вовсе. Если
+      удалять нужно часто, а тип значения может быть <code>object</code>, есть старый non-generic
+      <code>System.Collections.Specialized.OrderedDictionary</code> — порядок он сохраняет, но generics в нём
+      нет, и перебор идёт через <code>DictionaryEntry</code> с приведением типов.</p>
 
 
     <h2>Ключ: хеш, мутация и <code>IEqualityComparer</code></h2>
@@ -284,7 +454,8 @@ Console.WriteLine(byKey.Count);</code></pre>
       <pre><code class="language-text">Unhandled exception. System.ArgumentException: An item with the same key has already
 been added. Key: 1</code></pre>
     </div>
-    <p>Три правильных варианта — по смыслу задачи:</p>
+    <p>Три способа свернуть в словарь, когда дубли — не повод падать (1–3), и четвёртый — когда словарь
+      вообще не нужен (4):</p>
     <div class="codewrap">
       <pre><code class="language-csharp">// 1. дубли — ошибка данных: пусть падает как можно раньше (ToDictionary без прикрас)
 var byId = orders.ToDictionary(o =&gt; o.Id, o =&gt; o.Name);
@@ -341,36 +512,10 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
     </div>
 
 
-    <h2>Шпаргалка: операция → коллекция</h2>
-    <table>
-      <thead><tr><th>Что нужно</th><th>Чем пользоваться</th><th>Стоимость</th></tr></thead>
-      <tbody>
-        <tr><td>Взять значение по ключу</td><td><code>Dictionary&lt;TKey, TValue&gt;</code></td>
-          <td>~O(1)</td></tr>
-        <tr><td>«Есть ли элемент», дедупликация</td><td><code>HashSet&lt;T&gt;</code></td><td>~O(1)</td></tr>
-        <tr><td>Уникальность + обход по возрастанию</td><td><code>SortedSet&lt;T&gt;</code></td>
-          <td>O(log n)</td></tr>
-        <tr><td>Ключи по порядку, диапазон</td><td><code>SortedDictionary</code>,
-          <code>SortedList</code></td><td>O(log n)</td></tr>
-        <tr><td>Порядок добавления + индекс</td><td><code>List&lt;T&gt;</code></td>
-          <td>индекс O(1), поиск O(n)</td></tr>
-        <tr><td>FIFO: обработка по очереди</td><td><code>Queue&lt;T&gt;</code>,
-          <code>Channel&lt;T&gt;</code> (между потоками)</td><td>O(1)</td></tr>
-        <tr><td>LIFO: «отменить последнее»</td><td><code>Stack&lt;T&gt;</code></td><td>O(1)</td></tr>
-        <tr><td>Каждый раз самый важный</td><td><code>PriorityQueue&lt;TElement, TPriority&gt;</code></td>
-          <td>O(log n)</td></tr>
-        <tr><td>Один ключ → много значений</td><td><code>ILookup&lt;TKey, TElement&gt;</code>
-          (<code>ToLookup</code>)</td><td>построение O(n)</td></tr>
-        <tr><td>Запись из разных потоков</td><td><code>ConcurrentDictionary</code>,
-          <code>ConcurrentQueue</code></td><td>~O(1) + синхронизация</td></tr>
-        <tr><td>«Заполнили один раз и только читаем»</td><td><code>FrozenDictionary</code>,
-          <code>FrozenSet</code> (.NET 8)</td><td>чтение быстрее, чем у <code>Dictionary</code></td></tr>
-      </tbody>
-    </table>
-    <p>Таблица «что хорошо / что дорого» для тех же коллекций и выбор интерфейса для сигнатуры
-      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — в главе 6.
-      Подробно: словари — эта глава, множества — <strong>глава 10</strong>, очереди и стеки —
-      <strong>глава 11</strong>, порядок и сравнение — глава 8.</p>
+    <p>Куда смотреть дальше: общий разбор «что хорошо / что дорого» и выбор интерфейса для сигнатуры
+      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — глава 6;
+      множества — <strong>глава 10</strong>; очереди и стеки — <strong>глава 11</strong>, и там же, в конце, —
+      сводная шпаргалка «операция → коллекция» по всей части II.</p>
 
 
     <h2>Чего не делать</h2>
@@ -396,6 +541,13 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
           <code>KeyNotFoundException</code>.</li>
         <li>Обычный путь чтения — <code>TryGetValue</code>; «отсутствие — норма» —
           <code>GetValueOrDefault</code>; <code>ContainsKey</code> — только если значение не нужно.</li>
+        <li>Второе слово в <code>GetValueOrDefault</code> — это <code>default(TValue)</code>: <code>0</code>,
+          <code>false</code>, <code>null</code> или обнулённая структура. Поэтому для <code>int</code> и
+          <code>string</code> ответ «ключа нет» неотличим от «есть значение по умолчанию» — там нужен
+          <code>TryGetValue</code> или вторая перегрузка с явным значением.</li>
+        <li>Порядок по ключу — <code>SortedDictionary</code>/<code>SortedList</code> (O(log n) и сравнимые
+          ключи); порядок вставки — <code>List</code> + <code>Dictionary</code>, готового generic-словаря с
+          порядком вставки в .NET 8 нет.</li>
         <li>Порядок перебора не гарантирован: после удаления элемента порядок вставки уже не соблюдается.</li>
         <li>Ключ должен быть неизменяемым: мутация ломает <code>GetHashCode</code>, и запись становится
           недостижимой (и неудаляемой). Правильно — неизменяемый <code>record</code>, ключ-<code>Id</code> или

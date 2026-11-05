@@ -306,6 +306,41 @@ Console.WriteLine(string.Join(",", order));</code></pre>
       <code>ConcurrentQueue</code>; а блокирующее ожидание элемента лучше не писать руками, а взять
       <code>Channel</code> с <code>ReadAllAsync</code>.</p>
 
+    <h2>Шпаргалка: операция → коллекция (вся часть II)</h2>
+    <p>Сводка по коллекциям из глав 6–11 — сюда возвращаются с вопросом «а чем это делать». Словари
+      разобраны в главе 9, множества — в главе 10, очереди и стеки — в этой главе.</p>
+    <table>
+      <thead><tr><th>Что нужно</th><th>Чем пользоваться</th><th>Стоимость</th></tr></thead>
+      <tbody>
+        <tr><td>Взять значение по ключу</td><td><code>Dictionary&lt;TKey, TValue&gt;</code></td>
+          <td>~O(1)</td></tr>
+        <tr><td>Ключи по порядку, диапазон</td><td><code>SortedDictionary</code>,
+          <code>SortedList</code></td><td>O(log n)</td></tr>
+        <tr><td>Порядок вставки + поиск по ключу</td><td><code>List&lt;T&gt;</code> +
+          <code>Dictionary</code> (глава 9)</td><td>поиск ~O(1), удаление O(n)</td></tr>
+        <tr><td>Один ключ → много значений</td><td><code>ILookup&lt;TKey, TElement&gt;</code>
+          (<code>ToLookup</code>)</td><td>построение O(n)</td></tr>
+        <tr><td>«Есть ли элемент», дедупликация</td><td><code>HashSet&lt;T&gt;</code></td><td>~O(1)</td></tr>
+        <tr><td>Уникальность + обход по возрастанию</td><td><code>SortedSet&lt;T&gt;</code></td>
+          <td>O(log n)</td></tr>
+        <tr><td>Порядок добавления + доступ по номеру</td><td><code>List&lt;T&gt;</code></td>
+          <td>индекс O(1), поиск O(n)</td></tr>
+        <tr><td>FIFO: обработка по очереди</td><td><code>Queue&lt;T&gt;</code>,
+          <code>Channel&lt;T&gt;</code> (между потоками)</td><td>O(1)</td></tr>
+        <tr><td>LIFO: «отменить последнее»</td><td><code>Stack&lt;T&gt;</code></td><td>O(1)</td></tr>
+        <tr><td>Каждый раз самый важный</td><td><code>PriorityQueue&lt;TElement, TPriority&gt;</code></td>
+          <td>O(log n)</td></tr>
+        <tr><td>Запись из разных потоков</td><td><code>ConcurrentDictionary</code>,
+          <code>ConcurrentQueue</code>, <code>ConcurrentStack</code></td>
+          <td>~O(1) + синхронизация</td></tr>
+        <tr><td>«Заполнили один раз и только читаем»</td><td><code>FrozenDictionary</code>,
+          <code>FrozenSet</code> (.NET 8)</td><td>чтение быстрее, чем у <code>Dictionary</code></td></tr>
+      </tbody>
+    </table>
+    <p>Таблица «что хорошо / что дорого» для тех же коллекций и выбор интерфейса для сигнатуры
+      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — глава 6;
+      порядок и сравнение, на которых всё это держится, — глава 8.</p>
+
     <h2>Ловушки</h2>
     <ul>
       <li><strong><code>Peek</code> не удаляет, <code>Dequeue</code>/<code>Pop</code> удаляют.</strong>
