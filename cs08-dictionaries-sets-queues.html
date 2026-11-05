@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 7 · Словари, множества и очереди на практике</title>
+<title>Глава 8 · Словари, множества и очереди на практике</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs08-ienumerable.html"><span class="sp">Глава 8. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+  <a href="cs09-ienumerable.html"><span class="sp">Глава 9. IEnumerable, yield и IAsyncEnumerable</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 7. Словари, множества и очереди на практике</h1>
+    <h1>Глава 8. Словари, множества и очереди на практике</h1>
     <p class="sublead">Как на самом деле пользоваться <code>Dictionary</code>, <code>HashSet</code>,
       <code>Queue</code> и <code>PriorityQueue</code>: что бросает исключение, что молча возвращает
       <code>null</code>, почему порядок перебора нельзя считать порядком вставки и почему изменяемый ключ
@@ -402,7 +402,7 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
       <li><strong>Не звать <code>ToDictionary</code> на данных с дублями</strong> — <code>ToLookup</code> или
         <code>GroupBy</code>.</li>
       <li><strong>Не менять коллекцию во время <code>foreach</code></strong> —
-        <code>InvalidOperationException</code> (глава 8).</li>
+        <code>InvalidOperationException</code> (глава 9).</li>
       <li><strong>Не передавать <code>Dictionary</code> между потоками без синхронизации.</strong></li>
     </ul>
 
@@ -427,8 +427,8 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
     </div>
 
     <div class="pager">
-      <a href="cs06-collections.html">← <span class="sp">Глава 6. Коллекции: generic против non-generic</span></a>
-      <a href="cs08-ienumerable.html"><span class="sp">Глава 8. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+      <a href="cs07-generic-constraints-variance.html">← <span class="sp">Глава 7. Generic глубже: ограничения, вариантность и generic math</span></a>
+      <a href="cs09-ienumerable.html"><span class="sp">Глава 9. IEnumerable, yield и IAsyncEnumerable</span> →</a>
     </div>
   </div>
 </div>

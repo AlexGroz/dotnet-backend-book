@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 7 · Generic глубже: ограничения, вариантность и generic math</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs08-dictionaries-sets-queues.html"><span class="sp">Глава 8. Словари, множества и очереди на практике</span> →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть II · Коллекции и перечисления</div>
+    <h1>Глава 7. Generic глубже: ограничения, вариантность и generic math</h1>
+    <p class="sublead">Что именно компилятор знает о <code>T</code>, как расширить этот список через
+      <code>where</code>, почему <code>List&lt;string&gt;</code> нельзя отдать туда, где ждут
+      <code>List&lt;object&gt;</code>, и как складывать «числа неизвестного типа».</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>В главе 6 была механика: параметр типа, подстановка, открытый и закрытый тип. Здесь — то, что из этой
+      механики следует на практике. Главная мысль главы в одном предложении: <strong>ограничения
+      (<code>where</code>) — единственный способ сообщить компилятору, что у <code>T</code> есть что-то,
+      чего нет у всех типов</strong>. Больше о <code>T</code> он не знает ничего.</p>
+    <p>Отсюда растут три темы, которые обычно спрашивают вместе:</p>
+    <ul>
+      <li><strong>Ограничения</strong> — что можно пообещать (<code>new()</code>, <code>class</code>,
+        <code>struct</code>, <code>notnull</code>, <code>unmanaged</code>, базовый класс, интерфейс,
+        <code>Enum</code>/<code>Delegate</code>) и что каждое из них разрешает вызвать.</li>
+      <li><strong>Вариантность</strong> (<code>in</code>/<code>out</code>) — когда <code>IEnumerable&lt;A&gt;</code>
+        можно подставить вместо <code>IEnumerable&lt;B&gt;</code>, а когда нельзя, и почему.</li>
+      <li><strong>Generic math</strong> (C# 11+) — как <code>+</code> и <code>*</code> заработали для
+        параметра типа.</li>
+    </ul>
+
+    <h2>Виды ограничений</h2>
+    <p>Ограничение записывается после параметров типа; их можно комбинировать (правила порядка — в следующем
+      разделе). Сводка — с тем, что каждое <em>разрешает делать</em> внутри generic-кода:</p>
+    <table>
+      <thead><tr><th>Запись</th><th>Что означает</th><th>Что становится можно</th></tr></thead>
+      <tbody>
+        <tr><td><code>where T : class</code></td><td>Ссылочный тип</td><td>Сравнение с <code>null</code>,
+          передача в API со ссылочной семантикой</td></tr>
+        <tr><td><code>where T : class?</code></td><td>Ссылочный тип, <em>включая</em> nullable</td>
+          <td><code>null</code> допустим внутри generic-кода</td></tr>
+        <tr><td><code>where T : struct</code></td><td>Значимый тип</td><td><code>new T()</code> (у структур
+          конструктор без параметров есть всегда), <code>T?</code> = <code>Nullable&lt;T&gt;</code></td></tr>
+        <tr><td><code>where T : notnull</code></td><td>Не-nullable (для анализа nullability)</td>
+          <td>Отсекает <code>T = string?</code> предупреждением CS8714</td></tr>
+        <tr><td><code>where T : unmanaged</code></td><td>Значимый тип без ссылок внутри</td>
+          <td>Работу с памятью: размер через <code>Unsafe.SizeOf&lt;T&gt;()</code>, указатели</td></tr>
+        <tr><td><code>where T : new()</code></td><td>Есть открытый конструктор без параметров</td>
+          <td><code>new T()</code></td></tr>
+        <tr><td><code>where T : Base</code></td><td>Базовый класс</td><td>Все члены <code>Base</code></td></tr>
+        <tr><td><code>where T : IFoo</code></td><td>Интерфейс</td><td>Члены <code>IFoo</code></td></tr>
+        <tr><td><code>where T : struct, Enum</code></td><td>Перечисление</td>
+          <td><code>Enum.IsDefined(value)</code>, <code>Enum.GetValues&lt;T&gt;()</code></td></tr>
+        <tr><td><code>where T : Delegate</code></td><td>Любой делегат</td>
+          <td><code>GetInvocationList()</code>, подписку и отписку в обобщённом виде</td></tr>
+        <tr><td><code>where T : INumber&lt;T&gt;</code></td><td>Число (C# 11)</td>
+          <td><code>+ - * /</code>, сравнение, <code>Parse</code></td></tr>
+      </tbody>
+    </table>
+    <p>Проверяются они <strong>в момент подстановки</strong>: неверный тип-аргумент — ошибка компиляции, а не
+      сюрприз в рантайме. Поэтому ограничение ещё и документация: по сигнатуре
+      <code>IRepository&lt;T&gt; where T : Entity</code> сразу видно, что положат в репозиторий.</p>
+
+    <h2>Правила записи: порядок и взаимоисключения</h2>
+    <p>У списка ограничений есть жёсткий порядок: сначала «первичное» (<code>class</code>, <code>struct</code>,
+      <code>unmanaged</code>, <code>notnull</code>), затем базовый класс или интерфейсы, и только в конце
+      <code>new()</code>. Нарушения ловятся компилятором:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class A&lt;T&gt; where T : class, struct { }   // ✘ взаимоисключающие
+public class B&lt;T&gt; where T : new(), class { }   // ✘ new() должен быть последним</code></pre>
+      <p class="cap">Вывод компилятора</p>
+      <pre><code class="language-text">error CS0449: The 'class', 'struct', 'unmanaged', 'notnull', and 'default' constraints
+cannot be combined or duplicated, and must be specified first in the constraints list.
+error CS0401: The new() constraint must be the last constraint specified</code></pre>
+    </div>
+    <p>Правильно так: <code>where T : class, IEntity, new()</code> — первичное, интерфейсы, <code>new()</code>.
+      А ещё ограничение может быть <em>самоссылочным</em>, и это не опечатка:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public static T Max&lt;T&gt;(T a, T b) where T : IComparable&lt;T&gt;   // «T сравним сам с собой»
+    =&gt; a.CompareTo(b) &gt;= 0 ? a : b;</code></pre>
+    </div>
+    <p><code>IComparable&lt;T&gt;</code> вместо <code>IComparable</code> — важно: второй принимает
+      <code>object</code> и требует приведения, а вместе с ним и упаковки для значимых типов (глава 4).</p>
+
+
+    <h2><code>new()</code>, <code>class</code>, <code>struct</code>: что можно вызвать</h2>
+    <p><strong><code>new()</code></strong> — обещание «есть открытый конструктор без параметров». Почему без
+      него не работает <code>new T()</code> и что говорит CS0304 — разобрано в главе 6; здесь важны три
+      следствия, которые всплывают в реальном коде.</p>
+    <ul>
+      <li><strong>Абстрактные классы не проходят.</strong> Даже с <code>new()</code> подставить абстрактный
+        тип нельзя — создать объект невозможно, и текст ошибки это прямо называет:
+        <code>'Shape' must be a non-abstract type with a public parameterless constructor</code> (CS0310).</li>
+      <li><strong><code>struct</code> уже включает <code>new()</code>.</strong> У структур конструктор без
+        параметров есть по определению, поэтому <code>where T : struct</code> разрешает <code>new T()</code>
+        без дополнительного <code>new()</code>, а писать оба сразу бессмысленно (и запрещено).</li>
+      <li><strong>Для value-типов <code>new T()</code> — это нули.</strong> Не «созданный объект с логикой», а
+        <code>default</code> по всем полям: <code>new Guid()</code> — пустой GUID,
+        <code>new decimal()</code> — <code>0</code>. Если конструктор должен что-то заполнять, ограничение
+        <code>new()</code> этого не гарантирует — нужен интерфейс-фабрика.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static T Make&lt;T&gt;() where T : new() =&gt; new T();
+
+Console.WriteLine(Make&lt;int&gt;());                 // 0
+Console.WriteLine(Make&lt;Guid&gt;());                // 00000000-0000-0000-0000-000000000000
+Console.WriteLine(Make&lt;List&lt;int&gt;&gt;().Count);      // 0 — пустой список</code></pre>
+    </div>
+    <p>Если логика создания обязательна, ограничение заменяют фабрикой: <code>where T : IFactory&lt;T&gt;</code>
+      с методом <code>static abstract T Create()</code> (C# 11) — тогда компилятор требует не «какой-нибудь
+      конструктор», а именно тот, который вы описали.</p>
+
+    <p><strong><code>class</code> против <code>struct</code></strong> — это не «взаимоисключающие украшения», а
+      переключатель того, чем <code>T</code> является <em>внутри</em> generic-кода:</p>
+    <table>
+      <thead><tr><th></th><th><code>where T : class</code></th><th><code>where T : struct</code></th></tr></thead>
+      <tbody>
+        <tr><td><code>T?</code> означает</td><td>«может быть <code>null</code>» (ссылка)</td>
+          <td><code>Nullable&lt;T&gt;</code></td></tr>
+        <tr><td><code>default(T)</code></td><td><code>null</code></td><td>нули</td></tr>
+        <tr><td>Упаковка при передаче в <code>object</code></td><td>нет</td><td>есть (глава 4)</td></tr>
+        <tr><td><code>new T()</code></td><td>только с <code>new()</code></td><td>разрешено всегда</td></tr>
+        <tr><td>Типичный пример</td><td><code>IRepository&lt;T&gt; where T : class</code></td>
+          <td><code>Nullable&lt;T&gt;</code>, числовые утилиты</td></tr>
+      </tbody>
+    </table>
+    <p><strong><code>notnull</code></strong> — ограничение «только для анализа nullability»: оно ничего не
+      добавляет к возможностям, но запрещает подставлять nullable-типы. Ошибка при этом —
+      <em>предупреждение</em>, а не ошибка сборки:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static void Add&lt;T&gt;(Dictionary&lt;string, T&gt; d, string key, T value) where T : notnull
+    =&gt; d[key] = value;
+
+var byId = new Dictionary&lt;string, string?&gt;();
+Add&lt;string?&gt;(byId, "a", null);        // ⚠ T = string? не подходит</code></pre>
+      <p class="cap">Вывод компилятора (CS8714 — предупреждение)</p>
+      <pre><code class="language-text">warning CS8714: The type 'string?' cannot be used as type parameter 'T' in the generic
+type or method 'Add&lt;T&gt;(Dictionary&lt;string, T&gt;, string, T)'. Nullability of type
+argument 'string?' doesn't match 'notnull' constraint.</code></pre>
+    </div>
+    <p>Именно <code>notnull</code> стоит в объявлении <code>Dictionary&lt;TKey, TValue&gt;</code> — на
+      <em>ключе</em>: словарь не предназначен для <code>null</code>-ключей, и попытка подставить
+      <code>string?</code> даёт тот же CS8714 уже от имени <code>TKey</code>.</p>
+
+
+    <h2><code>Enum</code>, <code>Delegate</code>, <code>IParsable</code>: ограничение как «умение вызывать»</h2>
+    <p>Три примера, где ограничение даёт не поля и методы экземпляра, а <strong>статические члены</strong> —
+      именно ради них эти ограничения и существуют.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1. Перечисление: структура + Enum. Порядок обязателен: struct первым
+static bool IsKnown&lt;T&gt;(T value) where T : struct, Enum =&gt; Enum.IsDefined(value);
+
+// 2. Любой делегат: можно разобрать список подписчиков
+static int HandlerCount&lt;T&gt;(T handler) where T : Delegate
+    =&gt; handler.GetInvocationList().Length;
+
+// 3. Всё, что умеет Parse: int, double, DateOnly, Guid, свои типы
+static T ParseIt&lt;T&gt;(string text) where T : IParsable&lt;T&gt; =&gt; T.Parse(text, null);
+
+Console.WriteLine(IsKnown(Color.Green));       // True
+Console.WriteLine(HandlerCount(f));            // 2 — после f += второй подписчик
+Console.WriteLine(ParseIt&lt;int&gt;("42"));        // 42
+Console.WriteLine(ParseIt&lt;Guid&gt;("00000000-0000-0000-0000-000000000001"));</code></pre>
+    </div>
+    <p>Как это устроено внутри: <code>Enum</code>, <code>Delegate</code>, <code>IParsable&lt;T&gt;</code> —
+      обычные ограничения на интерфейсы и классы. Работают они потому, что с C# 11 у интерфейсов появились
+      <strong>статические абстрактные члены</strong>: <code>IParsable&lt;T&gt;</code> требует от типа метод
+      <code>static T Parse(string, IFormatProvider?)</code>, и компилятор знает, что его можно вызвать для
+      любого <code>T</code>, подошедшего под ограничение.</p>
+    <div class="box note">
+      <span class="t">Зачем это, если можно передать <code>Func&lt;string, T&gt;</code></span>
+      <p>Функцию-парсер можно передать параметром — и до C# 11 так и делали. Ограничение удобнее тем, что
+        не требует лишней лямбды на каждом вызове, работает через JIT без делегата и само появляется в
+        подсказке IDE: <code>ParseIt&lt;Order&gt;(…)</code> не скомпилируется, пока у <code>Order</code> нет
+        <code>static Parse</code>.</p>
+    </div>
+
+    <h2>Generic math: арифметика на неизвестном типе</h2>
+    <p>До C# 11 «сложить два <code>T</code>» было невозможно: у параметра типа нет операторов. Обходили
+      либо приведением к <code>dynamic</code> (медленно, ошибки в рантайме), либо отдельными методами под
+      каждый числовой тип. Сейчас нужное поведение описывается интерфейсом <code>INumber&lt;T&gt;</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using System.Numerics;
+
+static T Sum&lt;T&gt;(T a, T b) where T : INumber&lt;T&gt; =&gt; a + b;
+static T Avg&lt;T&gt;(IEnumerable&lt;T&gt; xs) where T : INumber&lt;T&gt;
+{
+    T sum = T.Zero, count = T.Zero;
+    foreach (var x in xs) { sum += x; count++; }
+    return sum / count;
+}
+
+Console.WriteLine(Sum(1, 2));              // 3      — int
+Console.WriteLine(Sum(1.5, 2.5));          // 4      — double
+Console.WriteLine(Avg(new[] { 1, 2, 3 })); // 2      — int
+Console.WriteLine(Avg(new[] { 1.0, 2.0 }));// 1.5    — double</code></pre>
+    </div>
+    <p><code>INumber&lt;T&gt;</code> — «сборная» интерфейсов: в нём и <code>+</code>, и <code>-</code>,
+      и <code>*</code>, и <code>/</code>, и сравнение, и <code>T.Zero</code>/<code>T.One</code>. Если нужна
+      только часть, берут узкое ограничение:</p>
+    <table>
+      <thead><tr><th>Ограничение</th><th>Что даёт</th></tr></thead>
+      <tbody>
+        <tr><td><code>IAdditionOperators&lt;T,T,T&gt;</code></td><td>Только <code>+</code></td></tr>
+        <tr><td><code>IComparisonOperators&lt;T,T,bool&gt;</code></td><td><code>&lt;</code>, <code>&gt;</code>,
+          <code>&lt;=</code>, <code>&gt;=</code></td></tr>
+        <tr><td><code>IParsable&lt;T&gt;</code> / <code>ISpanParsable&lt;T&gt;</code></td>
+          <td><code>Parse</code> из строки и из <code>Span</code></td></tr>
+        <tr><td><code>INumber&lt;T&gt;</code></td><td>Всё вышеперечисленное плюс <code>Zero/One</code>,
+          <code>Abs</code>, <code>Clamp</code></td></tr>
+        <tr><td><code>IBinaryInteger&lt;T&gt;</code> / <code>IFloatingPoint&lt;T&gt;</code></td>
+          <td>Целочисленное / плавающее подмножество</td></tr>
+      </tbody>
+    </table>
+    <p>Ограничение <code>INumber&lt;T&gt;</code> не подходит для <code>string</code>, <code>decimal</code>
+      подходит, <code>int</code> и <code>double</code> тоже. Ошибка подстановки — обычная CS0311:
+      «нет неявного преобразования к <code>INumber&lt;T&gt;</code>».</p>
+
+
+    <h2>Вариантность: когда <code>IEnumerable&lt;A&gt;</code> можно заменить на <code>IEnumerable&lt;B&gt;</code></h2>
+    <p>Представьте метод, которому нужен «любой список объектов». Логично отдать ему
+      <code>List&lt;string&gt;</code> — строка ведь объект. Компилятор это запрещает, и вот почему:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">List&lt;string&gt; strings = new();
+List&lt;object&gt; objects = strings;      // ✘</code></pre>
+      <p class="cap">Вывод компилятора</p>
+      <pre><code class="language-text">error CS0266: Cannot implicitly convert type 'System.Collections.Generic.List&lt;string&gt;'
+to 'System.Collections.Generic.List&lt;object&gt;'. An explicit conversion exists
+(are you missing a cast?)</code></pre>
+    </div>
+    <p>Запрет правильный: <code>List&lt;object&gt;</code> умеет <code>Add(object)</code>. Разреши мы такое
+      приведение, через «список объектов» в действительности строк можно было бы положить число — и получить
+      испорченную коллекцию. Поэтому <code>List&lt;T&gt;</code> <strong>инвариантен</strong>: подставлять можно
+      только тот же самый <code>T</code>.</p>
+    <p>Но там, где элемент <em>только читают</em> (или <em>только пишут</em>), направление можно разрешить.
+      Это и есть <strong>вариантность</strong>, объявленная у интерфейса через <code>out</code>/<code>in</code>:</p>
+    <table>
+      <thead><tr><th>Модификатор</th><th>Направление</th><th>Разрешено</th><th>Примеры из BCL</th></tr></thead>
+      <tbody>
+        <tr><td><code>out T</code></td><td>ковариантность: <code>T</code> только возвращается</td>
+          <td><code>IEnumerable&lt;string&gt;</code> → <code>IEnumerable&lt;object&gt;</code></td>
+          <td><code>IEnumerable&lt;out T&gt;</code>, <code>IReadOnlyList&lt;out T&gt;</code>,
+          <code>IReadOnlyCollection&lt;out T&gt;</code>, <code>Func&lt;out TResult&gt;</code></td></tr>
+        <tr><td><code>in T</code></td><td>контравариантность: <code>T</code> только принимается</td>
+          <td><code>IComparer&lt;object&gt;</code> → <code>IComparer&lt;string&gt;</code></td>
+          <td><code>Action&lt;in T&gt;</code>, <code>IComparer&lt;in T&gt;</code>,
+          <code>IEqualityComparer&lt;in T&gt;</code></td></tr>
+        <tr><td>нет</td><td>инвариантность: и принимается, и возвращается</td><td>только точное
+          совпадение</td><td><code>List&lt;T&gt;</code>, <code>IList&lt;T&gt;</code>,
+          <code>Dictionary&lt;TKey, TValue&gt;</code></td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">IEnumerable&lt;string&gt; strings = new List&lt;string&gt; { "a" };
+IEnumerable&lt;object&gt; objects = strings;                    // ✔ ковариантность
+
+IComparer&lt;object&gt; byObject = Comparer&lt;object&gt;.Default;
+IComparer&lt;string&gt; byString = byObject;                    // ✔ контравариантность
+
+Func&lt;string&gt; getString = () =&gt; "s";
+Func&lt;object&gt; getObject = getString;                       // ✔ результат «расширяется»
+
+Action&lt;object&gt; actObject = o =&gt; Console.WriteLine(o);
+Action&lt;string&gt; actString = actObject;                     // ✔ параметр «сужается»
+actString("ok");                                          // ok</code></pre>
+    </div>
+    <p>Логика одной фразой: <strong>если коллекция только отдаёт элементы, её можно считать коллекцией более
+      общих типов; если только принимает — более узких</strong>. Отсюда и правило проектирования из главы 6:
+      возвращайте <code>IEnumerable&lt;T&gt;</code>/<code>IReadOnlyList&lt;T&gt;</code> (они ковариантны),
+      а не <code>List&lt;T&gt;</code>.</p>
+    <div class="box note">
+      <span class="t">Почему <code>Task&lt;T&gt;</code> не вариантна</span>
+      <p><code>Task&lt;string&gt;</code> нельзя отдать туда, где ждут <code>Task&lt;object&gt;</code> — это
+        ошибка CS0029. Причина в том, что вариантность объявляют только у интерфейсов и делегатов, а
+        <code>Task&lt;T&gt;</code> — класс. Практический выход: <code>await</code> и приведение результата,
+        либо <code>Task&lt;object&gt;</code> в сигнатуре с самого начала.</p>
+    </div>
+    <p>Объявить вариантность можно только у интерфейсов и делегатов — у класса это ошибка:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class MyList&lt;out T&gt; { }              // ✘ класс
+public interface IBad&lt;out T&gt; { void Add(T item); }   // ✘ out, но T в параметре</code></pre>
+      <p class="cap">Вывод компилятора</p>
+      <pre><code class="language-text">error CS1960: Invalid variance modifier. Only interface and delegate type parameters can be
+specified as variant.
+error CS1961: Invalid variance: The type parameter 'T' must be contravariantly valid on
+'IBad&lt;T&gt;.Add(T)'. 'T' is covariant.</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Ковариантность массивов — исключение и ловушка</span>
+      <p>Массивы в C# ковариантны по ссылочным типам: <code>object[] a = new string[1];</code> компилируется.
+        Проверка переносится в рантайм, и запись «не того» типа падает:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">object[] arr = new string[1];
+arr[0] = 42;          // ✘ падение при выполнении</code></pre>
+        <p class="cap">Вывод</p>
+        <pre><code class="language-text">Unhandled exception. System.ArrayTypeMismatchException: Attempted to access an element
+as a type incompatible with the array.</code></pre>
+      </div>
+      <p>Именно из-за этого generic-коллекции сделали инвариантными: лучше ошибка компиляции, чем проверка
+        типа на каждой записи.</p>
+    </div>
+
+
+    <h2>Ограничения не наследуются сами</h2>
+    <p>Две ошибки, на которые натыкаются при наследовании и переопределении, — и обе про то, что ограничение
+      приходится <em>повторять</em> или, наоборот, <em>не повторять</em>.</p>
+    <p><strong>Наследник generic-класса обязан повторить ограничения</strong> — иначе компилятор не может
+      доказать, что <code>T</code> подходит родителю:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class Repo&lt;T&gt; where T : Shape { }
+public class CircleRepo&lt;T&gt; : Repo&lt;T&gt; { }        // ✘ ограничение потеряли</code></pre>
+      <p class="cap">Вывод компилятора (CS0314)</p>
+      <pre><code class="language-text">error CS0314: The type 'T' cannot be used as type parameter 'T' in the generic type or
+method 'Repo&lt;T&gt;'. There is no boxing conversion or type parameter conversion from 'T'
+to 'Shape'.</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class CircleRepo&lt;T&gt; : Repo&lt;T&gt; where T : Shape { }   // ✔ повторили</code></pre>
+    </div>
+    <p><strong>А в <code>override</code> и явной реализации интерфейса — наоборот:</strong> ограничения
+      наследуются от базового метода, и указывать их заново нельзя (исключение — <code>class</code>/
+      <code>struct</code>, их разрешено уточнять):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class Base
+{
+    public virtual void Run&lt;T&gt;(T x) where T : IComparable&lt;T&gt; { }
+}
+
+public class Derived : Base
+{
+    public override void Run&lt;T&gt;(T x) where T : IComparable&lt;T&gt; { }   // ✘ повтор
+}</code></pre>
+      <p class="cap">Вывод компилятора (CS0460)</p>
+      <pre><code class="language-text">error CS0460: Constraints for override and explicit interface implementation methods are
+inherited from the base method, so they cannot be specified directly, except for either a
+'class', or a 'struct' constraint.</code></pre>
+    </div>
+    <p>В C# 9 к этому добавили <code>where T : default</code> — пометку «здесь ограничение не задаётся»,
+      чтобы такие методы можно было писать явно.</p>
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong><code>where T : Enum</code> без <code>struct</code> компилируется, но бесполезен.</strong>
+        Ограничение на класс <code>Enum</code> пропускает и <code>System.Enum</code> с его наследниками, но
+        «значимости» не гарантирует — и первый же <code>Enum.IsDefined(value)</code> не собирается:</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static bool IsKnown&lt;T&gt;(T value) where T : Enum =&gt; Enum.IsDefined(value);   // ✘</code></pre>
+      <p class="cap">Вывод компилятора (CS0453)</p>
+      <pre><code class="language-text">error CS0453: The type 'T' must be a non-nullable value type in order to use it as
+parameter 'TEnum' in the generic type or method 'Enum.IsDefined&lt;TEnum&gt;(TEnum)'</code></pre>
+    </div>
+    <p>Правильно — <code>where T : struct, Enum</code> (и именно в таком порядке, <code>struct</code> первым).</p>
+    <ul>
+      <li><strong><code>new()</code> не означает «с настроенным объектом».</strong> Для значимых типов
+        <code>new T()</code> — это нули, для классов — результат конструктора по умолчанию. Проверок
+        инвариантов он не даёт.</li>
+      <li><strong><code>notnull</code> — предупреждение, а не запрет.</strong> Код скомпилируется, если
+        отключить предупреждения; на валидацию данных это ограничение не заменяет.</li>
+      <li><strong>Ограничение-интерфейс не гарантирует отсутствие упаковки.</strong> Вызов
+        <code>a.CompareTo(b)</code> внутри generic-метода идёт без бокса, но <code>(object)a</code> или
+        необобщённый <code>IComparable</code> — уже упаковка (глава 4).</li>
+      <li><strong>Вариантность не «разрешает всё».</strong> <code>IEnumerable&lt;string&gt;</code> →
+        <code>IEnumerable&lt;object&gt;</code> можно, <code>List&lt;string&gt;</code> →
+        <code>List&lt;object&gt;</code> нельзя, а массивы хоть и ковариантны, но падают в рантайме.</li>
+      <li><strong>Ограничения проверяются при подстановке, а не при объявлении.</strong> Ошибка появится в
+        месте вызова <code>Max&lt;object&gt;(…)</code>, а не в объявлении <code>Max</code>.</li>
+    </ul>
+
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Ограничение — это обещание компилятору</strong>, что у <code>T</code> есть нужное. Без
+          ограничений о <code>T</code> известно только «совместим с <code>object</code>»: работает
+          <code>default(T)</code>, <code>Equals</code>, хранение и передача.</li>
+        <li><strong><code>new()</code></strong> даёт <code>new T()</code>; <code>struct</code> подразумевает
+          его; абстрактный тип не подставить (CS0310); для структур <code>new T()</code> — нули.</li>
+        <li><strong><code>class</code>/<code>struct</code></strong> решают, чем будет <code>T?</code>:
+          ссылкой или <code>Nullable&lt;T&gt;</code>. <strong><code>notnull</code></strong> — про анализ
+          nullability (предупреждение CS8714).</li>
+        <li><strong>Порядок в списке:</strong> первичное (<code>class</code>, <code>struct</code>,
+          <code>unmanaged</code>, <code>notnull</code>) → базовый класс/интерфейсы → <code>new()</code>
+          последним (CS0449, CS0401).</li>
+        <li><strong><code>Enum</code> — только вместе с <code>struct</code></strong>, иначе
+          <code>Enum.IsDefined</code> не собирается (CS0453).</li>
+        <li><strong>Generic math</strong> — <code>INumber&lt;T&gt;</code> (C# 11): <code>+ - * /</code>,
+          сравнение, <code>T.Zero</code>. Узкие интерфейсы (<code>IAdditionOperators</code>,
+          <code>IParsable</code>) — когда нужна одна операция.</li>
+        <li><strong>Вариантность:</strong> <code>out</code> — «только отдаёт» (ковариантность),
+          <code>in</code> — «только принимает» (контравариантность); только у интерфейсов и делегатов
+          (CS1960), направление нарушить нельзя (CS1961). <code>List&lt;T&gt;</code> инвариантен.</li>
+        <li><strong>Ограничения не наследуются:</strong> наследник generic-класса их повторяет (CS0314), а
+          <code>override</code> и явная реализация — нет (CS0460).</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs06-collections.html">← <span class="sp">Глава 6. Коллекции: generic против non-generic</span></a>
+      <a href="cs08-dictionaries-sets-queues.html"><span class="sp">Глава 8. Словари, множества и очереди на практике</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

@@ -13,7 +13,7 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs07-dictionaries-sets-queues.html"><span class="sp">Глава 7. Словари, множества и очереди на практике</span> →</a>
+  <a href="cs07-generic-constraints-variance.html"><span class="sp">Глава 7. Generic глубже: ограничения, вариантность и generic math</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
@@ -196,6 +196,9 @@ Console.WriteLine(Sum(1.5, 2.5));    // 4   — T = double</code></pre>
           <td><code>IRepository&lt;T&gt; where T : Entity</code></td></tr>
       </tbody>
     </table>
+    <p>Это только те ограничения, которые нужны, чтобы читать код. Все виды <code>where</code>,
+      <code>T?</code> и <code>notnull</code>, вариантность <code>in</code>/<code>out</code> и generic math —
+      в <strong>главе 7</strong>.</p>
     <p>И последнее в этом блоке — про <em>открытый</em> тип. Даже когда ограничения выполнены, объект
       <code>List&lt;&gt;</code> создать нельзя: подставлять нечего.</p>
     <div class="codewrap">
@@ -276,7 +279,7 @@ Console.WriteLine(m2);        // b</code></pre>
         <tr><td><code>Queue</code>, <code>Stack</code></td><td><code>Queue&lt;T&gt;</code>, <code>Stack&lt;T&gt;</code></td><td>То же плюс отсутствие бокса</td></tr>
         <tr><td><code>SortedList</code></td><td><code>SortedList&lt;TKey, TValue&gt;</code>, <code>SortedDictionary&lt;TKey, TValue&gt;</code></td><td>Типизация; разная внутренняя структура и сложность</td></tr>
         <tr><td><code>CollectionBase</code></td><td><code>Collection&lt;T&gt;</code></td><td>Готовые проверки и уведомления об изменениях</td></tr>
-        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 8)</td></tr>
+        <tr><td><code>IEnumerable</code></td><td><code>IEnumerable&lt;T&gt;</code></td><td>Типизированное перечисление (глава 9)</td></tr>
       </tbody>
     </table>
     <p>Non-generic-версии остались ради совместимости. В новом коде их не используют — исключение только
@@ -286,7 +289,7 @@ Console.WriteLine(m2);        // b</code></pre>
     <table>
       <thead><tr><th>Интерфейс</th><th>Что умеет</th><th>Когда использовать в сигнатуре</th></tr></thead>
       <tbody>
-        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 8)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
+        <tr><td><code>IEnumerable&lt;T&gt;</code></td><td>Только перечисление (глава 9)</td><td>«Нужно пройти по элементам» — самый слабый контракт</td></tr>
         <tr><td><code>IReadOnlyCollection&lt;T&gt;</code></td><td>Перечисление + <code>Count</code></td><td>Чтение набора</td></tr>
         <tr><td><code>IReadOnlyList&lt;T&gt;</code></td><td>Плюс доступ по индексу</td><td>Результат выборки, который нельзя менять</td></tr>
         <tr><td><code>ICollection&lt;T&gt;</code>, <code>IList&lt;T&gt;</code></td><td>Добавление, удаление, индексатор</td><td>Когда вызывающий действительно должен менять коллекцию</td></tr>
@@ -414,7 +417,7 @@ void Print(IEnumerable&lt;Order&gt; orders)
 
     <div class="pager">
       <a href="cs05-ref-struct-span.html">← <span class="sp">Глава 5. ref struct и Span: окно в память без аллокаций</span></a>
-      <a href="cs07-dictionaries-sets-queues.html"><span class="sp">Глава 7. Словари, множества и очереди на практике</span> →</a>
+      <a href="cs07-generic-constraints-variance.html"><span class="sp">Глава 7. Generic глубже: ограничения, вариантность и generic math</span> →</a>
     </div>
   </div>
 </div>
