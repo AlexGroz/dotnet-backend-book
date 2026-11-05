@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 17 · Рефлексия и атрибуты: typeof, Type, Activator, метаданные</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="csharp.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы, делегаты и асинхронность</div>
+    <h1>Глава 17. Рефлексия и атрибуты: typeof, Type, Activator, метаданные</h1>
+    <p class="sublead">Как программа читает собственные типы в рантайме, что такое <code>typeof</code> и
+      <code>GetType()</code>, как работают <code>Activator</code> и атрибуты, чем платят за рефлексию и почему
+      на ней держатся DI, сериализация и ORM.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p><strong>Рефлексия</strong> — это чтение метаданных сборки во время работы программы. Обычный код
+      вызывает методы напрямую, а рефлексия сначала спрашивает у рантайма: «какие у этого типа свойства? какой
+      у них тип? есть ли у этого свойства атрибут?» — и только потом вызывает что-то по имени.</p>
+    <p>В книге она уже встречалась: «<code>Equals</code> по умолчанию сравнивает поля через рефлексию»
+      (глава 3), «<code>Activator</code> ищет конструктор в рантайме» (глава 6), «DI и рефлексия видят настоящий
+      тип-аргумент» (глава 6). Здесь — что это за механизм, из чего состоит и когда им пользоваться.</p>
+    <p>Два входа в метаданные:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Type t1 = typeof(Order);            // тип известен на компиляции
+var order = new Order { Id = 1 };
+Type t2 = order.GetType();          // тип берётся у объекта
+
+Console.WriteLine(t1 == t2);                    // True — это один и тот же объект Type
+Console.WriteLine(t1.Name + " / " + t1.FullName); // Order / Order</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True
+Order / Order</code></pre>
+    </div>
+    <p>Разница только в источнике: <code>typeof</code> компилятор подставляет сам (работает и без объекта), а
+      <code>GetType()</code> — виртуальный метод <code>object</code>, который возвращает <em>настоящий</em> тип:
+      для объекта, лежащего в переменной базового типа, это будет наследник. И то и другое даёт один и тот же
+      объект <code>System.Type</code> — в рантайме тип существует в единственном экземпляре (reification,
+      глава 6).</p>
+
+    <h2><code>Type</code>: что можно узнать о типе</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var t = typeof(Order);      // public sealed class Order { public int Id; public decimal Total; }
+
+Console.WriteLine(t.Name + " " + t.IsClass + " " + t.IsValueType + " " + t.BaseType!.Name);
+Console.WriteLine(typeof(int).IsValueType + " " + typeof(int).BaseType!.Name);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Order True False Object
+True ValueType</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Член <code>Type</code></th><th>Что даёт</th></tr></thead>
+      <tbody>
+        <tr><td><code>Name</code>, <code>FullName</code>, <code>Namespace</code></td>
+          <td>Имена (для generic-типа в <code>Name</code> будет обратная кавычка и число параметров)</td></tr>
+        <tr><td><code>IsClass</code>, <code>IsValueType</code>, <code>IsInterface</code>,
+          <code>IsEnum</code>, <code>IsAbstract</code>, <code>IsSealed</code></td>
+          <td>Классификация типа</td></tr>
+        <tr><td><code>BaseType</code>, <code>GetInterfaces()</code></td><td>Наследование</td></tr>
+        <tr><td><code>IsGenericType</code>, <code>IsGenericTypeDefinition</code></td>
+          <td>Обобщённый ли тип, подставлены ли аргументы (глава 6)</td></tr>
+        <tr><td><code>GetGenericArguments()</code>, <code>MakeGenericType(…)</code></td>
+          <td>Что подставлено / собрать закрытый тип из открытого</td></tr>
+        <tr><td><code>GetProperties()</code>, <code>GetMethods()</code>, <code>GetFields()</code>,
+          <code>GetConstructors()</code></td><td>Члены типа (по умолчанию — только публичные)</td></tr>
+        <tr><td><code>GetCustomAttribute&lt;T&gt;()</code></td><td>Атрибут, если он есть (иначе
+          <code>null</code>)</td></tr>
+      </tbody>
+    </table>
+    <p>Обобщённая часть — прямое продолжение главы 6, и здесь видно, зачем нужны «открытый» и «закрытый»
+      тип:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(typeof(List&lt;&gt;).IsGenericTypeDefinition);            // True — открытый
+
+var args = typeof(Dictionary&lt;,&gt;).GetGenericArguments();
+Console.WriteLine(string.Join(",", args.Select(a =&gt; a.Name)));        // TKey,TValue
+
+var closed = typeof(Dictionary&lt;,&gt;).MakeGenericType(typeof(string), typeof(int));
+Console.WriteLine(closed + " def=" + closed.IsGenericTypeDefinition);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True
+TKey,TValue
+System.Collections.Generic.Dictionary`2[System.String,System.Int32] def=False</code></pre>
+    </div>
+
+    <h2>Свойства и методы по имени: <code>GetValue</code> / <code>SetValue</code></h2>
+    <p>Член типа описывается объектами <code>PropertyInfo</code>, <code>MethodInfo</code>,
+      <code>ConstructorInfo</code>. У них можно спросить метаданные и попросить выполнить действие:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var order = new Order { Id = 7, Total = 99.5m };
+var prop = typeof(Order).GetProperty("Id")!;
+
+Console.WriteLine(prop.GetValue(order));       // 7  — читаем (обратите внимание: возвращается object)
+prop.SetValue(order, 8);                       // пишем
+Console.WriteLine(order.Id);                   // 8
+
+Console.WriteLine(prop.PropertyType.Name + " CanWrite=" + prop.CanWrite);   // Int32 CanWrite=True</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">7
+8
+Int32 CanWrite=True</code></pre>
+    </div>
+    <p>Что важно знать про этот уровень:</p>
+    <ul>
+      <li><strong><code>GetValue</code> возвращает <code>object</code></strong> — для значимых свойств это
+        упаковка (глава 4), а обратно нужен <code>Convert</code>/приведение.</li>
+      <li><strong>Имя чувствительно к регистру</strong>: <code>GetProperty("id")</code> вернёт
+        <code>null</code>, и следующая строка упадёт с <code>NullReferenceException</code>. Именно поэтому
+        библиотеки кэшируют найденные <code>PropertyInfo</code> и проверяют на <code>null</code> явно.</li>
+      <li><strong>По умолчанию — только публичные члены.</strong> Приватные доступны через
+        <code>BindingFlags.NonPublic</code>, но это почти всегда признак того, что вы лезете не туда.</li>
+      <li><strong>Ошибка в имени — ошибка в рантайме.</strong> Компилятор строку <code>"Id"</code> не
+        проверяет, поэтому рефлексию в горячем коде прячут за <code>nameof</code> и тестами.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(typeof(Order).GetProperty("id") is null);   // True — регистр другой</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True</code></pre>
+    </div>
+
+    <h2><code>Activator</code> и «мини-DI»: создать объект по типу</h2>
+    <p>Самый частый сценарий рефлексии — «у меня есть <code>Type</code>, сделай мне экземпляр». Ровно это и
+      делает контейнер зависимостей: находит конструктор, подбирает аргументы по их типам, создаёт объект.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static object? Create(Type type, Func&lt;Type, object?&gt; resolve)
+{
+    var ctor = type.GetConstructors()
+                   .OrderByDescending(c =&gt; c.GetParameters().Length)
+                   .First();                                   // самый «жадный» конструктор
+    var args = ctor.GetParameters()
+                   .Select(p =&gt; resolve(p.ParameterType))       // по типу параметра ищем зависимость
+                   .ToArray();
+    return ctor.Invoke(args);
+}
+
+var report = Create(typeof(Report),
+    t =&gt; t == typeof(IClock) ? new SystemClock() : null);
+
+Console.WriteLine(report);      // Report with SystemClock</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Report with SystemClock</code></pre>
+    </div>
+    <p>Настоящий DI-контейнер (глава 15 .NET-книги) делает то же самое плюс кэширование, времена жизни
+      (<code>Singleton</code>/<code>Scoped</code>/<code>Transient</code>), проверку циклов и обработку ошибок.
+      А самый простой вариант — <code>Activator.CreateInstance</code>, если конструктор без параметров:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var o = Activator.CreateInstance(typeof(Order));   // object?
+var typed = Activator.CreateInstance&lt;Order&gt;();     // Order — без приведения</code></pre>
+    </div>
+    <p>Ошибки рефлексии приходят в рантайме и часто <strong>завёрнутыми</strong>: если конструктор бросил
+      исключение, наружу выйдет <code>TargetInvocationException</code>, а настоящее — внутри
+      <code>InnerException</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Boom { public Boom() =&gt; throw new InvalidOperationException("inside ctor"); }
+
+try { Activator.CreateInstance(typeof(Boom)); }
+catch (Exception e)
+{
+    Console.WriteLine(e.GetType().Name + " / inner: " + e.InnerException?.GetType().Name);
+}</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">TargetInvocationException / inner: InvalidOperationException</code></pre>
+    </div>
+    <p>Запомнить стоит и другой случай: <code>Activator</code> вызывает только <strong>публичный</strong>
+      конструктор без параметров, иначе — <code>MissingMethodException</code>
+      («No parameterless constructor defined for type 'Hidden'»), даже если приватный конструктор есть.</p>
+
+
+    <h2>Атрибуты: данные, которые читает кто-то другой</h2>
+    <p><strong>Атрибут</strong> — класс, унаследованный от <code>System.Attribute</code>, которым помечают тип,
+      член или параметр. Сам по себе он <strong>ничего не выполняет</strong>: это данные в метаданных, а смысл им
+      придаёт тот, кто их читает — компилятор, библиотека или ваш код.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">[AttributeUsage(AttributeTargets.Property)]
+public sealed class ColumnAttribute : Attribute
+{
+    public ColumnAttribute(string name) =&gt; Name = name;
+    public string Name { get; }
+}
+
+public sealed class Order
+{
+    [Column("order_id")] public int Id { get; init; }
+    [Column("total")]    public decimal Total { get; init; }
+    public string Comment { get; init; } = "";
+}</code></pre>
+    </div>
+    <p>Имя в коде и имя класса различаются: пишут <code>[Column]</code>, а класс называется
+      <code>ColumnAttribute</code> — суффикс <code>Attribute</code> компилятор добавляет сам. Чтение — обычная
+      рефлексия:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">foreach (var p in typeof(Order).GetProperties())
+{
+    var col = p.GetCustomAttribute&lt;ColumnAttribute&gt;();
+    Console.WriteLine(p.Name + " -> " + (col is null ? "(нет атрибута)" : col.Name));
+}</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Id -> order_id
+Total -> total
+Comment -> (нет атрибута)</code></pre>
+    </div>
+    <p>Это уже половина мини-ORM: осталось взять значения свойств и собрать из имён колонок SQL.
+      <code>GetCustomAttribute&lt;T&gt;()</code> возвращает <code>null</code>, если атрибута нет — поэтому он
+      удобнее, чем <code>GetCustomAttributes().First()</code>, который на отсутствии бросит исключение.</p>
+    <p>Кто читает атрибуты — три разных «читателя», и путать их не стоит:</p>
+    <table>
+      <thead><tr><th>Кто читает</th><th>Когда</th><th>Примеры</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Компилятор</strong></td><td>при сборке</td><td><code>[Obsolete]</code>,
+          <code>[EnumeratorCancellation]</code> (глава 10), <code>[SetsRequiredMembers]</code> (глава 3)</td></tr>
+        <tr><td><strong>Библиотека через рефлексию</strong></td><td>в рантайме</td>
+          <td><code>[JsonPropertyName]</code> — <code>System.Text.Json</code>; <code>[Column]</code> —
+          EF Core; <code>[FromQuery]</code> — ASP.NET Core</td></tr>
+        <tr><td><strong>Ваш код</strong></td><td>когда захотите</td><td>маппинг колонок, свои правила
+          валидации, описания для Swagger</td></tr>
+      </tbody>
+    </table>
+    <p>Пример «читает компилятор» — <code>[Obsolete]</code>: предупреждение появляется на сборке, без всякой
+      рефлексии в рантайме.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">[Obsolete("используйте NewApi")]
+public static void OldApi() { }
+
+OldApi();      // вызываем — компилятор предупреждает</code></pre>
+      <p class="cap">Вывод компилятора</p>
+      <pre><code class="language-text">warning CS0618: 'Demo.OldApi()' is obsolete: 'используйте NewApi'</code></pre>
+    </div>
+
+    <h2>Сколько стоит рефлексия</h2>
+    <p>Рефлексию часто ругают «за медленность», но цифры зависят от того, <em>что именно</em> делать. Замер на
+      этой машине (net8.0, 1 000 000 итераций, <code>Stopwatch</code>, доступ к одному свойству целого
+      типа):</p>
+    <table>
+      <thead><tr><th>Операция</th><th>Время</th><th>Во сколько раз медленнее прямого доступа</th></tr></thead>
+      <tbody>
+        <tr><td>прямое чтение <code>order.Id</code></td><td>~5 нс</td><td>1×</td></tr>
+        <tr><td>делегат из <code>CreateDelegate</code></td><td>~6 нс</td><td>~1,2×</td></tr>
+        <tr><td>скомпилированное выражение (<code>Expression.Compile()</code>)</td><td>~6 нс</td>
+          <td>~1,1×</td></tr>
+        <tr><td><code>PropertyInfo.GetValue</code> (кэшированный)</td><td>~42 нс</td><td>~9×</td></tr>
+        <tr><td><code>GetProperty("Id")</code> + <code>GetValue</code> каждый раз</td><td>~110 нс</td>
+          <td>~22×</td></tr>
+        <tr><td>первый <code>Type.GetType(…)</code> / загрузка метаданных</td><td>~0,3 мс</td>
+          <td>разово</td></tr>
+      </tbody>
+    </table>
+    <p>Вывод не «рефлексия — это 100× медленно», а конкретнее: <strong>дорого искать член заново и каждый раз
+      упаковывать результат</strong>. Кэшированный <code>PropertyInfo</code>, а тем более делегат или
+      скомпилированное выражение, стоят почти как прямой вызов. Поэтому в библиотеках (DI, сериализаторы, ORM)
+      рефлексия работает <em>один раз</em> — при первом обращении к типу, — а дальше используется кэш.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ поиск члена на каждое обращение
+for (int i = 0; i &lt; 10_000; i++)
+    total += (decimal)typeof(Order).GetProperty("Total")!.GetValue(order)!;
+
+// ✔ один раз нашли — дальше только читаем
+var prop = typeof(Order).GetProperty("Total")!;
+for (int i = 0; i &lt; 10_000; i++)
+    total += (decimal)prop.GetValue(order)!;</code></pre>
+    </div>
+
+
+    <h2>Ограничения: trimming, AOT и генераторы исходников</h2>
+    <p>У рефлексии есть цена, которую не измеришь секундомером: <strong>код, который ищет члены по строкам,
+      нельзя обрезать</strong>. При публикации с trimming (обрезка неиспользуемого кода) или в AOT компилятор
+      не видит, что <code>GetProperty("Total")</code> вообще что-то использует, и может выбросить свойство.
+      Программа скомпилируется, а в рантайме получит <code>null</code> из <code>GetProperty</code> или
+      <code>MissingMethodException</code>.</p>
+    <ul>
+      <li><strong>Подсказки анализатору:</strong> атрибуты
+        <code>[DynamicallyAccessedMembers]</code> и <code>[RequiresUnreferencedCode]</code> говорят, какие
+        члены нужны во время работы.</li>
+      <li><strong>Source generators</strong> — современная альтернатива: код генерируется на этапе компиляции,
+        поэтому виден триммеру и работает в AOT. Так устроены <code>System.Text.Json</code> (source-gen
+        режим), <code>LibraryImport</code>, регулярные выражения и <code>EF Core Compiled Models</code>.</li>
+      <li><strong>Правило:</strong> рефлексия на старте и в инструментах — нормально; рефлексия в горячем
+        пути публичного API и в AOT-сборке — почти всегда ошибка проектирования.</li>
+    </ul>
+
+    <h2>Где рефлексия уместна, а где нет</h2>
+    <table>
+      <thead><tr><th>Уместна</th><th>Не уместна</th></tr></thead>
+      <tbody>
+        <tr><td>DI-контейнер, сериализатор, ORM — один раз на тип, с кэшем</td>
+          <td>Обработка каждого HTTP-запроса «по имени свойства»</td></tr>
+        <tr><td>Тесты и моки, где важна гибкость, а не скорость</td>
+          <td>Внутренний цикл обработки данных (там нужен прямой доступ или делегат)</td></tr>
+        <tr><td>Инструменты: миграции, кодогенерация, анализаторы, консольные утилиты</td>
+          <td>Обход приватных полей «чтобы не менять дизайн» — это скрывает проблему</td></tr>
+        <tr><td>Плагины: загрузка сборок и поиск реализаций интерфейса</td>
+          <td>Замена обычного полиморфизма: <code>is</code>/<code>switch</code> и интерфейсы почти всегда
+          лучше</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong>Имя члена — строка.</strong> Опечатка или регистр дают <code>null</code> и
+        <code>NullReferenceException</code> в рантайме. Пишите имена через <code>nameof</code> и покрывайте
+        тестами.</li>
+      <li><strong><code>GetCustomAttribute&lt;T&gt;()</code> возвращает <code>null</code></strong>, если
+        атрибута нет, — проверяйте. А <code>GetCustomAttributes().First()</code> на пустом списке бросит
+        исключение.</li>
+      <li><strong>Исключения заворачиваются</strong> в <code>TargetInvocationException</code>: настоящее —
+        в <code>InnerException</code>. Логируйте вложенное, иначе стек будет указывать на <code>Invoke</code>.</li>
+      <li><strong>Приватные члены</strong> (<code>BindingFlags.NonPublic</code>) доступны, но переименование
+        поля при рефакторинге сломает такой код без предупреждения.</li>
+      <li><strong><code>GetValue</code> упаковывает</strong> значимые значения — на большом объёме это заметные
+        аллокации и упаковка (глава 4).</li>
+      <li><strong>Атрибут — не проверка.</strong> Пометка <code>[Required]</code> или ваша
+        <code>[Column]</code> ничего не делает, пока кто-то их не прочитает: без читателя это просто
+        комментарий в метаданных.</li>
+      <li><strong>В AOT/trimming</strong> поиск по строкам может не найти член вовсе — смотрите раздел
+        выше.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Рефлексия</strong> — чтение метаданных в рантайме: <code>typeof</code> (тип известен на
+          компиляции), <code>GetType()</code> (настоящий тип объекта).</li>
+        <li><strong><code>Type</code></strong> — классификация (<code>IsClass</code>/<code>IsValueType</code>),
+          наследование, generic-часть (<code>IsGenericTypeDefinition</code>, <code>GetGenericArguments</code>,
+          <code>MakeGenericType</code>), члены и атрибуты.</li>
+        <li><strong>Члены ищутся по имени</strong> (<code>GetProperty("Id")</code>, регистр важен) и вызываются
+          через <code>GetValue</code>/<code>SetValue</code>/<code>Invoke</code>; <code>GetValue</code>
+          возвращает <code>object</code>.</li>
+        <li><strong><code>Activator</code>/конструктор</strong> создают объект по <code>Type</code> — на этом
+          стоит DI; исключения приходят завёрнутыми в <code>TargetInvocationException</code>.</li>
+        <li><strong>Атрибуты</strong> — данные; их читает компилятор (<code>[Obsolete]</code> → CS0618),
+          библиотека (<code>[JsonPropertyName]</code>) или ваш код
+          (<code>GetCustomAttribute&lt;T&gt;()</code>).</li>
+        <li><strong>Цена:</strong> кэшированный <code>PropertyInfo</code> ~9× медленнее прямого доступа,
+          поиск члена на каждое обращение ~22×, делегат/выражение — почти как прямой вызов. Кэшируйте.</li>
+        <li><strong>Ограничения:</strong> рефлексия плохо дружит с trimming/AOT; альтернатива — source
+          generators и генерация кода на этапе компиляции.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs16-exceptions.html">← <span class="sp">Глава 16. Исключения: try/catch/finally, фильтры when, свои исключения</span></a>
+      <a href="csharp.html"><span class="sp">Оглавление раздела</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

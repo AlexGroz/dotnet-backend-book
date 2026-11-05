@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 8 · Сравнение и порядок: IComparable, IComparer и сортировка</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs09-dictionaries-sets-queues.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть II · Коллекции и перечисления</div>
+    <h1>Глава 8. Сравнение и порядок: IComparable, IComparer и сортировка</h1>
+    <p class="sublead">«Равны ли» и «кто раньше» — два разных вопроса с двумя разными интерфейсами. Как устроен
+      <code>CompareTo</code>, зачем нужен <code>IComparer&lt;T&gt;</code>, почему <code>List.Sort</code> и
+      <code>OrderBy</code> дают разный порядок равных элементов и почему строки нельзя сравнивать «просто
+      так».</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>В главе 3 речь шла о <strong>равенстве</strong>: <code>Equals</code> и <code>GetHashCode</code>
+      отвечают на вопрос «это одно и то же?». Порядок — другой вопрос: «кто из двух раньше?». Он нужен везде,
+      где есть сортировка, бинарный поиск, диапазоны, приоритеты и «взять минимум»:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">list.Sort();                     // List&lt;T&gt;.Sort — по умолчанию через CompareTo
+array.Sort();                    // Array.Sort
+var sorted = query.OrderBy(x =&gt; x.Total);      // LINQ
+binSearch = Array.BinarySearch(array, key);    // требует отсортированный массив
+var set = new SortedSet&lt;int&gt;();  // всегда по порядку
+var pq = new PriorityQueue&lt;Job, int&gt;();        // «самый важный» — это тоже порядок</code></pre>
+    </div>
+    <p>Все они опираются на один контракт — <strong><code>IComparable&lt;T&gt;</code></strong> (у самого типа)
+      или <strong><code>IComparer&lt;T&gt;</code></strong> (снаружи). В главах 6–7 эти интерфейсы встречались как
+      ограничения <code>where T : IComparable&lt;T&gt;</code>; здесь — что они на самом деле обещают.</p>
+
+    <h2><code>CompareTo</code>: важен не результат, а знак</h2>
+    <p>Метод возвращает <code>int</code>, но <strong>сравнивать его с <code>1</code> нельзя</strong>: контракт
+      говорит только о знаке — отрицательное значит «я меньше», ноль — «равны», положительное — «я больше».</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(5.CompareTo(3));       // 1
+Console.WriteLine(3.CompareTo(5));       // -1
+Console.WriteLine(3.CompareTo(3));       // 0
+Console.WriteLine(int.MaxValue.CompareTo(int.MinValue));   // 1</code></pre>
+    </div>
+    <p>Свой тип имеет право вернуть <em>любые</em> числа нужного знака — и это нормально:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class BySign : IComparable&lt;BySign&gt;
+{
+    public int Value { get; init; }
+
+    // -42 и 7 — законные результаты: важен только знак
+    public int CompareTo(BySign? other) =&gt;
+        Value &lt; other!.Value ? -42 : Value &gt; other.Value ? 7 : 0;
+}
+
+Console.WriteLine(Math.Sign(new BySign { Value = 1 }.CompareTo(new BySign { Value = 2 })));  // -1</code></pre>
+    </div>
+    <p>Отсюда первое правило реализации: <strong>не «я минус он»</strong>. Вычитание переполняется, и порядок
+      ломается молча — без исключения, просто неверно:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">int max = int.MaxValue, min = int.MinValue;
+Console.WriteLine(unchecked(max - min));      // -1 !
+
+list.Sort((a, b) =&gt; a - b);                   // «работает» на маленьких числах и врёт на больших</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">-1</code></pre>
+    </div>
+    <p>Правильно — <code>a.CompareTo(b)</code> (у чисел он не вычитает, а сравнивает) или
+      <code>Math.Sign</code>. Второе правило: порядок должен быть <strong>непротиворечивым</strong> —
+      элемент равен сам себе (<code>CompareTo</code> возвращает <code>0</code>), и если <code>a &lt; b</code> и
+      <code>b &lt; c</code>, то <code>a &lt; c</code>. Проверено экспериментально: если это нарушить, компилятор
+      и рантайм <em>ничего не заметят</em> — сортировка пройдёт и выдаст неправильный порядок. Ошибок не будет,
+      поэтому контракт надо держать в голове.</p>
+
+    <h2>Кто пользуется <code>CompareTo</code></h2>
+    <p>Один и тот же контракт обслуживает и сортировку, и поиск, и «взять крайний». Достаточно, чтобы тип умел
+      сравнить себя с другим таким же:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var numbers = new List&lt;int&gt; { 5, 1, 3 };
+numbers.Sort();                                   // List&lt;T&gt;.Sort() → CompareTo
+Console.WriteLine(string.Join(",", numbers));      // 1,3,5
+
+Console.WriteLine(Array.BinarySearch(new[] { 1, 3, 5, 7 }, 5));   // 2 — индекс
+// Array.BinarySearch(new[] { 5, 1, 3 }, 5);       // ✘ на неотсортированном — мусор, не исключение
+
+var set = new SortedSet&lt;int&gt; { 5, 1, 3 };
+Console.WriteLine(string.Join(",", set) + " Min=" + set.Min);      // 1,3,5 Min=1
+
+Console.WriteLine(new[] { 3, 1, 2 }.Max());        // 3 — LINQ тоже использует порядок</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">1,3,5
+2
+1,3,5 Min=1
+3</code></pre>
+    </div>
+    <p>Бинарный поиск отдельно стоит запомнить: он <strong>требует отсортированных данных</strong> и на
+      неотсортированных не бросает исключение — просто вернёт бессмысленный индекс (или отрицательное число).
+      Это дефект, который живёт в проде годами.</p>
+
+    <h2><code>IComparer&lt;T&gt;</code>: порядок снаружи типа</h2>
+    <p><code>IComparable&lt;T&gt;</code> — это «у типа есть один естественный порядок». Но порядков может быть
+      много: по сумме, по дате, по убыванию, по двум полям. Для этого есть второй интерфейс —
+      <code>IComparer&lt;T&gt;</code>: отдельный объект, который знает, как сравнивать.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Любой компаратор можно собрать из лямбды
+IComparer&lt;int&gt; descending = Comparer&lt;int&gt;.Create((a, b) =&gt; b.CompareTo(a));
+
+Console.WriteLine(string.Join(",", new[] { 1, 3, 2 }.OrderBy(x =&gt; x, descending)));   // 3,2,1
+numbers.Sort(descending);                        // и для List.Sort тоже
+Console.WriteLine(string.Join(",", numbers));    // 5,3,1</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">3,2,1
+5,3,1</code></pre>
+    </div>
+    <p>Где брать готовые компараторы:</p>
+    <table>
+      <thead><tr><th>Что нужно</th><th>Чем пользоваться</th></tr></thead>
+      <tbody>
+        <tr><td>Естественный порядок типа</td><td><code>Comparer&lt;T&gt;.Default</code> (он же
+          <code>IComparable&lt;T&gt;</code> типа)</td></tr>
+        <tr><td>Свой порядок из лямбды</td><td><code>Comparer&lt;T&gt;.Create((a, b) =&gt; …)</code></td></tr>
+        <tr><td>Строки: байтовый порядок</td><td><code>StringComparer.Ordinal</code>,
+          <code>StringComparer.OrdinalIgnoreCase</code></td></tr>
+        <tr><td>Строки: как у людей</td><td><code>StringComparer.CurrentCulture</code>,
+          <code>StringComparer.CurrentCultureIgnoreCase</code></td></tr>
+        <tr><td>Обратный порядок</td><td><code>Comparer&lt;T&gt;.Create((a, b) =&gt; b.CompareTo(a))</code>
+          или <code>OrderByDescending</code></td></tr>
+        <tr><td>Несколько ключей</td><td><code>OrderBy(…).ThenBy(…)</code> — или один компаратор, сравнивающий
+          поля по очереди</td></tr>
+      </tbody>
+    </table>
+    <p>Свой компаратор полезен и как отдельный класс — тогда логику можно переиспользовать, тестировать и
+      кэшировать:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class ByTotalDescending : IComparer&lt;Order&gt;
+{
+    public int Compare(Order? x, Order? y)
+    {
+        if (ReferenceEquals(x, y)) return 0;
+        if (x is null) return 1;      // null — в конец
+        if (y is null) return -1;
+        return y.Total.CompareTo(x.Total);      // «y с x» = по убыванию
+    }
+}</code></pre>
+    </div>
+    <p>Обратите внимание на <code>null</code>: <code>IComparer&lt;T&gt;.Compare</code> принимает
+      <code>T?</code>, и решать, где стоят <code>null</code>, — обязанность компаратора. Встроенные
+      компараторы считают <code>null</code> самым маленьким:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(Comparer&lt;string&gt;.Default.Compare(null, "a"));   // -1
+Console.WriteLine("a".CompareTo(null));                          // 1 — string.CompareTo(null) = 1</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">-1
+1</code></pre>
+    </div>
+
+
+    <h2>Стабильность: <code>List.Sort</code> и <code>OrderBy</code> — разные сортировки</h2>
+    <p>Сортировка <strong>стабильна</strong>, если равные элементы сохраняют исходный порядок. Это не
+      абстракция: именно на этом держится «сортировка по двум ключам в два прохода» и предсказуемость
+      результатов в отчётах. Возьмём 20 элементов с тремя значениями ключа и отсортируем их двумя способами:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var pairs = Enumerable.Range(0, 20).Select(i =&gt; (Key: i % 3, Id: i)).ToList();
+
+var bySort = pairs.ToList();
+bySort.Sort((x, y) =&gt; x.Key.CompareTo(y.Key));      // List&lt;T&gt;.Sort — НЕстабильная
+
+var byLinq = pairs.OrderBy(x =&gt; x.Key).ToList();    // LINQ — стабильная
+
+Console.WriteLine(string.Join(",", bySort.Select(p =&gt; p.Id)));
+Console.WriteLine(string.Join(",", byLinq.Select(p =&gt; p.Id)));</code></pre>
+      <p class="cap">Вывод (net8.0): внутри каждой группы одинаковых ключей — разный порядок</p>
+      <pre><code class="language-text">0,15,12,18,6,9,3,4,7,10,13,1,16,19,8,11,2,14,17,5
+0,3,6,9,12,15,18,1,4,7,10,13,16,19,2,5,8,11,14,17</code></pre>
+    </div>
+    <p><code>OrderBy</code> сохранил исходный порядок внутри групп (<code>0,3,6…</code>), а
+      <code>List.Sort</code> — нет: он использует интроспективную сортировку (introsort), которой стабильность не
+      нужна. Отсюда практические правила:</p>
+    <ul>
+      <li><strong>Два ключа — два ключа в одном выражении</strong>: <code>OrderBy(x =&gt; x.Date).ThenBy(x =&gt;
+        x.Id)</code>. Это надёжнее, чем «сначала отсортировал по Id, потом по дате» — второй способ работает
+        только при стабильной сортировке.</li>
+      <li><strong>Нужна стабильность при сортировке списка</strong> — сортируйте через
+        <code>OrderBy</code> или добавляйте в ключ «тай-брейкер» (уникальный <code>Id</code>).</li>
+      <li><strong>Одинаковые ключи в <code>SortedSet</code>/<code>SortedDictionary</code></strong> — это не
+        «порядок как попало», а <em>дубликаты</em>: второй элемент может не добавиться вовсе.</li>
+    </ul>
+
+    <h2>Строки: культура, регистр и <code>Ordinal</code></h2>
+    <p>У строк порядок зависит от <strong>культуры</strong>: <code>string.CompareTo</code> использует текущую
+      культуру потока, а не «побайтовое» сравнение. Один и тот же набор строк сортируется по-разному:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">CultureInfo.CurrentCulture = new CultureInfo("ru-RU");
+
+Console.WriteLine("ёж".CompareTo("ель"));      // -1
+
+var words = new[] { "ёж", "ель", "жизнь" };
+Console.WriteLine(string.Join(",", words.OrderBy(x =&gt; x, StringComparer.CurrentCulture)));
+Console.WriteLine(string.Join(",", words.OrderBy(x =&gt; x, StringComparer.Ordinal)));</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">-1
+ёж,ель,жизнь
+ель,жизнь,ёж</code></pre>
+    </div>
+    <p>В русской культуре «ё» стоит рядом с «е», а в ordinal-порядке — после «ж» (у неё просто больший код
+      символа). Отсюда правило, которое экономит нервы в CI:</p>
+    <ul>
+      <li><strong>Идентификаторы, ключи, имена файлов, протоколы, сортировка в тестах</strong> —
+        <code>StringComparer.Ordinal</code>: детерминированно и одинаково на любой машине.</li>
+      <li><strong>Текст для человека</strong> (список городов, фамилии в UI) — <code>CurrentCulture</code>:
+        тогда «ё» окажется там, где её ждёт читатель.</li>
+      <li><strong>Регистр</strong> — отдельный компаратор: <code>OrdinalIgnoreCase</code> или
+        <code>CurrentCultureIgnoreCase</code>; сам по себе <code>CompareTo</code> регистр различает.</li>
+    </ul>
+
+    <h2><code>null</code> и <code>NaN</code>: у порядка есть крайние случаи</h2>
+    <p><code>null</code> встроенные компараторы считают самым маленьким, а вот <code>NaN</code> ведёт себя так,
+      что это стоит запомнить: для порядка он «меньше любого числа» и «равен сам себе», хотя обычное
+      <code>==</code> говорит иначе.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(double.NaN.CompareTo(1.0));       // -1  — NaN «меньше»
+Console.WriteLine(1.0.CompareTo(double.NaN));       // 1
+Console.WriteLine(double.NaN.CompareTo(double.NaN)); // 0   — для порядка NaN = NaN
+
+Console.WriteLine(double.NaN == double.NaN);        // False — а обычное равенство так не считает
+Console.WriteLine(double.NaN.Equals(double.NaN));   // True</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">-1
+1
+0
+False
+True</code></pre>
+    </div>
+    <p>Поэтому <code>SortedSet&lt;double&gt;</code> спокойно примет <code>NaN</code> (и даже не один — они
+      «равны» по порядку, значит второй не добавится), а <code>HashSet&lt;double&gt;</code> — тоже, потому что
+      <code>Equals</code> для <code>NaN</code> возвращает <code>true</code>. А вот код, который проверяет
+      «отсортировано ли», сравнивая через <code>&lt;</code>, с <code>NaN</code> сломается: и
+      <code>NaN &lt; 1</code>, и <code>1 &lt; NaN</code> — это <code>false</code>, то есть «ни меньше, ни
+      больше» превращается в «не сравнимо».</p>
+
+
+    <h2>Свой тип: <code>IComparable&lt;T&gt;</code> и согласие с <code>Equals</code></h2>
+    <p>Минимальная реализация — сравнить одно поле через <code>CompareTo</code> этого поля (не через
+      вычитание):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record Order(int Id, decimal Total) : IComparable&lt;Order&gt;
+{
+    public int CompareTo(Order? other) =&gt;
+        other is null ? 1 : Total.CompareTo(other.Total);   // null — «больше любого»
+}</code></pre>
+    </div>
+    <p>Но здесь спрятана ловушка, которая тихо ломает коллекции. Если <code>CompareTo</code> возвращает
+      <code>0</code>, а <code>Equals</code> при этом <code>false</code> — два разных заказа с одинаковой суммой
+      поведут себя по-разному в разных коллекциях:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var a = new Order(1, 100m);
+var b = new Order(2, 100m);
+
+Console.WriteLine(a.Equals(b) + " " + a.CompareTo(b));    // False 0 — «разные, но порядково равны»
+
+var sorted = new SortedSet&lt;Order&gt; { a, b };
+var hash = new HashSet&lt;Order&gt; { a, b };
+
+Console.WriteLine(sorted.Count + " " + hash.Count);       // 1 2</code></pre>
+      <p class="cap">Вывод: множество «по порядку» потеряло один элемент</p>
+      <pre><code class="language-text">False 0
+1 2</code></pre>
+    </div>
+    <p>Причина: <code>SortedSet</code> и <code>SortedDictionary</code> ищут дубликаты <strong>через
+      порядок</strong> (<code>CompareTo == 0</code>), а <code>HashSet</code> и <code>Dictionary</code> — через
+      <code>Equals</code>/<code>GetHashCode</code>. Правило: <strong><code>CompareTo == 0</code> должно
+      означать <code>Equals == true</code></strong>. Если естественный порядок не различает объекты —
+      сравнивайте больше полей (в примере выше: <code>Total</code>, потом <code>Id</code>), либо не делайте тип
+      <code>IComparable</code> вовсе и передавайте компаратор явно.</p>
+    <p>Второе следствие того же правила: не сравнивайте результат с <code>1</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">if (a.CompareTo(b) == 1) { }        // ✘ там может быть 5 или 42 — любое положительное
+if (a.CompareTo(b) &gt; 0) { }         // ✔</code></pre>
+    </div>
+
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong><code>a - b</code> вместо <code>CompareTo</code></strong> — переполнение и неверный порядок
+        без единой ошибки (<code>int.MaxValue - int.MinValue = -1</code>, см. выше).</li>
+      <li><strong>Несогласованный компаратор</strong> (не транзитивный, «элемент не равен сам себе») не ловится
+        ни компилятором, ни рантаймом: сортировка просто даст неверный результат. Проверено: сортировка с
+        компаратором, который всегда возвращает <code>1</code>, завершается без исключения.</li>
+      <li><strong><code>IComparable</code> без <code>&lt;T&gt;</code></strong> — старый интерфейс с
+        <code>object</code>: требует упаковки для значимых типов (глава 4) и падает, если подсунуть чужой
+        тип.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">try { 1.CompareTo("a"); }
+catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">ArgumentException: Object must be of type Int32.</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>Array.BinarySearch</code> на неотсортированных данных</strong> — не исключение, а
+        бессмысленный результат. Поиск должен идти тем же компаратором, которым сортировали.</li>
+      <li><strong>Ключ, который меняется во время сортировки</strong> (поле мутируют из компаратора или из
+        другого потока) — неопределённый результат и «потерянные» элементы.</li>
+      <li><strong>Строки по умолчанию culture-sensitive.</strong> Тест, «зелёный локально», в CI с другой
+        локалью может упасть: в проверках берите <code>StringComparer.Ordinal</code>.</li>
+      <li><strong><code>List.Sort()</code> без компаратора требует <code>IComparable&lt;T&gt;</code></strong>:
+        для типа без него — <code>InvalidOperationException</code>, а не «сортировка по ссылке».</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong><code>CompareTo</code> возвращает знак, а не число</strong>: сравнивайте с нулём, никогда с
+          <code>1</code>. Внутри — <code>a.CompareTo(b)</code>, а не <code>a - b</code> (переполнение).</li>
+        <li><strong><code>IComparable&lt;T&gt;</code></strong> — «естественный порядок у типа»;
+          <strong><code>IComparer&lt;T&gt;</code></strong> — порядок снаружи
+          (<code>Comparer&lt;T&gt;.Create</code>, <code>StringComparer</code>, свой класс).</li>
+        <li><strong><code>List.Sort</code> нестабилен, <code>OrderBy</code> стабилен.</strong> Два ключа —
+          <code>OrderBy(…).ThenBy(…)</code>, а не два прохода сортировки.</li>
+        <li><strong>Строки:</strong> идентификаторы и тесты — <code>Ordinal</code>, текст для человека —
+          <code>CurrentCulture</code>.</li>
+        <li><strong>Крайние случаи:</strong> <code>null</code> меньше всех; <code>NaN</code> «меньше» любого
+          числа и равен сам себе по порядку, хотя <code>==</code> говорит иначе.</li>
+        <li><strong><code>CompareTo == 0</code> должно совпадать с <code>Equals == true</code></strong>, иначе
+          <code>SortedSet</code> и <code>HashSet</code> будут вести себя по-разному.</li>
+        <li><code>Array.BinarySearch</code> требует отсортированных данных тем же компаратором — иначе молча
+          неверный результат.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs07-generic-constraints-variance.html">← <span class="sp">Глава 7. Generic глубже: ограничения, вариантность и generic math</span></a>
+      <a href="cs09-dictionaries-sets-queues.html"><span class="sp">Глава 9. Словари, множества и очереди на практике</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
