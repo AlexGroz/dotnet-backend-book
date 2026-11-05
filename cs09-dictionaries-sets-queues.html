@@ -179,10 +179,83 @@ Console.WriteLine(map.TryGetValue(key, out _));    // False — найти её 
       <p class="cap">Вывод</p>
       <pre><code class="language-text">Count=1, TryGetValue=False</code></pre>
     </div>
-    <p>Правило: <strong>ключ должен быть неизменяемым</strong> — <code>int</code>, <code>string</code>,
-      <code>Guid</code>, <code>enum</code>, <code>record</code> с <code>init</code>-свойствами. Если сущность
-      изменяемая (модель EF Core), ключом делают её <code>Id</code>, а не сам объект. Иначе получается словарь,
-      из которого нельзя достать часть значений — и никакой ошибки при этом не будет.</p>
+    <p><strong>Когда именно это ломается.</strong> Только если <code>GetHashCode</code> зависит от изменяемого
+      состояния: <code>record</code> с <code>set</code>-свойством, класс со своим <code>Equals</code>/
+      <code>GetHashCode</code> по полю. Обычный класс <em>без</em> переопределений устроен иначе — его хеш
+      считается по ссылке и мутация поля ничего не портит, но и ключом «по значению» он не работает: два
+      объекта с одинаковым <code>Id</code> — это два разных ключа.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class MutableKey { public int Id { get; set; } }   // без Equals/GetHashCode
+
+var map = new Dictionary&lt;MutableKey, string&gt;();
+var key = new MutableKey { Id = 1 };
+map[key] = "a";
+
+key.Id = 2;
+Console.WriteLine(map.TryGetValue(key, out _));                       // True — хеш по ссылке
+Console.WriteLine(map.ContainsKey(new MutableKey { Id = 2 }));        // False — «равный» не находится</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True
+False</code></pre>
+    </div>
+
+    <h2>Как надо: три способа не потерять запись</h2>
+    <p><strong>1. Сделать ключ неизменяемым.</strong> Позиционный <code>record</code> (или
+      <code>init</code>-свойства) — самый простой вариант: менять ключ физически нельзя, а «изменение»
+      становится созданием нового ключа.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record OrderKey(int Id);        // Id — init-only
+
+var map = new Dictionary&lt;OrderKey, string&gt;();
+var key = new OrderKey(1);
+map[key] = "a";
+
+Console.WriteLine(map.TryGetValue(key, out var value) + " " + value);   // True a
+
+// key.Id = 2;                                  // ✘ так уже нельзя
+var changed = key with { Id = 2 };              // «изменить» = новый ключ
+
+Console.WriteLine(map.TryGetValue(changed, out _));    // False — это другой ключ
+Console.WriteLine(map[key]);                          // a — старый ключ на месте</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True a
+False
+a</code></pre>
+    </div>
+    <p>Попытка всё-таки присвоить значение ловится компилятором, а не в рантайме:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">error CS8852: Init-only property or indexer 'OrderKey.Id' can only be assigned in an
+object initializer, or on 'this' or 'base' in an instance constructor or an 'init' accessor.</code></pre>
+    </div>
+    <p><strong>2. Не делать ключом сам объект — брать его идентификатор.</strong> Так работает код с
+      сущностями: меняются поля (сумма, статус), ключ — <code>Id</code> — остаётся.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var byId = new Dictionary&lt;int, Order&gt;();
+var order = new Order { Id = 7, Total = 100m };
+
+byId[order.Id] = order;
+order.Total = 200m;                 // объект меняется — ключ нет
+
+Console.WriteLine(byId[7].Total);   // 200 — запись на месте</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">200</code></pre>
+    </div>
+    <p><strong>3. Если ключ всё-таки должен меняться — менять его в словаре.</strong> То есть удалить запись
+      <em>до</em> мутации и вставить заново под новым ключом. Уже испорченную запись удалить не получится:
+      <code>Remove</code> ищет по тому же хешу, что и <code>TryGetValue</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">map.Remove(key);         // ✔ пока ключ ещё «старый»
+key = key with { Id = 2 };
+map[key] = "a";
+
+Console.WriteLine(map.Count + " " + map.TryGetValue(key, out var v) + " " + v);   // 1 True a</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">1 True a</code></pre>
+    </div>
+    <p>Если же мутация уже случилась, у записи с «уехавшим» хешем остаётся только два выхода: пересоздать
+      словарь или вызвать <code>Clear()</code>. Проверено на классе с равенством по <code>Id</code>: после
+      мутации <code>Count = 1</code>, <code>TryGetValue = False</code> и <code>Remove = False</code> — запись
+      есть в перечислении, но недостижима и неудаляема.</p>
     <p>Второй инструмент — <strong>компаратор</strong>: он задаёт, какие ключи считать одинаковыми.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">var byName = new Dictionary&lt;string, int&gt;(StringComparer.OrdinalIgnoreCase);
@@ -416,7 +489,8 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
           <code>GetValueOrDefault</code>; <code>ContainsKey</code> — только если значение не нужно.</li>
         <li>Порядок перебора не гарантирован: после удаления элемента порядок вставки уже не соблюдается.</li>
         <li>Ключ должен быть неизменяемым: мутация ломает <code>GetHashCode</code>, и запись становится
-          недостижимой. Одинаковость ключей задаёт <code>IEqualityComparer</code>.</li>
+          недостижимой (и неудаляемой). Правильно — неизменяемый <code>record</code>, ключ-<code>Id</code> или
+          удаление записи <em>до</em> мутации. Одинаковость ключей задаёт <code>IEqualityComparer</code>.</li>
         <li><code>HashSet&lt;T&gt;</code> — про «есть ли» и операции над множествами;
           <code>Queue</code>/<code>Stack</code> — FIFO/LIFO за O(1); <code>PriorityQueue</code> — минимум
           приоритета первым, O(log n).</li>
