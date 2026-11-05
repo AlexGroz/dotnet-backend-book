@@ -325,6 +325,8 @@ Console.WriteLine(string.Join(",", order));</code></pre>
           <td>O(log n)</td></tr>
         <tr><td>Порядок добавления + доступ по номеру</td><td><code>List&lt;T&gt;</code></td>
           <td>индекс O(1), поиск O(n)</td></tr>
+        <tr><td>Вставка и удаление в середине, когда узел уже найден</td><td><code>LinkedList&lt;T&gt;</code></td>
+          <td>по узлу O(1), поиск узла O(n)</td></tr>
         <tr><td>FIFO: обработка по очереди</td><td><code>Queue&lt;T&gt;</code>,
           <code>Channel&lt;T&gt;</code> (между потоками)</td><td>O(1)</td></tr>
         <tr><td>LIFO: «отменить последнее»</td><td><code>Stack&lt;T&gt;</code></td><td>O(1)</td></tr>
@@ -340,6 +342,58 @@ Console.WriteLine(string.Join(",", order));</code></pre>
     <p>Таблица «что хорошо / что дорого» для тех же коллекций и выбор интерфейса для сигнатуры
       (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — глава 6;
       порядок и сравнение, на которых всё это держится, — глава 8.</p>
+
+    <div class="box note">
+      <span class="t">Почему глав про <code>List</code>, <code>LinkedList</code> и <code>SortedList</code> нет</span>
+      <p>В части II три «коллекционных» главы — словари, множества, очереди и стеки, — потому что именно в них
+        чаще всего ошибаются: ключ, который изменился; порядок, на который нельзя опираться; пустая коллекция,
+        которая бросает исключение. Остальные коллекции разобраны по месту:</p>
+      <ul>
+        <li><strong><code>List&lt;T&gt;</code></strong> — глава 6: внутри массив, <code>Capacity</code> и
+          <code>EnsureCapacity</code>, рост удвоением, скрытая аллокация в <code>foreach</code>, какой
+          интерфейс возвращать из метода. Плюс он встречается в примерах всех глав. Отдельная глава была бы
+          пересказом этого плюс <code>Add</code>/<code>RemoveAt</code>.</li>
+        <li><strong><code>SortedList&lt;TKey, TValue&gt;</code></strong> — глава 9, таблица рядом с
+          <code>SortedDictionary</code>: API у них одинаковый, разница только во внутренней структуре (два
+          массива против дерева), поэтому это сравнение на полстраницы, а не глава.</li>
+        <li><strong><code>LinkedList&lt;T&gt;</code></strong> — единственная из «больших» коллекций без своей
+          главы. Причина не в том, что она не важна, а в том, что у неё нет сценария, где она выигрывает
+          <em>по умолчанию</em>: вставка и удаление — O(1), но только когда узел уже в руках; чтобы его найти,
+          нужен проход O(n); индексов нет; а перебор проигрывает массиву из-за локальности памяти.</li>
+      </ul>
+      <div class="codewrap">
+        <pre><code class="language-csharp">const int N = 1_000_000;
+var list = new List&lt;int&gt;(N);
+var linked = new LinkedList&lt;int&gt;();
+for (int i = 0; i &lt; N; i++) { list.Add(i); linked.AddLast(i); }
+
+static long SumList(List&lt;int&gt; xs) { long s = 0; foreach (var x in xs) s += x; return s; }
+static long SumLinked(LinkedList&lt;int&gt; xs) { long s = 0; foreach (var x in xs) s += x; return s; }
+
+SumList(list); SumLinked(linked);       // прогрев: JIT и кэши
+
+var sw = Stopwatch.StartNew();
+SumList(list);
+sw.Stop();
+Console.WriteLine($"List:       {sw.Elapsed.TotalMilliseconds:F2} ms");
+
+sw.Restart();
+SumLinked(linked);
+sw.Stop();
+Console.WriteLine($"LinkedList: {sw.Elapsed.TotalMilliseconds:F2} ms");</code></pre>
+        <p class="cap">Вывод (net8.0, Release): миллион <code>int</code>, одни данные — разная раскладка в памяти</p>
+        <pre><code class="language-text">List:       0.83 ms
+LinkedList: 3.91 ms</code></pre>
+      </div>
+      <p>Разница не в «скорости кода», а в памяти: элементы <code>List</code> лежат подряд, и процессор читает их
+        пачками, а каждый узел <code>LinkedList</code> — отдельный объект в куче, поэтому переход по ссылке часто
+        означает промах кэша. Память на тот же миллион: 3,8 МБ у <code>List</code> против 45,8 МБ у
+        <code>LinkedList</code> (по объекту-узлу на элемент).</p>
+      <p>Обратная сторона честная: 20 000 вставок в середину, когда узел уже известен, — <code>List</code> ≈ 0,7 с
+        (сдвиг элементов), <code>LinkedList</code> ≈ 1 мс. Поэтому его берут ровно в двух случаях: частые
+        вставки и удаления по уже найденному узлу (LRU-кэш: <code>LinkedList</code> + <code>Dictionary</code> на
+        узлы) и удаление из середины очереди. Во всех остальных <code>List</code> короче, быстрее и понятнее.</p>
+    </div>
 
     <h2>Ловушки</h2>
     <ul>
