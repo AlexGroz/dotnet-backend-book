@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 11 · Очереди и стеки: Queue, Stack, PriorityQueue</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs12-ienumerable.html"><span class="sp">Глава 12. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть II · Коллекции и перечисления</div>
+    <h1>Глава 11. Очереди и стеки: Queue, Stack, PriorityQueue</h1>
+    <p class="sublead">Три коллекции «взять крайний»: <code>Queue</code> (первым пришёл — первым вышел),
+      <code>Stack</code> (последним пришёл — первым вышел) и <code>PriorityQueue</code> (первым выходит самый
+      важный). Полный API, поведение на пустой коллекции и разница между «посмотреть» и «забрать».</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>Общее у всех трёх: <strong>доступа по индексу нет</strong>. Вы не спрашиваете «что лежит под номером 3»,
+      вы спрашиваете «что следующее». Это делает их удобными для обработки по порядку: задачи, обход графа,
+      буферы, планировщики.</p>
+    <table>
+      <thead><tr><th>Коллекция</th><th>Кто выходит первым</th><th>Добавить</th><th>Забрать</th>
+        <th>Посмотреть</th></tr></thead>
+      <tbody>
+        <tr><td><code>Queue&lt;T&gt;</code></td><td>тот, кто пришёл раньше всех (FIFO)</td>
+          <td><code>Enqueue</code></td><td><code>Dequeue</code></td><td><code>Peek</code></td></tr>
+        <tr><td><code>Stack&lt;T&gt;</code></td><td>тот, кто пришёл последним (LIFO)</td>
+          <td><code>Push</code></td><td><code>Pop</code></td><td><code>Peek</code></td></tr>
+        <tr><td><code>PriorityQueue&lt;TElement, TPriority&gt;</code></td><td>самый важный (минимальный
+          приоритет)</td><td><code>Enqueue</code></td><td><code>Dequeue</code></td>
+          <td><code>Peek</code></td></tr>
+      </tbody>
+    </table>
+    <p><strong>Запомнить сразу:</strong> <code>Peek</code> только <em>смотрит</em> — элемент остаётся в
+      коллекции и <code>Count</code> не меняется. <code>Dequeue</code>/<code>Pop</code> <em>забирают</em> —
+      элемент удаляется и возвращается вам. Дальше это показано выводом, а не словами.</p>
+
+    <h2><code>Queue&lt;T&gt;</code>: <code>Peek</code> смотрит, <code>Dequeue</code> забирает</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var q = new Queue&lt;string&gt;();
+q.Enqueue("первый");
+q.Enqueue("второй");
+q.Enqueue("третий");
+
+Console.WriteLine(q.Count + " " + q.Peek() + " " + q.Count);   // 3 первый 3 — Peek НЕ удаляет
+Console.WriteLine(q.Dequeue() + " " + q.Count);                // первый 2 — Dequeue удалил
+Console.WriteLine(q.Contains("третий"));                       // True
+Console.WriteLine(string.Join(",", q.ToArray()));              // второй,третий</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">3 первый 3
+первый 2
+True
+второй,третий</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Член</th><th>Что делает</th><th>На пустой очереди</th></tr></thead>
+      <tbody>
+        <tr><td><code>Enqueue(item)</code></td><td>Кладёт в конец</td><td>—</td></tr>
+        <tr><td><code>Peek()</code></td><td>Возвращает первый, <strong>не удаляя</strong></td>
+          <td><code>InvalidOperationException</code></td></tr>
+        <tr><td><code>Dequeue()</code></td><td>Возвращает первый <strong>и удаляет</strong></td>
+          <td><code>InvalidOperationException</code></td></tr>
+        <tr><td><code>TryPeek(out item)</code></td><td>То же, но без исключения</td><td><code>false</code></td></tr>
+        <tr><td><code>TryDequeue(out item)</code></td><td>То же, но без исключения</td><td><code>false</code></td></tr>
+        <tr><td><code>Count</code></td><td>Сколько в очереди</td><td><code>0</code></td></tr>
+        <tr><td><code>Contains(item)</code></td><td>Есть ли (O(n) — очередь не для поиска)</td>
+          <td><code>false</code></td></tr>
+        <tr><td><code>ToArray()</code></td><td>Копия в порядке очереди</td><td>Пустой массив</td></tr>
+        <tr><td><code>Clear()</code></td><td>Очищает</td><td>—</td></tr>
+        <tr><td><code>EnsureCapacity(n)</code>, <code>TrimExcess()</code></td><td>Заранее расширить / ужать
+          буфер</td><td>—</td></tr>
+      </tbody>
+    </table>
+    <p>Внутри <code>Queue</code> — кольцевой буфер: <code>Enqueue</code> в конец, <code>Dequeue</code> с
+      начала, обе операции амортизированно O(1), без сдвига элементов. Именно поэтому очередь — не
+      <code>List&lt;T&gt;</code>: у списка <code>RemoveAt(0)</code> сдвигает всё, что стоит дальше.</p>
+
+    <h2>Пустая очередь: исключение или <code>Try*</code></h2>
+    <p><code>Peek</code> и <code>Dequeue</code> на пустой коллекции бросают исключение, и текст у него общий
+      для обычной и приоритетной очереди:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var empty = new Queue&lt;string&gt;();
+Console.WriteLine(empty.TryPeek(out _) + " " + empty.TryDequeue(out _));   // False False
+
+try { empty.Dequeue(); }
+catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">False False
+InvalidOperationException: Queue empty.</code></pre>
+    </div>
+    <p>Поэтому обработку в цикле пишут через <code>TryDequeue</code> — цикл закончится сам, когда очередь
+      опустеет, и проверка <code>Count &gt; 0</code> не нужна:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">while (q.TryDequeue(out var item))
+    Console.WriteLine("обрабатываю: " + item);     // ровно столько итераций, сколько элементов</code></pre>
+    </div>
+
+    <h2><code>Stack&lt;T&gt;</code>: <code>Push</code>, <code>Pop</code>, <code>Peek</code></h2>
+    <p>Стек — та же идея, но с другого конца: <code>Push</code> кладёт наверх, <code>Pop</code> снимает
+      верхний, <code>Peek</code> смотрит верхний, не снимая.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var stack = new Stack&lt;int&gt;();
+stack.Push(1);
+stack.Push(2);
+stack.Push(3);
+
+Console.WriteLine(stack.Count + " " + stack.Peek() + " " + stack.Count);   // 3 3 3 — Peek не снимает
+Console.WriteLine(stack.Pop() + " " + stack.Count);                        // 3 2 — Pop снял
+Console.WriteLine(stack.Contains(1));                                      // True
+Console.WriteLine(string.Join(",", stack.ToArray()));                      // 2,1 — сверху вниз</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">3 3 3
+3 2
+True
+2,1</code></pre>
+    </div>
+    <p>Обратите внимание на <code>ToArray</code>: у стека перечисление идёт <strong>сверху вниз</strong>, то
+      есть в порядке «как будут сниматься». Это же касается <code>foreach</code>.</p>
+    <table>
+      <thead><tr><th>Член</th><th>Что делает</th><th>На пустом стеке</th></tr></thead>
+      <tbody>
+        <tr><td><code>Push(item)</code></td><td>Кладёт наверх</td><td>—</td></tr>
+        <tr><td><code>Pop()</code></td><td>Снимает и возвращает верхний</td>
+          <td><code>InvalidOperationException</code></td></tr>
+        <tr><td><code>Peek()</code></td><td>Возвращает верхний, <strong>не снимая</strong></td>
+          <td><code>InvalidOperationException</code></td></tr>
+        <tr><td><code>TryPop(out item)</code>, <code>TryPeek(out item)</code></td><td>То же без исключений</td>
+          <td><code>false</code></td></tr>
+        <tr><td><code>Count</code>, <code>Contains</code>, <code>ToArray</code>, <code>Clear</code></td>
+          <td>Как у очереди</td><td>—</td></tr>
+        <tr><td><code>TrimExcess()</code></td><td>Ужать внутренний массив</td><td>—</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var s = new Stack&lt;int&gt;();
+try { s.Pop(); }
+catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">InvalidOperationException: Stack empty.</code></pre>
+    </div>
+
+
+    <h2>Что выбрать: FIFO или LIFO</h2>
+    <p>Разница видна на одном и том же дереве: обойти его очередью и стеком — значит получить разный порядок.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var tree = new Dictionary&lt;string, string[]&gt;
+{
+    ["A"] = new[] { "B", "C" }, ["B"] = new[] { "D" },
+    ["C"] = new[] { "E" },      ["D"] = Array.Empty&lt;string&gt;(),
+    ["E"] = Array.Empty&lt;string&gt;(),
+};
+
+// очередь: обход «в ширину» — уровень за уровнем
+var bfs = new List&lt;string&gt;();
+var q = new Queue&lt;string&gt;();
+q.Enqueue("A");
+while (q.TryDequeue(out var node))
+{
+    bfs.Add(node);
+    foreach (var child in tree[node]) q.Enqueue(child);
+}
+
+// стек: обход «в глубину» — до самого низа, потом сосед
+var dfs = new List&lt;string&gt;();
+var stack = new Stack&lt;string&gt;();
+stack.Push("A");
+while (stack.TryPop(out var node))
+{
+    dfs.Add(node);
+    foreach (var child in tree[node]) stack.Push(child);
+}
+
+Console.WriteLine(string.Join(" ", bfs));
+Console.WriteLine(string.Join(" ", dfs));</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">A B C D E
+A C E B D</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Задача</th><th>Чем</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>Обработать задачи в порядке поступления</td><td><code>Queue</code></td><td>Справедливо: кто
+          раньше пришёл, тот раньше обслужен</td></tr>
+        <tr><td>Обход в ширину (BFS), «уровни»</td><td><code>Queue</code></td><td>Соседи обрабатываются раньше
+          их детей</td></tr>
+        <tr><td>Отмена последнего действия (undo)</td><td><code>Stack</code></td><td>Отменяется то, что
+          сделано последним</td></tr>
+        <tr><td>Обход в глубину (DFS), парсер скобок</td><td><code>Stack</code></td><td>Вложенность: закрываем
+          то, что открыто последним</td></tr>
+        <tr><td>Сначала самое важное</td><td><code>PriorityQueue</code></td><td>Порядок задаётся приоритетом,
+          а не временем прихода</td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Очередь ≠ <code>List&lt;T&gt;</code> с <code>RemoveAt(0)</code></span>
+      <p>Соблазн сделать очередь из списка велик, но <code>list.RemoveAt(0)</code> сдвигает <em>все</em>
+        оставшиеся элементы — O(n) на каждое извлечение, то есть O(n²) на обработку n элементов. Очередь на
+        кольцевом буфере делает то же за O(1).</p>
+    </div>
+
+
+    <h2><code>PriorityQueue&lt;TElement, TPriority&gt;</code>: приоритет вместо порядка</h2>
+    <p>С .NET 6 в BCL есть приоритетная очередь: при добавлении указываются элемент и его приоритет, а
+      извлекается всегда <strong>минимальный</strong> приоритет.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var pq = new PriorityQueue&lt;string, int&gt;();
+pq.Enqueue("низкий", 5);
+pq.Enqueue("критичный", 1);
+pq.Enqueue("средний", 3);
+
+Console.WriteLine(pq.Count + " " + pq.Peek() + " " + pq.Count);          // Peek не забирает
+Console.WriteLine(pq.TryPeek(out var e, out var p) + " " + e + "/" + p);
+Console.WriteLine(pq.TryDequeue(out var d, out var dp) + " " + d + "/" + dp);
+
+pq.Enqueue("ещё-средний", 3);
+Console.WriteLine(string.Join(", ", pq.UnorderedItems.Select(i =&gt; i.Element + "(" + i.Priority + ")")));</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">3 критичный 3
+True критичный/1
+True критичный/1
+средний(3), низкий(5), ещё-средний(3)</code></pre>
+    </div>
+    <p><code>UnorderedItems</code> — <strong>не</strong> порядок извлечения, а внутреннее представление кучи,
+      и имя это честно говорит. Настоящий порядок видно только при извлечении.</p>
+    <table>
+      <thead><tr><th>Член</th><th>Что делает</th><th>На пустой</th></tr></thead>
+      <tbody>
+        <tr><td><code>Enqueue(element, priority)</code></td><td>Добавляет с приоритетом</td><td>—</td></tr>
+        <tr><td><code>Peek()</code></td><td>Смотрит минимальный приоритет, не удаляя</td>
+          <td><code>InvalidOperationException</code> («Queue empty.»)</td></tr>
+        <tr><td><code>Dequeue()</code></td><td>Извлекает минимальный приоритет</td>
+          <td><code>InvalidOperationException</code></td></tr>
+        <tr><td><code>TryPeek(out el, out priority)</code>, <code>TryDequeue(out el, out priority)</code></td>
+          <td>То же без исключений</td><td><code>false</code></td></tr>
+        <tr><td><code>EnqueueDequeue(el, priority)</code>, <code>DequeueEnqueue(el, priority)</code></td>
+          <td>Пара «добавить + забрать» одной операцией — чтобы куча не росла больше нужного</td><td>—</td></tr>
+        <tr><td><code>EnqueueRange(items)</code></td><td>Добавить набор пар сразу</td><td>—</td></tr>
+        <tr><td><code>UnorderedItems</code></td><td>Все пары во внутреннем порядке кучи</td><td>Пусто</td></tr>
+        <tr><td><code>Count</code>, <code>Clear()</code>, <code>EnsureCapacity(n)</code>,
+          <code>TrimExcess()</code></td><td>Как у остальных</td><td>—</td></tr>
+      </tbody>
+    </table>
+    <p>Два поведения, которые чаще всего удивляют:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1. Максимум вместо минимума — обратный компаратор (глава 8)
+var maxHeap = new PriorityQueue&lt;string, int&gt;(Comparer&lt;int&gt;.Create((a, b) =&gt; b.CompareTo(a)));
+maxHeap.Enqueue("a", 1); maxHeap.Enqueue("c", 3); maxHeap.Enqueue("b", 2);
+while (maxHeap.TryDequeue(out var el, out _)) Console.Write(el + " ");
+
+// 2. Равные приоритеты: порядок НЕ гарантирован — это куча, а не стабильная сортировка
+var same = new PriorityQueue&lt;string, int&gt;();
+same.Enqueue("первый", 1); same.Enqueue("второй", 1); same.Enqueue("третий", 1);
+var order = new List&lt;string&gt;();
+while (same.TryDequeue(out var el, out _)) order.Add(el);
+
+Console.WriteLine();
+Console.WriteLine(string.Join(",", order));</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">c b a
+первый,третий,второй</code></pre>
+    </div>
+    <p><code>первый,третий,второй</code> — не случайность и не баг: при равных приоритетах куча не обязана
+      сохранять порядок вставки. Нужна стабильность — делайте приоритет составным:
+      <code>(int Priority, long Sequence)</code>, где <code>Sequence</code> — счётчик добавления.</p>
+
+    <h2>Как это устроено и где применять</h2>
+    <ul>
+      <li><strong><code>Queue</code> и <code>Stack</code></strong> — массив с указателями: O(1) на добавление и
+        извлечение, O(n) на поиск значения (<code>Contains</code>). Память — как у массива, с запасом на
+        рост.</li>
+      <li><strong><code>PriorityQueue</code></strong> — <em>двоичная куча</em> в массиве: добавление и
+        извлечение O(log n), просмотр минимума O(1), полный перебор — O(n) в произвольном порядке.</li>
+      <li><strong>Где пригодится приоритет:</strong> планировщик задач (сначала критичные), ограничитель
+        частоты (сначала те, у кого кончается квота), алгоритм Дейкстры (сначала ближайшая вершина), обработка
+        таймаутов (сначала тот, кто истекает раньше). Обычно приоритетом служит <code>DateTime</code> или
+        <code>TimeSpan</code> — они сравнимы (глава 8).</li>
+      </ul>
+
+
+    <h2>Очередь и несколько потоков</h2>
+    <p><code>Queue</code>, <code>Stack</code> и <code>PriorityQueue</code> <strong>не потокобезопасны</strong>:
+      одновременные <code>Enqueue</code> и <code>Dequeue</code> из разных потоков могут испортить внутренний
+      указатель — без исключения, просто «поехавшими» данными. Варианты по назначению:</p>
+    <table>
+      <thead><tr><th>Что нужно</th><th>Чем</th></tr></thead>
+      <tbody>
+        <tr><td>Очередь между потоками без ожидания</td><td><code>ConcurrentQueue&lt;T&gt;</code>,
+          <code>ConcurrentStack&lt;T&gt;</code> — <code>TryDequeue</code>/<code>TryPop</code> вместо
+          <code>Dequeue</code>/<code>Pop</code></td></tr>
+        <tr><td>Очередь с ожиданием (производитель ждёт, пока потребитель заберёт)</td>
+          <td><code>Channel&lt;T&gt;</code> — глава 26 .NET-книги</td></tr>
+        <tr><td>Очередь в одном потоке</td><td>Обычные <code>Queue</code>/<code>Stack</code> — самый быстрый
+          вариант</td></tr>
+      </tbody>
+    </table>
+    <p>Обёртка «<code>Queue</code> + <code>lock</code>» работает, но это ровно то, что уже сделано внутри
+      <code>ConcurrentQueue</code>; а блокирующее ожидание элемента лучше не писать руками, а взять
+      <code>Channel</code> с <code>ReadAllAsync</code>.</p>
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong><code>Peek</code> не удаляет, <code>Dequeue</code>/<code>Pop</code> удаляют.</strong>
+        Классическая ошибка: посмотреть <code>Peek</code> и удивиться, что в цикле элемент обрабатывается
+        дважды.</li>
+      <li><strong>Исключение на пустой коллекции.</strong> <code>Dequeue</code>/<code>Pop</code>/<code>Peek</code>
+        бросают <code>InvalidOperationException</code>; в цикле обработки — <code>TryDequeue</code>/
+        <code>TryPop</code>.</li>
+      <li><strong>Проверка <code>Count</code> вместо <code>TryDequeue</code>.</strong>
+        <code>while (q.Count &gt; 0) q.Dequeue()</code> работает, но в многопоточном коде между проверкой и
+        извлечением элемент может исчезнуть — исключение. <code>TryDequeue</code> атомарен по смыслу.</li>
+      <li><strong>Изменение очереди во время <code>foreach</code></strong> — <code>InvalidOperationException</code>
+        (глава 12). Забирать элементы нужно через цикл с <code>TryDequeue</code>.</li>
+      <li><strong><code>ToArray</code> у стека — сверху вниз</strong>, а не снизу вверх: перечисление
+        <code>Stack&lt;T&gt;</code> идёт в порядке извлечения.</li>
+      <li><strong>Равные приоритеты в <code>PriorityQueue</code></strong> идут в произвольном порядке — не
+        полагайтесь на «порядок добавления».</li>
+      <li><strong>Список вместо очереди</strong> — <code>RemoveAt(0)</code> даёт O(n²) на всю обработку.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong><code>Peek</code> смотрит, <code>Dequeue</code>/<code>Pop</code> забирают</strong> —
+          <code>Count</code> после <code>Peek</code> не меняется.</li>
+        <li><strong><code>Queue</code> — FIFO</strong> (<code>Enqueue</code>/<code>Dequeue</code>/<code>Peek</code>),
+          <strong><code>Stack</code> — LIFO</strong> (<code>Push</code>/<code>Pop</code>/<code>Peek</code>);
+          оба O(1) на краях и O(n) на <code>Contains</code>.</li>
+        <li><strong>Пустая коллекция:</strong> <code>InvalidOperationException</code> («Queue empty.» /
+          «Stack empty.») либо <code>Try*</code>-варианты с <code>false</code>.</li>
+        <li><strong><code>PriorityQueue</code></strong> отдаёт минимальный приоритет; максимум — обратным
+          компаратором; равные приоритеты не стабильны; <code>UnorderedItems</code> — не порядок
+          извлечения.</li>
+        <li><strong>Очередь — это <code>Queue</code>, а не <code>List</code>:</strong>
+          <code>RemoveAt(0)</code> превращает обработку в O(n²).</li>
+        <li><strong>Между потоками</strong> — <code>ConcurrentQueue</code>/<code>Channel</code>, а не
+          <code>Queue</code> с <code>lock</code>.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs10-sets-hashset-sortedset.html">← <span class="sp">Глава 10. Множества: HashSet и SortedSet</span></a>
+      <a href="cs12-ienumerable.html"><span class="sp">Глава 12. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

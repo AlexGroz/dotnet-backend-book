@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 9 · Словари, множества и очереди на практике</title>
+<title>Глава 9 · Словари: Dictionary на практике</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,26 +13,24 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs10-ienumerable.html"><span class="sp">Глава 10. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+  <a href="cs10-sets-hashset-sortedset.html"><span class="sp">Глава 10. Множества: HashSet и SortedSet</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 9. Словари, множества и очереди на практике</h1>
-    <p class="sublead">Как на самом деле пользоваться <code>Dictionary</code>, <code>HashSet</code>,
-      <code>Queue</code> и <code>PriorityQueue</code>: что бросает исключение, что молча возвращает
-      <code>null</code>, почему порядок перебора нельзя считать порядком вставки и почему изменяемый ключ
-      теряет запись.</p>
+    <h1>Глава 9. Словари: Dictionary на практике</h1>
+    <p class="sublead">Полный разбор <code>Dictionary</code>: что бросает исключение, что молча возвращает
+      <code>null</code>, почему порядок перебора нельзя считать порядком вставки, почему изменяемый ключ
+      теряет запись и как этого не допустить. Множества — глава 10, очереди и стеки — глава 11.</p>
     <p><span class="tag core">основная глава</span></p>
 
     <p>Глава 6 объясняла, <em>почему</em> generic-коллекции лучше non-generic, и давала таблицу «что выбрать».
       Здесь — вторая половина: <strong>как этим пользоваться</strong>, не наступая на грабли. Каждый пример
       ниже прогнан на .NET 8, в блоках «вывод» — реальный результат, а не пересказ.</p>
-    <p>Коллекции из этой главы объединяет одно: они построены на <strong>хеш-таблице</strong>
-      (<code>Dictionary</code>, <code>HashSet</code>) или на <strong>индексах и куче</strong>
-      (<code>Queue</code>, <code>Stack</code>, <code>PriorityQueue</code>). Отсюда их главное свойство —
-      операции «положить», «найти», «взять крайний» стоят в среднем O(1), а вот <em>поиск по значению</em>,
-      <em>порядок</em> и <em>изменение ключа</em> — как раз то, чего они не умеют.</p>
+    <p><code>Dictionary</code> построен на <strong>хеш-таблице</strong>: ключ превращается в хеш, хеш — в
+      номер корзины, поэтому «положить», «найти» и «удалить по ключу» стоят в среднем O(1). Обратная сторона:
+      коллекция ничего не обещает про <em>порядок</em>, а <em>изменение ключа</em> после вставки делает
+      запись недостижимой. Обе темы — ниже, с реальным выводом.</p>
 
     <h2><code>Dictionary</code>: положить, перезаписать, достать</h2>
     <p>У словаря два «пишущих» входа с разным поведением, и это первая ловушка:</p>
@@ -312,97 +310,6 @@ Console.WriteLine(lookup[99].Count());               // 0 — пустая по�
       <code>null</code>. Перепутать их — типичная причина <code>ArgumentException</code> в отчётах.</p>
 
 
-    <h2><code>HashSet&lt;T&gt;</code>: «есть ли элемент» за O(1)</h2>
-    <p><code>HashSet</code> — это <code>Dictionary</code>, у которого выкинули значения и оставили ключи.
-      Поэтому у него та же ловушка с изменяемым элементом, а взамен — «множественные» операции:</p>
-    <div class="codewrap">
-      <pre><code class="language-csharp">var set = new HashSet&lt;int&gt; { 1, 2, 3 };
-
-Console.WriteLine(set.Add(3));      // False — такой элемент уже есть (Dictionary.Add бросил бы)
-Console.WriteLine(set.Add(4));      // True
-
-set.UnionWith(new[] { 4, 5, 6 });        // объединение:       1,2,3,4,5,6
-set.IntersectWith(new[] { 2, 3, 4, 7 }); // пересечение:       2,3,4
-set.ExceptWith(new[] { 2 });             // вычитание:         3,4
-
-Console.WriteLine(set.SetEquals(new HashSet&lt;int&gt; { 3, 4 }));   // True — те же элементы
-Console.WriteLine(new[] { 1, 1, 2 }.ToHashSet().Count);        // 2 — дедупликация</code></pre>
-    </div>
-    <p>Где он реально нужен: дедупликация (<code>ToHashSet()</code>), «уже видели этот id», проверка
-      пересечения прав/тегов, <code>HashSet.Add</code> как «вставить, если новый».
-      Для сортированного варианта есть <code>SortedSet&lt;T&gt;</code> — O(log n) и всегда по порядку.</p>
-    <div class="box tip">
-      <span class="t">Трюк: <code>TryGetValue</code> у множества</span>
-      <p><code>Contains</code> отвечает только «да/нет», но иногда нужен <em>сам хранимый экземпляр</em>. Тогда
-        <code>set.TryGetValue(probe, out var stored)</code> вернёт объект, который лежит в множестве, — и по
-        <code>ReferenceEquals</code> видно, что это именно он, а не «равный по значению» аргумент:</p>
-      <div class="codewrap">
-        <pre><code class="language-csharp">public sealed class Item                                  // равенство по Id (глава 3)
-{
-    public int Id { get; init; }
-    public override bool Equals(object? o) =&gt; o is Item i &amp;&amp; i.Id == Id;
-    public override int GetHashCode() =&gt; Id;
-}
-
-var set = new HashSet&lt;Item&gt; { new Item { Id = 1 } };
-var probe = new Item { Id = 1 };                  // новый объект, равен только по Id
-
-set.Contains(probe);                              // True — равенство по значению
-set.TryGetValue(probe, out var stored);           // stored — ТОТ САМЫЙ объект из множества
-Console.WriteLine(ReferenceEquals(stored, set.First()));   // True</code></pre>
-      </div>
-      <p>Так кэши и «нормализаторы» данных возвращают канонический экземпляр, не заводя второй такой же.</p>
-    </div>
-
-    <h2><code>Queue</code>, <code>Stack</code> и <code>PriorityQueue</code></h2>
-    <p>Три коллекции «взять крайний», с разными правилами:</p>
-    <div class="codewrap">
-      <pre><code class="language-csharp">var q = new Queue&lt;string&gt;();          // FIFO: кто первый пришёл, тот первый вышел
-q.Enqueue("первый");
-q.Enqueue("второй");
-
-Console.WriteLine(q.Peek());          // первый  — посмотреть, не убирая
-Console.WriteLine(q.Dequeue());       // первый
-Console.WriteLine(q.Dequeue());       // второй
-
-var st = new Stack&lt;int&gt;();            // LIFO: последний пришёл — первый вышел
-st.Push(1);
-st.Push(2);
-
-Console.WriteLine(st.Peek());         // 2
-Console.WriteLine(st.Pop());          // 2
-Console.WriteLine(st.Pop());          // 1</code></pre>
-    </div>
-    <p>На пустой коллекции <code>Dequeue</code>/<code>Pop</code>/<code>Peek</code> бросают
-      <code>InvalidOperationException</code> (у очереди это <code>Queue empty.</code>). Есть безопасные
-      варианты — <code>TryDequeue</code>, <code>TryPop</code>, <code>TryPeek</code>:</p>
-    <div class="codewrap">
-      <pre><code class="language-csharp">while (q.TryDequeue(out var item))     // цикл закончится сам, когда очередь опустеет
-    Console.WriteLine(item);</code></pre>
-    </div>
-    <p><strong><code>PriorityQueue&lt;TElement, TPriority&gt;</code></strong> (с .NET 6) отдаёт элемент с
-      <em>наименьшим</em> приоритетом — то есть это min-heap, а не «первый в списке»:</p>
-    <div class="codewrap">
-      <pre><code class="language-csharp">var pq = new PriorityQueue&lt;string, int&gt;();   // элемент, приоритет
-pq.Enqueue("низкий", 5);
-pq.Enqueue("критичный", 1);
-pq.Enqueue("средний", 3);
-
-while (pq.TryDequeue(out var task, out var priority))
-    Console.Write($"{task}({priority}) ");</code></pre>
-      <p class="cap">Вывод: порядок — по приоритету, а не по добавлению</p>
-      <pre><code class="language-text">критичный(1) средний(3) низкий(5)</code></pre>
-    </div>
-    <ul>
-      <li><strong>«Чем меньше, тем важнее»</strong> — берите обычный конструктор и кладите
-        <code>1</code> для критичного. Нужен максимум — передайте обратный компаратор:
-        <code>new PriorityQueue&lt;string, int&gt;(Comparer&lt;int&gt;.Create((a, b) =&gt; b.CompareTo(a)))</code>.</li>
-      <li><strong>Порядок равных приоритетов не гарантирован</strong>: это куча, а не стабильная сортировка.
-        Нужна стабильность — добавляйте в приоритет счётчик (<code>(priority, seq)</code> как составной ключ).</li>
-      <li>Вставка и извлечение — O(log n), в отличие от O(1) у <code>Queue</code>/<code>Stack</code>.</li>
-    </ul>
-
-
     <h2>Словарь и несколько потоков</h2>
     <p><code>Dictionary</code> <strong>не потокобезопасен</strong>: одновременная запись (и даже запись при
       чтении) может испортить внутренние структуры — исключения не будет, будет «странное» поведение.
@@ -461,7 +368,9 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
       </tbody>
     </table>
     <p>Таблица «что хорошо / что дорого» для тех же коллекций и выбор интерфейса для сигнатуры
-      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — в главе 6.</p>
+      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — в главе 6.
+      Подробно: словари — эта глава, множества — <strong>глава 10</strong>, очереди и стеки —
+      <strong>глава 11</strong>, порядок и сравнение — глава 8.</p>
 
 
     <h2>Чего не делать</h2>
@@ -475,7 +384,7 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
       <li><strong>Не звать <code>ToDictionary</code> на данных с дублями</strong> — <code>ToLookup</code> или
         <code>GroupBy</code>.</li>
       <li><strong>Не менять коллекцию во время <code>foreach</code></strong> —
-        <code>InvalidOperationException</code> (глава 10).</li>
+        <code>InvalidOperationException</code> (глава 12).</li>
       <li><strong>Не передавать <code>Dictionary</code> между потоками без синхронизации.</strong></li>
     </ul>
 
@@ -491,9 +400,8 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
         <li>Ключ должен быть неизменяемым: мутация ломает <code>GetHashCode</code>, и запись становится
           недостижимой (и неудаляемой). Правильно — неизменяемый <code>record</code>, ключ-<code>Id</code> или
           удаление записи <em>до</em> мутации. Одинаковость ключей задаёт <code>IEqualityComparer</code>.</li>
-        <li><code>HashSet&lt;T&gt;</code> — про «есть ли» и операции над множествами;
-          <code>Queue</code>/<code>Stack</code> — FIFO/LIFO за O(1); <code>PriorityQueue</code> — минимум
-          приоритета первым, O(log n).</li>
+        <li>Множества и очереди — в следующих главах: <code>HashSet</code>/<code>SortedSet</code> — глава 10,
+          <code>Queue</code>/<code>Stack</code>/<code>PriorityQueue</code> — глава 11.</li>
         <li>Дубли ключей — <code>ToLookup</code>/<code>GroupBy</code>, а не <code>ToDictionary</code>;
           запись из нескольких потоков — <code>ConcurrentDictionary</code>, «только чтение» —
           <code>FrozenDictionary</code>.</li>
@@ -502,7 +410,7 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
 
     <div class="pager">
       <a href="cs08-comparison-and-sorting.html">← <span class="sp">Глава 8. Сравнение и порядок: IComparable, IComparer и сортировка</span></a>
-      <a href="cs10-ienumerable.html"><span class="sp">Глава 10. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+      <a href="cs10-sets-hashset-sortedset.html"><span class="sp">Глава 10. Множества: HashSet и SortedSet</span> →</a>
     </div>
   </div>
 </div>

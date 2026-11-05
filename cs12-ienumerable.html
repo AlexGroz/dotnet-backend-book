@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 10 · IEnumerable, yield и IAsyncEnumerable</title>
+<title>Глава 12 · IEnumerable, yield и IAsyncEnumerable</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs11-delegates-events.html"><span class="sp">Глава 11. Делегаты, лямбды и события: как метод становится значением</span> →</a>
+  <a href="cs13-delegates-events.html"><span class="sp">Глава 13. Делегаты, лямбды и события: как метод становится значением</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 10. IEnumerable, yield и IAsyncEnumerable</h1>
+    <h1>Глава 12. IEnumerable, yield и IAsyncEnumerable</h1>
     <p class="sublead">Что значит «по чему-то можно пройти в <code>foreach</code>», откуда берётся отложенное
       выполнение LINQ и зачем понадобился <code>IAsyncEnumerable</code>.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -205,7 +205,7 @@ await foreach (var row in StreamAsync(ct))
         <code>[JsonPropertyName("id")]</code> — <code>System.Text.Json</code> так называет поле в JSON;
         <code>[FromQuery]</code> — ASP.NET Core берёт значение из query-строки;
         <code>[EnumeratorCancellation]</code> — компилятор меняет сгенерированный код итератора.
-        Как объявить свой атрибут и прочитать его через рефлексию — глава 17.</p>
+        Как объявить свой атрибут и прочитать его через рефлексию — глава 19.</p>
     </div>
     <div class="box note">
       <span class="t">Почему не <code>Task&lt;IEnumerable&lt;T&gt;&gt;</code></span>
@@ -277,8 +277,8 @@ public Task&lt;List&lt;Order&gt;&gt; GetForYearAsync(int year, CancellationToken
     </div>
 
     <div class="pager">
-      <a href="cs09-dictionaries-sets-queues.html">← <span class="sp">Глава 9. Словари, множества и очереди на практике</span></a>
-      <a href="cs11-delegates-events.html"><span class="sp">Глава 11. Делегаты, лямбды и события: как метод становится значением</span> →</a>
+      <a href="cs09-dictionaries.html">← <span class="sp">Глава 9. Словари: Dictionary на практике</span></a>
+      <a href="cs13-delegates-events.html"><span class="sp">Глава 13. Делегаты, лямбды и события: как метод становится значением</span> →</a>
     </div>
   </div>
 </div>

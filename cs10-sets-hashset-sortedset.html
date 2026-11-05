@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 10 · Множества: HashSet и SortedSet</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs11-queues-stacks.html"><span class="sp">Глава 11. Очереди и стеки: Queue, Stack, PriorityQueue</span> →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть II · Коллекции и перечисления</div>
+    <h1>Глава 10. Множества: HashSet и SortedSet</h1>
+    <p class="sublead">Полный API множеств: <code>Add</code>/<code>Remove</code>/<code>Contains</code>,
+      операции над множествами (<code>UnionWith</code>, <code>IntersectWith</code>, <code>ExceptWith</code>,
+      <code>SymmetricExceptWith</code>), отношения (<code>IsSubsetOf</code>, <code>Overlaps</code>), компаратор,
+      ёмкость, порядок и версия с сортировкой — <code>SortedSet&lt;T&gt;</code>.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p><code>HashSet&lt;T&gt;</code> — это <code>Dictionary</code>, у которого выкинули значения и оставили
+      ключи. Отсюда всё остальное: хеш-таблица внутри, добавление и поиск за ~O(1), никакого порядка и та же
+      ловушка с изменяемым элементом (глава 9). Сортированная версия — <strong>отдельный тип</strong>
+      <code>SortedSet&lt;T&gt;</code> на красно-чёрном дереве: O(log n) и всегда по порядку.</p>
+    <p>Множество нужно там, где вопрос звучит «есть ли это у нас?», а не «что лежит под номером 3»:
+      дедупликация, «уже видели этот id», пересечение прав, разница двух выборок.</p>
+
+    <h2>Базовый API: <code>Add</code>, <code>Remove</code>, <code>Contains</code></h2>
+    <p>Главное отличие от списка: <code>Add</code> и <code>Remove</code> возвращают <code>bool</code> —
+      изменилось ли множество. Никаких исключений на повтор и на отсутствие элемента здесь нет.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var set = new HashSet&lt;int&gt; { 1, 2, 3 };
+
+Console.WriteLine(set.Add(4) + " " + set.Add(4));      // True False — второй раз уже есть
+Console.WriteLine(set.Remove(2) + " " + set.Remove(42)); // True False — 42 и не было
+Console.WriteLine(set.Contains(3) + " " + set.Count);   // True 3
+
+Console.WriteLine(set.RemoveWhere(x =&gt; x &gt; 2));        // 2 — сколько удалили
+Console.WriteLine(set.Count);                          // 1
+set.Clear();
+Console.WriteLine(set.Count);                          // 0</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True False
+True False
+True 3
+2
+1
+0</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Член</th><th>Что делает</th><th>Что возвращает</th></tr></thead>
+      <tbody>
+        <tr><td><code>Add(item)</code></td><td>Добавляет, если такого ещё нет</td><td><code>true</code> —
+          добавлено, <code>false</code> — уже было</td></tr>
+        <tr><td><code>Remove(item)</code></td><td>Удаляет</td><td><code>true</code> — удалено,
+          <code>false</code> — не было</td></tr>
+        <tr><td><code>Contains(item)</code></td><td>Проверяет наличие</td><td><code>bool</code>, ~O(1)</td></tr>
+        <tr><td><code>TryGetValue(item, out stored)</code></td><td>Ищет и отдаёт <em>хранимый</em> экземпляр</td>
+          <td><code>bool</code>; <code>stored</code> — элемент из множества, а не аргумент</td></tr>
+        <tr><td><code>RemoveWhere(predicate)</code></td><td>Удаляет всё, что подходит под условие</td>
+          <td>Сколько элементов удалено</td></tr>
+        <tr><td><code>Clear()</code></td><td>Очищает</td><td>Ничего</td></tr>
+        <tr><td><code>Count</code></td><td>Размер</td><td><code>int</code></td></tr>
+        <tr><td><code>CopyTo(array)</code></td><td>Копирует в массив</td><td>Ничего</td></tr>
+        <tr><td><code>EnsureCapacity(n)</code>, <code>TrimExcess()</code></td><td>Заранее расширить / ужать
+          память</td><td>Ёмкость</td></tr>
+        <tr><td><code>Comparer</code></td><td>Компаратор, которым сравниваются элементы</td>
+          <td><code>IEqualityComparer&lt;T&gt;</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box tip">
+      <span class="t">Трюк: <code>TryGetValue</code> у множества</span>
+      <p><code>Contains</code> отвечает «да/нет», но иногда нужен <em>сам хранимый экземпляр</em> — например,
+        чтобы вернуть канонический объект из кэша. Тогда <code>TryGetValue(probe, out var stored)</code>
+        отдаёт элемент, который лежит в множестве, и <code>ReferenceEquals</code> подтверждает, что это он:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public sealed class Item                                   // равенство по Id (глава 3)
+{
+    public int Id { get; init; }
+    public override bool Equals(object? o) =&gt; o is Item i &amp;&amp; i.Id == Id;
+    public override int GetHashCode() =&gt; Id;
+}
+
+var users = new HashSet&lt;Item&gt; { new Item { Id = 1 } };
+var probe = new Item { Id = 1 };                      // новый объект, равен только по Id
+
+users.Contains(probe);                                // True — равенство по значению
+users.TryGetValue(probe, out var stored);             // stored — тот самый объект из множества
+Console.WriteLine(ReferenceEquals(stored, users.First()));   // True</code></pre>
+      </div>
+    </div>
+
+    <h2>Операции над множествами: объединение, пересечение, разность</h2>
+    <p>Все четыре операции <strong>меняют само множество</strong> (в отличие от LINQ <code>Union</code>/
+      <code>Intersect</code>, которые возвращают новую последовательность) и ничего не возвращают.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var a = new HashSet&lt;int&gt; { 1, 2, 3, 4 };
+var b = new HashSet&lt;int&gt; { 3, 4, 5 };
+
+var c = new HashSet&lt;int&gt;(a); c.UnionWith(b);            // A ∪ B
+Console.WriteLine(string.Join(",", c.OrderBy(x =&gt; x))); // 1,2,3,4,5
+
+c = new HashSet&lt;int&gt;(a); c.IntersectWith(b);            // A ∩ B
+Console.WriteLine(string.Join(",", c.OrderBy(x =&gt; x))); // 3,4
+
+c = new HashSet&lt;int&gt;(a); c.ExceptWith(b);               // A ∖ B
+Console.WriteLine(string.Join(",", c.OrderBy(x =&gt; x))); // 1,2
+
+c = new HashSet&lt;int&gt;(a); c.SymmetricExceptWith(b);      // A Δ B — всё, кроме общего
+Console.WriteLine(string.Join(",", c.OrderBy(x =&gt; x))); // 1,2,5</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">1,2,3,4,5
+3,4
+1,2
+1,2,5</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Метод</th><th>Что остаётся в множестве</th><th>Формула</th><th>Задача</th></tr></thead>
+      <tbody>
+        <tr><td><code>UnionWith(other)</code></td><td>Всё из обоих</td><td>A ∪ B</td><td>Слить права, теги,
+          подписчиков</td></tr>
+        <tr><td><code>IntersectWith(other)</code></td><td>Только общее</td><td>A ∩ B</td><td>Пересечение
+          разрешений, «есть в обоих списках»</td></tr>
+        <tr><td><code>ExceptWith(other)</code></td><td>Своё, без чужого</td><td>A ∖ B</td><td>Убрать
+          заблокированных, вычесть обработанное</td></tr>
+        <tr><td><code>SymmetricExceptWith(other)</code></td><td>Только не общее</td><td>A Δ B</td>
+          <td>Расхождения двух версий набора</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Осторожно: операции мутируют получателя</span>
+      <p><code>a.UnionWith(b)</code> меняет <code>a</code>, а не возвращает новое множество. Нужен исходный
+        набор — сначала скопируйте: <code>var c = new HashSet&lt;int&gt;(a); c.UnionWith(b);</code>. Второй
+        вариант — LINQ: <code>a.Union(b)</code> возвращает новую последовательность и ничего не портит.</p>
+    </div>
+
+    <h2>Отношения: подмножество, надмножество, пересечение</h2>
+    <p>Эти шесть методов ничего не меняют — они отвечают, как соотносятся два множества:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var a = new HashSet&lt;int&gt; { 1, 2, 3, 4 };
+
+Console.WriteLine(new HashSet&lt;int&gt; { 2, 1 }.SetEquals(new HashSet&lt;int&gt; { 1, 2 })); // True
+Console.WriteLine(new HashSet&lt;int&gt; { 1, 2 }.IsSubsetOf(a));            // True  ⊆
+Console.WriteLine(new HashSet&lt;int&gt; { 1, 2 }.IsProperSubsetOf(a));      // True  ⊂ (строго меньше)
+Console.WriteLine(a.IsSupersetOf(new HashSet&lt;int&gt; { 1, 2 }));          // True  ⊇
+Console.WriteLine(a.IsProperSupersetOf(a));                            // False — равные не «строго»
+Console.WriteLine(a.Overlaps(new HashSet&lt;int&gt; { 4, 9 }));              // True  есть общий элемент</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True
+True
+True
+True
+False
+True</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Метод</th><th>Вопрос</th><th>Крайний случай</th></tr></thead>
+      <tbody>
+        <tr><td><code>SetEquals(other)</code></td><td>Те же элементы (порядок не важен)</td>
+          <td>Сравнение по значению, а не по ссылке</td></tr>
+        <tr><td><code>IsSubsetOf</code></td><td>Все мои элементы есть в <code>other</code></td>
+          <td>Равные множества → <code>true</code></td></tr>
+        <tr><td><code>IsProperSubsetOf</code></td><td>Подмножество и меньше по размеру</td>
+          <td>Равные → <code>false</code></td></tr>
+        <tr><td><code>IsSupersetOf</code></td><td>Содержит все элементы <code>other</code></td>
+          <td>Равные → <code>true</code></td></tr>
+        <tr><td><code>IsProperSupersetOf</code></td><td>Надмножество и строго больше</td>
+          <td>Равные → <code>false</code> (проверено выше)</td></tr>
+        <tr><td><code>Overlaps</code></td><td>Есть хотя бы один общий элемент</td>
+          <td>Пустое множество ни с чем не пересекается</td></tr>
+      </tbody>
+    </table>
+
+
+    <h2>Ёмкость, память и компаратор</h2>
+    <p>Как и у словаря, у множества есть внутренние корзины: их можно заказать заранее и ужать после
+      заполнения.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var set = new HashSet&lt;int&gt;();
+set.EnsureCapacity(100);       // корзины под 100 элементов — без промежуточных расширений
+set.Add(1);
+set.TrimExcess();              // ужать под фактический размер
+
+var array = new int[5];
+set.CopyTo(array);             // копирование в массив
+Console.WriteLine(array[0] + " " + set.Comparer.GetType().Name);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">1 GenericEqualityComparer`1</code></pre>
+    </div>
+    <p>Компаратор задаётся в конструкторе и решает, какие элементы считать одинаковыми:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var names = new HashSet&lt;string&gt;(StringComparer.OrdinalIgnoreCase) { "Аня" };
+
+Console.WriteLine(names.Contains("АНЯ"));                          // True
+Console.WriteLine(new HashSet&lt;string&gt; { "Аня" }.Contains("АНЯ"));   // False</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True
+False</code></pre>
+    </div>
+    <p>Правила те же, что в главе 9: <code>Ordinal</code> для идентификаторов и тестов,
+      <code>OrdinalIgnoreCase</code> — когда регистр не должен различать. Компаратор влияет не только на
+      <code>Contains</code>, но и на <code>Remove</code>, и на операции над множествами — они работают по тем
+      же правилам равенства.</p>
+
+    <h2>Порядок перебора и <code>SortedSet&lt;T&gt;</code></h2>
+    <p><code>HashSet</code> порядок не хранит: элементы перебираются в порядке корзин, и полагаться на это
+      нельзя (как и с <code>Dictionary</code>, глава 9). Если порядок нужен как часть контракта — берут
+      <code>SortedSet&lt;T&gt;</code>. Он умеет всё то же плюс доступ к краям и диапазонам:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var sorted = new SortedSet&lt;int&gt; { 5, 1, 3 };
+
+Console.WriteLine(string.Join(",", sorted));            // 1,3,5 — всегда по возрастанию
+Console.WriteLine(sorted.Min + " " + sorted.Max);       // 1 5
+Console.WriteLine(string.Join(",", sorted.Reverse()));  // 5,3,1
+Console.WriteLine(string.Join(",", sorted.GetViewBetween(2, 4)));   // 3 — только из диапазона
+
+var view = sorted.GetViewBetween(1, 3);      // это ЖИВОЕ представление, а не копия
+sorted.Add(2);
+Console.WriteLine(string.Join(",", view));   // 1,2,3 — новый элемент виден во view</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">1,3,5
+1 5
+5,3,1
+3
+1,2,3</code></pre>
+    </div>
+    <table>
+      <thead><tr><th></th><th><code>HashSet&lt;T&gt;</code></th><th><code>SortedSet&lt;T&gt;</code></th></tr></thead>
+      <tbody>
+        <tr><td>Внутри</td><td>Хеш-таблица</td><td>Красно-чёрное дерево</td></tr>
+        <tr><td>Add / Remove / Contains</td><td>~O(1)</td><td>O(log n)</td></tr>
+        <tr><td>Порядок перебора</td><td>Не гарантирован</td><td>По возрастанию (через компаратор)</td></tr>
+        <tr><td>Края и диапазоны</td><td>Нет (<code>Min</code>/<code>Max</code> — через LINQ, O(n))</td>
+          <td><code>Min</code>, <code>Max</code>, <code>GetViewBetween</code></td></tr>
+        <tr><td>Требования к <code>T</code></td><td>Любой (равенство по <code>Equals</code>/хешу)</td>
+          <td><code>IComparable&lt;T&gt;</code> или компаратор (глава 8)</td></tr>
+        <tr><td>Когда брать</td><td>Проверки «есть ли», дедупликация</td><td>Нужен порядок, диапазон,
+          «ближайший больше/меньше»</td></tr>
+      </tbody>
+    </table>
+    <p>Для <code>SortedSet</code> без компаратора тип обязан реализовывать <code>IComparable&lt;T&gt;</code>
+      — иначе конструктор бросит исключение. Свой порядок задаётся так же, как в главе 8:
+      <code>new SortedSet&lt;Order&gt;(Comparer&lt;Order&gt;.Create((x, y) =&gt; y.Total.CompareTo(x.Total)))</code>.</p>
+
+    <h2>Сколько это стоит: <code>List.Contains</code> против <code>HashSet.Contains</code></h2>
+    <p>Смысл множества виден на поиске. Замер на этой машине: список из 100 000 чисел против множества из тех
+      же чисел, по 2000 проверок «есть ли элемент» (элемент заведомо есть, то есть список каждый раз проходит
+      почти до конца).</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var big = Enumerable.Range(0, 100_000).ToList();
+var bigSet = big.ToHashSet();
+
+foreach (var x in Enumerable.Range(0, 2000)) big.Contains(99_999 - x);      // O(n) на проверку
+foreach (var x in Enumerable.Range(0, 2000)) bigSet.Contains(99_999 - x);   // ~O(1)</code></pre>
+      <p class="cap">Вывод (net8.0)</p>
+      <pre><code class="language-text">List.Contains x2000:    24.90 ms
+HashSet.Contains x2000:  0.08 ms</code></pre>
+    </div>
+    <p>Разница ~300×, и она растёт вместе с размером коллекции: у списка каждая проверка — проход, у
+      множества — вычисление хеша. Отсюда правило: если в коде есть <code>list.Contains(...)</code> внутри
+      цикла, почти всегда нужен <code>HashSet</code> (или <code>ToHashSet()</code> на входе).</p>
+
+
+    <h2>Изменяемый элемент — та же ловушка, что с ключом словаря</h2>
+    <p>Элемент множества — это ключ словаря. Значит, правило из главы 9 действует целиком: если
+      <code>GetHashCode</code> зависит от изменяемого поля, после мутации элемент «теряется» — он есть в
+      перечислении, но <code>Contains</code> его не находит.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record Key { public int Id { get; set; } }   // хеш считается по Id
+
+var set = new HashSet&lt;Key&gt; { new Key { Id = 1 } };
+var key = set.First();
+
+key.Id = 2;                                        // хеш изменился
+
+Console.WriteLine(set.Count + " " + set.Contains(key));       // 1 False</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">1 False</code></pre>
+    </div>
+    <p>Лечится тем же способом: неизменяемый элемент (<code>record</code> с <code>init</code>, позиционный
+      <code>record</code>), суррогатный ключ или удаление <em>до</em> мутации — три варианта разобраны в
+      главе 9, раздел «Как надо: три способа не потерять запись».</p>
+
+    <h2>Неизменяемое и «замороженное»: <code>ImmutableHashSet</code> и <code>FrozenSet</code></h2>
+    <p>Если множество заполняется один раз (справочник, набор разрешений, список синонимов), обычный
+      <code>HashSet</code> избыточен: он тратит память на возможность изменения и не защищает от случайной
+      записи. Два варианта на такой случай:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var ids = new[] { 1, 1, 2 };
+
+FrozenSet&lt;int&gt; frozen = ids.ToFrozenSet();                  // System.Collections.Frozen (.NET 8)
+ImmutableHashSet&lt;int&gt; immutable = ids.ToImmutableHashSet(); // System.Collections.Immutable
+
+Console.WriteLine(frozen.Count + " (" + frozen.GetType().Name + ") " + immutable.Count);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">2 (SmallValueTypeComparableFrozenSet`1) 2</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>FrozenSet</code>/<code>FrozenDictionary</code></strong> — создаётся один раз,
+        оптимизирован под чтение: внутри структура, подобранная под содержимое (это видно по имени типа).
+        Изменить нельзя вообще. Лучший выбор для «константы приложения».</li>
+      <li><strong><code>ImmutableHashSet</code></strong> — «изменение» возвращает новое множество, старое
+        остаётся валидным: <code>ImmutableHashSet&lt;int&gt; next = current.Add(3);</code>. Удобно, когда набор
+        обновляется редко, а читается из разных потоков.</li>
+      <li>Оба безопасны для параллельного чтения и не дают изменить себя случайно — то, чего не хватает
+        <code>HashSet</code>.</li>
+    </ul>
+
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong>Результат <code>Add</code>/<code>Remove</code> игнорируют.</strong> Именно он отвечает на
+        вопрос «а был ли элемент»: <code>if (!set.Add(id)) { /* уже был */ }</code>.</li>
+      <li><strong>Операции над множествами мутируют получателя.</strong> <code>a.UnionWith(b)</code> меняет
+        <code>a</code>; нужен исходный набор — копируйте или берите LINQ.</li>
+      <li><strong>Порядок перебора <code>HashSet</code> не гарантирован</strong> и меняется после удалений.
+        Нужен порядок — <code>SortedSet</code> или сортировка при выводе.</li>
+      <li><strong><code>SortedSet</code> без компаратора требует <code>IComparable&lt;T&gt;</code></strong>, и
+        ошибка появляется не в конструкторе, а при добавлении <em>второго</em> элемента: первый не с чем
+        сравнивать.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var s = new SortedSet&lt;NoCompare&gt;();
+s.Add(new NoCompare { Id = 1 });     // ✔ ошибки нет
+s.Add(new NoCompare { Id = 2 });     // ✘ нужно сравнение</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">System.ArgumentException: At least one object must implement IComparable.</code></pre>
+    </div>
+    <ul>
+      <li><strong>Изменяемый элемент</strong> — та же потеря записи, что и с ключом словаря.</li>
+      <li><strong>Компараторы двух множеств должны совпадать по смыслу.</strong>
+        <code>new HashSet&lt;string&gt;(StringComparer.OrdinalIgnoreCase)</code> и обычное
+        <code>new HashSet&lt;string&gt;</code> по-разному ответят на <code>IsSubsetOf</code> и
+        <code>SetEquals</code>.</li>
+      <li><strong><code>list.Contains(...)</code> в цикле</strong> — почти всегда нужен
+        <code>HashSet</code>/<code>ToHashSet()</code> (см. замер выше).</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong><code>Add</code>/<code>Remove</code> возвращают <code>bool</code></strong> и не бросают
+          исключений; <code>RemoveWhere</code> — сколько удалил; <code>TryGetValue</code> отдаёт хранимый
+          экземпляр.</li>
+        <li><strong>Операции над множествами</strong> — <code>UnionWith</code> (∪), <code>IntersectWith</code>
+          (∩), <code>ExceptWith</code> (∖), <code>SymmetricExceptWith</code> (Δ); все мутируют получателя.</li>
+        <li><strong>Отношения</strong> — <code>SetEquals</code>, <code>IsSubsetOf</code>/
+          <code>IsProperSubsetOf</code>, <code>IsSupersetOf</code>/<code>IsProperSupersetOf</code>,
+          <code>Overlaps</code>; «proper» ложно для равных множеств.</li>
+        <li><strong>Ёмкость</strong> — <code>EnsureCapacity</code>, <code>TrimExcess</code>,
+          <code>CopyTo</code>; компаратор задаётся в конструкторе и влияет на всё равенство.</li>
+        <li><strong>Порядка в <code>HashSet</code> нет</strong>; сортированный вариант — отдельный тип
+          <code>SortedSet&lt;T&gt;</code>: O(log n), <code>Min</code>/<code>Max</code>,
+          <code>GetViewBetween</code> (живое представление).</li>
+        <li><strong>Поиск:</strong> <code>HashSet.Contains</code> ~O(1) против <code>List.Contains</code> O(n) —
+          на замере разница ~300×.</li>
+        <li><strong>Только чтение после старта</strong> — <code>FrozenSet</code>; версии —
+          <code>ImmutableHashSet</code>.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs09-dictionaries.html">← <span class="sp">Глава 9. Словари: Dictionary на практике</span></a>
+      <a href="cs11-queues-stacks.html"><span class="sp">Глава 11. Очереди и стеки: Queue, Stack, PriorityQueue</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
