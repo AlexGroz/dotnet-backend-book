@@ -94,23 +94,115 @@ string s = names.Get(0);
       подстановке — поэтому <code>names.Add(42)</code> не компилируется, а не падает в рантайме. Типы, где
       параметр ещё не подставлен (<code>Box&lt;&gt;</code>, <code>List&lt;&gt;</code>), называют
       <strong>открытыми</strong> (generic type definition).</p>
-    <p><code>T</code> — не <code>object</code> и не «любой тип»: пока подстановки не было, компилятор о нём
-      почти ничего не знает. Отсюда две ошибки, на которых спотыкаются чаще всего:</p>
+    <h2>Что компилятор знает о <code>T</code>: <code>new T()</code>, <code>default</code> и ограничения</h2>
+    <p>Разбирая тело generic-метода, компилятор знает о <code>T</code> только то, что записано в его
+      <strong>ограничениях</strong> (<code>where</code>). Ограничений нет — известно ровно одно: это некоторый
+      тип, значения которого совместимы с <code>object</code>. Не «класс», не «структура», не «что-то с
+      конструктором» — ничего из этого.</p>
+    <p>Поэтому всё решает один вопрос: <strong>есть ли у <code>T</code> то, что мы собираемся вызвать?</strong>
+      Начнём с конструктора.</p>
+    <p><strong>Есть ли у <code>T</code> конструктор без параметров — неизвестно.</strong> У <code>int</code> он
+      есть, у класса без объявленных конструкторов появляется сам, а у класса с
+      <code>public NoCtor(int x)</code> его нет вовсе. Предполагать «повезёт» компилятор не имеет права, поэтому
+      <code>new T()</code> запрещён — и текст ошибки говорит именно об этом:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">public static T Make&lt;T&gt;() =&gt; new T();   // ✘ CS0304: Cannot create an instance of the variable
-                                        //   type 'T' because it does not have the new() constraint
+      <pre><code class="language-csharp">public static T Make&lt;T&gt;() =&gt; new T();   // ✘ без ограничения new()</code></pre>
+      <p class="cap">Что скажет компилятор (CS0304)</p>
+      <pre><code class="language-text">error CS0304: Cannot create an instance of the variable type 'T' because it does not
+have the new() constraint</code></pre>
+    </div>
+    <p>Читать её надо буквально: «не хватает ограничения <code>new()</code>». Это не «<code>T</code> — не
+      класс», а «вы не пообещали, что конструктор есть». Обещание даётся в объявлении — и та же строка
+      компилируется:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static T Make&lt;T&gt;() where T : new() =&gt; new T();        // ✔ конструктор гарантирован
+static T MakeStruct&lt;T&gt;() where T : struct =&gt; new T();  // ✔ struct гарантирует его сам
 
-public static T Zero&lt;T&gt;() =&gt; default!;  // ✔ default(T): 0 для int, null для string
+Console.WriteLine(Make&lt;int&gt;());          // 0    — у int конструктор без параметров есть
+Console.WriteLine(Make&lt;Point&gt;() is not null);   // True — у Point он неявный
+Console.WriteLine(MakeStruct&lt;Guid&gt;());   // 00000000-0000-0000-0000-000000000000</code></pre>
+    </div>
+    <p>Проверка «повезло или нет» идёт в момент <strong>подстановки</strong>: подставить тип без подходящего
+      конструктора просто нельзя.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class NoCtor { public NoCtor(int x) { } }   // без конструктора по умолчанию
+var p = Make&lt;NoCtor&gt;();                                   // ✘</code></pre>
+      <p class="cap">Что скажет компилятор (CS0310)</p>
+      <pre><code class="language-text">error CS0310: 'NoCtor' must be a non-abstract type with a public parameterless
+constructor in order to use it as parameter 'T' in the generic type or method
+'Make&lt;T&gt;()'</code></pre>
+    </div>
+    <p><strong>Альтернатива, которая компилируется, но хуже.</strong> <code>Activator.CreateInstance&lt;T&gt;()</code>
+      ограничения не требует — он ищет конструктор <em>в рантайме</em>, рефлексией. Ошибка не исчезает, она
+      просто переезжает из сборки в прод:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">try { Activator.CreateInstance&lt;NoCtor&gt;(); }
+catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">MissingMethodException: Cannot dynamically create an instance of type 'NoCtor'.
+Reason: No parameterless constructor defined.</code></pre>
+    </div>
+    <p>Ограничение же переносит проверку <strong>на этап компиляции</strong> и стоит ноль в рантайме: JIT
+      вызывает конструктор напрямую, без поиска через рефлексию.</p>
+
+    <p><strong>Второй вопрос: а что вообще можно сделать с <code>T</code>, если вызвать у него нечего?</strong>
+      Тут компилятор спокоен: <code>default</code> определён для <em>любого</em> типа — у значимых это нули, у
+      ссылочных <code>null</code>. Поэтому <code>default(T)</code> (он же <code>default</code>) разрешён без
+      ограничений:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static T Zero&lt;T&gt;() =&gt; default!;                    // ✔ ограничения не нужны
+
 Console.WriteLine(Zero&lt;int&gt;());                    // 0
 Console.WriteLine(Zero&lt;string&gt;() ?? "&lt;null&gt;");      // &lt;null&gt;
-
-var raw = new List&lt;&gt;();                 // ✘ CS7003: Unexpected use of an unbound generic name
-                                        //   открытый тип создать нельзя — параметр не подставлен</code></pre>
+Console.WriteLine(Zero&lt;DateTime&gt;().ToString("yyyy-MM-dd"));   // 0001-01-01
+Console.WriteLine(Zero&lt;int?&gt;() is null);           // True</code></pre>
     </div>
-    <p>Это и есть ответ на вопрос «почему <code>new T()</code> не работает, а <code>default(T)</code>
-      работает»: <code>T</code> — не тип, а <em>переменная типа</em>, и известно о ней немного
-      (<code>default</code> есть у любого типа, конструктор — не у любого).</p>
+    <p>А оператора <code>+</code> у «любого типа» нет — и ошибка ровно та же по смыслу, что и с конструктором:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static T Add&lt;T&gt;(T a, T b) =&gt; a + b;   // ✘</code></pre>
+      <p class="cap">Что скажет компилятор (CS0019)</p>
+      <pre><code class="language-text">error CS0019: Operator '+' cannot be applied to operands of type 'T' and 'T'</code></pre>
+    </div>
+    <p>Лечится так же — ограничением; с C# 11 для арифметики есть <code>INumber&lt;T&gt;</code>
+      (generic math):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static T Sum&lt;T&gt;(T a, T b) where T : INumber&lt;T&gt; =&gt; a + b;   // using System.Numerics
 
+Console.WriteLine(Sum(1, 2));        // 3   — T = int
+Console.WriteLine(Sum(1.5, 2.5));    // 4   — T = double</code></pre>
+    </div>
+
+
+
+
+    <table>
+      <thead><tr><th>Ограничение</th><th>Что становится можно</th><th>Где встречается</th></tr></thead>
+      <tbody>
+        <tr><td>нет</td><td><code>default(T)</code>, <code>Equals</code>/<code>GetHashCode</code>/
+          <code>ToString</code>, хранить, передавать, сравнивать с <code>null</code></td>
+          <td><code>List&lt;T&gt;</code>, <code>Dictionary&lt;TKey, TValue&gt;</code></td></tr>
+        <tr><td><code>where T : new()</code></td><td><code>new T()</code></td>
+          <td>фабрики, десериализация, клонирование</td></tr>
+        <tr><td><code>where T : struct</code></td><td>значимый тип; <code>new T()</code> тоже (у структур он
+          есть всегда); <code>T?</code> означает <code>Nullable&lt;T&gt;</code></td>
+          <td>обёртки над <code>Nullable</code>, числовые утилиты</td></tr>
+        <tr><td><code>where T : class</code></td><td>ссылочный тип, сравнение с <code>null</code></td>
+          <td>сервисы, репозитории</td></tr>
+        <tr><td><code>where T : INumber&lt;T&gt;</code></td><td>арифметика <code>+ - * /</code> и сравнение</td>
+          <td>generic math (C# 11)</td></tr>
+        <tr><td><code>where T : IComparable&lt;T&gt;</code></td><td><code>CompareTo</code> → сортировка,
+          максимум</td><td><code>Max&lt;T&gt;</code> — в следующем разделе</td></tr>
+        <tr><td><code>where T : SomeBase</code></td><td>члены базового класса или интерфейса</td>
+          <td><code>IRepository&lt;T&gt; where T : Entity</code></td></tr>
+      </tbody>
+    </table>
+    <p>И последнее в этом блоке — про <em>открытый</em> тип. Даже когда ограничения выполнены, объект
+      <code>List&lt;&gt;</code> создать нельзя: подставлять нечего.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var raw = new List&lt;&gt;();                 // ✘</code></pre>
+      <p class="cap">Что скажет компилятор (CS7003)</p>
+      <pre><code class="language-text">error CS7003: Unexpected use of an unbound generic name</code></pre>
+    </div>
 
     <h2>Специализация: что из этого получается в рантайме</h2>
     <p>В .NET тип-аргумент <strong>не стирается</strong>: он часть типа и лежит в метаданных, поэтому
@@ -231,16 +323,24 @@ public decimal Sum(IEnumerable&lt;OrderRow&gt; rows) =&gt; rows.Sum(r =&gt; r.To
         <tr><td><code>List&lt;T&gt;</code></td><td>Индекс O(1), добавление в конец амортизированно O(1)</td><td>Вставка/удаление в середине O(n)</td></tr>
         <tr><td><code>Dictionary&lt;TKey, TValue&gt;</code></td><td>Поиск/вставка/удаление по ключу ~O(1)</td><td>Нет порядка; нужен хороший <code>GetHashCode</code></td></tr>
         <tr><td><code>HashSet&lt;T&gt;</code></td><td>«Есть ли элемент» ~O(1), пересечения</td><td>Нет индексов и порядка</td></tr>
+        <tr><td><code>SortedSet&lt;T&gt;</code></td><td>То же плюс порядок: <code>Min</code>/<code>Max</code>, диапазон через <code>GetViewBetween</code></td><td>O(log n) на операцию вместо ~O(1)</td></tr>
         <tr><td><code>Queue&lt;T&gt;</code> / <code>Stack&lt;T&gt;</code></td><td>FIFO / LIFO за O(1)</td><td>Нет доступа к произвольному элементу</td></tr>
         <tr><td><code>LinkedList&lt;T&gt;</code></td><td>Вставка/удаление по узлу O(1)</td><td>Плохая локальность памяти, нет индексов</td></tr>
         <tr><td><code>SortedDictionary&lt;TKey,TValue&gt;</code></td><td>Всегда отсортировано, O(log n)</td><td>Медленнее <code>Dictionary</code></td></tr>
         <tr><td><code>ConcurrentDictionary</code>, <code>ConcurrentQueue</code></td><td>Безопасны для нескольких потоков</td><td>Дороже обычных из-за синхронизации</td></tr>
       </tbody>
     </table>
+    <p><strong>«Нет порядка» — не приговор.</strong> <code>HashSet&lt;T&gt;</code> порядок не хранит вообще:
+      это хеш-таблица. Сортированное множество — <em>отдельный тип</em>: <code>SortedSet&lt;T&gt;</code>
+      (красно-чёрное дерево, O(log n) на операцию; зато доступны <code>Min</code>/<code>Max</code> и диапазон
+      через <code>GetViewBetween</code>, а перебор идёт по возрастанию). Для «заполнили один раз и только
+      читаем» есть <code>ImmutableSortedSet&lt;T&gt;</code> (неизменяемый и отсортированный) и
+      <code>FrozenSet&lt;T&gt;</code> (.NET 8: самый быстрый на чтение, но порядок не гарантирует).</p>
     <div class="box tip">
       <span class="t">Правило выбора</span>
       <p>Сформулируйте <strong>операцию, которая выполняется чаще всего</strong>. Поиск по ключу →
-        <code>Dictionary</code>. Проверка уникальности → <code>HashSet</code>. Обход в порядке добавления →
+        <code>Dictionary</code>. Проверка уникальности → <code>HashSet</code>, а если нужен ещё и порядок по
+        значению → <code>SortedSet</code>. Обход в порядке добавления →
         <code>List</code>. Очередь задач → <code>Queue</code>/<code>Channel</code>. Остальное — редкость.</p>
     </div>
 

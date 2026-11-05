@@ -368,6 +368,8 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
         <tr><td>Взять значение по ключу</td><td><code>Dictionary&lt;TKey, TValue&gt;</code></td>
           <td>~O(1)</td></tr>
         <tr><td>«Есть ли элемент», дедупликация</td><td><code>HashSet&lt;T&gt;</code></td><td>~O(1)</td></tr>
+        <tr><td>Уникальность + обход по возрастанию</td><td><code>SortedSet&lt;T&gt;</code></td>
+          <td>O(log n)</td></tr>
         <tr><td>Ключи по порядку, диапазон</td><td><code>SortedDictionary</code>,
           <code>SortedList</code></td><td>O(log n)</td></tr>
         <tr><td>Порядок добавления + индекс</td><td><code>List&lt;T&gt;</code></td>
