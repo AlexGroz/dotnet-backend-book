@@ -34,7 +34,8 @@
       запись недостижимой. Обе темы — ниже, с реальным выводом.</p>
 
     <h2><code>Dictionary</code>: положить, перезаписать, достать</h2>
-    <p>У словаря два «пишущих» входа с разным поведением, и это первая ловушка:</p>
+    <p>Записать в словарь можно двумя способами: индексатором <code>d[key] = value</code> или методом
+      <code>d.Add(key, value)</code>. Ведут они себя по-разному, и в этом первая ловушка:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">var byId = new Dictionary&lt;int, string&gt;();
 
@@ -79,8 +80,8 @@ if (byId.ContainsKey(1))
 }
 
 // «нет ключа» — нормальная ситуация: у метода две перегрузки
-Console.WriteLine(byId.GetValueOrDefault(3) ?? "нет");      // одна: вместо значения — default(string)
-Console.WriteLine(byId.GetValueOrDefault(3, "нет"));        // две: вместо default — своё значение
+Console.WriteLine(byId.GetValueOrDefault(3) ?? "нет");      // перегрузка 1: вернулся default(string)
+Console.WriteLine(byId.GetValueOrDefault(3, "нет"));        // перегрузка 2: вернулось заданное значение
 Console.WriteLine(byId.GetValueOrDefault(1, "нет"));        // ключ есть — второе значение не нужно</code></pre>
       <p class="cap">Вывод</p>
       <pre><code class="language-text">нашли: ОДИН
