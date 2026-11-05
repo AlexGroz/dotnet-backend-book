@@ -222,9 +222,13 @@ Console.WriteLine(Avg(new[] { 1.0, 2.0 }));// 1.5    — double</code></pre>
           <td>Целочисленное / плавающее подмножество</td></tr>
       </tbody>
     </table>
-    <p>Ограничение <code>INumber&lt;T&gt;</code> не подходит для <code>string</code>, <code>decimal</code>
-      подходит, <code>int</code> и <code>double</code> тоже. Ошибка подстановки — обычная CS0311:
-      «нет неявного преобразования к <code>INumber&lt;T&gt;</code>».</p>
+    <p>Кто подходит под <code>INumber&lt;T&gt;</code>: числа — <code>byte</code>…<code>decimal</code>,
+      <code>Half</code>, <code>Int128</code>, <code>BigInteger</code> и, что неожиданно, <code>char</code>
+      (он реализует <code>IBinaryInteger&lt;char&gt;</code>, поэтому <code>Sum('a', 'b')</code> вернёт
+      <code>Ã</code>). Не подходят <code>string</code>, <code>bool</code>, <code>DateTime</code>,
+      <code>Guid</code>. Диагностика зависит от вида типа: для структуры это CS0315 («нет упаковочного
+      преобразования»), для класса — CS0311 («нет ссылочного»), а <code>Sum(1, "a")</code> вообще не даёт
+      вывести <code>T</code> (CS0411). Все три вывода компилятора — в главе 6.</p>
 
 
     <h2>Вариантность: когда <code>IEnumerable&lt;A&gt;</code> можно заменить на <code>IEnumerable&lt;B&gt;</code></h2>

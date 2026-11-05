@@ -171,9 +171,45 @@ Console.WriteLine(Zero&lt;int?&gt;() is null);           // True</code></pre>
 Console.WriteLine(Sum(1, 2));        // 3   — T = int
 Console.WriteLine(Sum(1.5, 2.5));    // 4   — T = double</code></pre>
     </div>
+    <p>Что будет, если подставить не число? Компилятор откажется — но <strong>разными</strong> ошибками, и
+      различать их полезно: у структуры (<code>bool</code>) не хватает <em>упаковочного</em> преобразования, у
+      класса (<code>string</code>) — <em>ссылочного</em>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Sum(true, false);      // ✘ bool   — не число
+Sum("a", "b");         // ✘ string — не число
+Sum(1, "a");           // ✘ а тут даже T не выводится: аргументы разных типов</code></pre>
+      <p class="cap">Вывод компилятора — три разных кода</p>
+      <pre><code class="language-text">error CS0315: The type 'bool' cannot be used as type parameter 'T' in the generic type
+or method 'Demo.Sum&lt;T&gt;(T, T)'. There is no boxing conversion from 'bool' to
+'System.Numerics.INumber&lt;bool&gt;'.
 
+error CS0311: The type 'string' cannot be used as type parameter 'T' in the generic type
+or method 'Demo.Sum&lt;T&gt;(T, T)'. There is no implicit reference conversion from 'string'
+to 'System.Numerics.INumber&lt;string&gt;'.
 
-
+error CS0411: The type arguments for method 'Demo.Sum&lt;T&gt;(T, T)' cannot be inferred from
+the usage. Try specifying the type arguments explicitly.</code></pre>
+    </div>
+    <p>И ключевая разница, которую видно на соседнем <code>Max</code>: <code>bool</code> и <code>string</code>
+      <em>проходят</em> ограничение <code>IComparable&lt;T&gt;</code> (у обоих есть порядок), но не проходят
+      <code>INumber&lt;T&gt;</code> (арифметики у них нет):</p>
+    <table>
+      <thead><tr><th>Тип</th><th><code>IComparable&lt;T&gt;</code> — порядок</th>
+        <th><code>INumber&lt;T&gt;</code> — арифметика</th></tr></thead>
+      <tbody>
+        <tr><td><code>int</code>, <code>long</code>, <code>double</code>, <code>decimal</code>…</td>
+          <td>да</td><td>да</td></tr>
+        <tr><td><code>char</code></td><td>да</td><td><strong>да</strong> — реализует
+          <code>IBinaryInteger&lt;char&gt;</code></td></tr>
+        <tr><td><code>string</code></td><td>да</td><td>нет</td></tr>
+        <tr><td><code>bool</code></td><td>да (<code>false &lt; true</code>)</td><td>нет</td></tr>
+        <tr><td><code>DateTime</code>, <code>Guid</code>, <code>enum</code></td><td>да</td><td>нет</td></tr>
+        <tr><td><code>object</code> и любой класс без интерфейсов</td><td>нет</td><td>нет</td></tr>
+      </tbody>
+    </table>
+    <p>Про <code>char</code> — это не опечатка: <code>Sum('a', 'b')</code> компилируется и возвращает
+      <code>char</code> с кодом 195 (<code>97 + 98</code>), то есть <code>Ã</code>. Арифметика над
+      <code>char</code> в C# — это арифметика над кодом символа, и generic math её разрешает.</p>
 
     <table>
       <thead><tr><th>Ограничение</th><th>Что становится можно</th><th>Где встречается</th></tr></thead>
@@ -199,11 +235,34 @@ Console.WriteLine(Sum(1.5, 2.5));    // 4   — T = double</code></pre>
     <p>Это только те ограничения, которые нужны, чтобы читать код. Все виды <code>where</code>,
       <code>T?</code> и <code>notnull</code>, вариантность <code>in</code>/<code>out</code> и generic math —
       в <strong>главе 7</strong>.</p>
-    <p>И последнее в этом блоке — про <em>открытый</em> тип. Даже когда ограничения выполнены, объект
-      <code>List&lt;&gt;</code> создать нельзя: подставлять нечего.</p>
+    <p>И последнее в этом блоке — про <em>открытый</em> тип. Объект <code>List&lt;&gt;</code> создать нельзя:
+      подставлять нечего. А <strong><code>new List&lt;T&gt;()</code> — можно</strong>, если <code>T</code>
+      объявлен в текущем методе или классе: это уже не определение типа, а «список, тип элементов которого
+      подставит вызывающий».</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var raw = new List&lt;&gt;();                 // ✘</code></pre>
-      <p class="cap">Что скажет компилятор (CS7003)</p>
+      <pre><code class="language-csharp">var raw = new List&lt;&gt;();          // ✘ открытый (unbound) тип — создать не из чего
+
+static void Fill&lt;T&gt;()
+{
+    var list = new List&lt;T&gt;();      // ✔ T — параметр типа, подставится при вызове
+    Console.WriteLine(list.Count);                             // 0
+    Console.WriteLine(typeof(List&lt;T&gt;).IsGenericTypeDefinition); // False
+    Console.WriteLine(typeof(List&lt;&gt;).IsGenericTypeDefinition);  // True
+}
+
+Fill&lt;int&gt;();       // внутри: List&lt;int&gt;
+Fill&lt;string&gt;();    // внутри: List&lt;string&gt;</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">0
+False
+True</code></pre>
+    </div>
+    <p>Разница ровно в одном: <code>List&lt;&gt;</code> — <em>определение</em> типа, у него нет ни одного
+      аргумента, поэтому объект создать не из чего. <code>List&lt;T&gt;</code> внутри generic-кода —
+      <em>сконструированный</em> тип, где роль аргумента играет параметр типа: он годится для <code>new</code>,
+      для полей, для <code>typeof</code> и для возвращаемого значения — а конкретным он станет в момент
+      подстановки.</p>
+    <div class="codewrap">
       <pre><code class="language-text">error CS7003: Unexpected use of an unbound generic name</code></pre>
     </div>
 
@@ -257,12 +316,21 @@ System.Int32</code></pre>
     =&gt; a.CompareTo(b) &gt;= 0 ? a : b;
 
 var m1 = Max(3, 5);           // T выведен из аргументов: int → и результат int
-var m2 = Max("a", "b");       // T = string
-var m3 = Max&lt;double&gt;(3, 5);   // T указан явно: double
-// var m4 = Max&lt;object&gt;(1, 2); // ✘ CS0311: нет неявного преобразования object → IComparable&lt;object&gt;
+var m2 = Max("a", "b");       // T = string: строки сравнимы со строками → "b"
+var m3 = Max(true, false);    // T = bool:   false &lt; true → True
+var m4 = Max&lt;double&gt;(3, 5);   // T указан явно: double
 
-Console.WriteLine(m1);        // 5
-Console.WriteLine(m2);        // b</code></pre>
+Console.WriteLine($"{m1} {m2} {m3} {m4}");   // 5 b True 5</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">5 b True 5</code></pre>
+    </div>
+    <p>А вот <code>object</code> не подходит: у него нет <code>CompareTo</code>, и ограничение это ловит.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var bad = Max&lt;object&gt;(1, 2);      // ✘</code></pre>
+      <p class="cap">Что скажет компилятор (CS0311)</p>
+      <pre><code class="language-text">error CS0311: The type 'object' cannot be used as type parameter 'T' in the generic type
+or method 'Demo.Max&lt;T&gt;(T, T)'. There is no implicit reference conversion from 'object'
+to 'System.IComparable&lt;object&gt;'.</code></pre>
     </div>
     <p><code>where T : IComparable&lt;T&gt;</code> — <strong>ограничение</strong> (constraint). Оно говорит
       компилятору, что у <code>T</code> точно есть <code>CompareTo</code>: без него <code>a.CompareTo(b)</code>
