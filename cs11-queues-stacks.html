@@ -21,7 +21,8 @@
     <h1>Глава 11. Очереди и стеки: Queue, Stack, PriorityQueue</h1>
     <p class="sublead">Три коллекции «взять крайний»: <code>Queue</code> (первым пришёл — первым вышел),
       <code>Stack</code> (последним пришёл — первым вышел) и <code>PriorityQueue</code> (первым выходит самый
-      важный). Полный API, поведение на пустой коллекции и разница между «посмотреть» и «забрать».</p>
+      важный). Полный API, поведение на пустой коллекции, разница между «посмотреть» и «забрать», кольцевой
+      буфер внутри <code>Queue</code> и разбор обхода дерева очередью и стеком.</p>
     <p><span class="tag core">основная глава</span></p>
 
     <p>Общее у всех трёх: <strong>доступа по индексу нет</strong>. Вы не спрашиваете «что лежит под номером 3»,
@@ -80,9 +81,78 @@ True
           буфер</td><td>—</td></tr>
       </tbody>
     </table>
-    <p>Внутри <code>Queue</code> — кольцевой буфер: <code>Enqueue</code> в конец, <code>Dequeue</code> с
-      начала, обе операции амортизированно O(1), без сдвига элементов. Именно поэтому очередь — не
-      <code>List&lt;T&gt;</code>: у списка <code>RemoveAt(0)</code> сдвигает всё, что стоит дальше.</p>
+    <h2>«Без сдвига элементов» — а что с пустотой?</h2>
+    <p>Резонный вопрос: <code>Dequeue</code> забрал элемент из начала — в массиве осталась пустая ячейка. Кто
+      её уберёт? Никто, и именно поэтому очередь быстрая: <strong>пустота не убирается, а
+      переиспользуется</strong>. Внутри <code>Queue&lt;T&gt;</code> обычный массив и два индекса, которые ходят
+      по кругу:</p>
+    <ul>
+      <li><code>head</code> — индекс <em>первого</em> элемента: отсюда читают <code>Dequeue</code> и
+        <code>Peek</code>;</li>
+      <li><code>tail</code> — индекс, куда ляжет <em>следующий</em>: сюда пишет <code>Enqueue</code>;</li>
+      <li><code>size</code> — сколько ячеек занято (это и есть <code>Count</code>). Он же отличает пустую
+        очередь от полной: в обоих случаях <code>head == tail</code>, и без счётчика их не различить.</li>
+    </ul>
+    <p>Оба индекса двигаются только вперёд, а дойдя до конца массива — прыгают в начало:
+      <code>tail = (tail + 1) % array.Length</code>. Поэтому «конец» очереди может оказаться левее её
+      «начала»: массив считается круглым. Вот настоящее состояние внутренностей <code>Queue&lt;string&gt;</code>,
+      снятое рефлексией по приватным полям в .NET 8 (· — пустая ячейка):</p>
+    <table>
+      <thead><tr><th>Действие</th><th>Массив в памяти</th><th>head</th><th>tail</th><th>size</th>
+        <th>Что видит код</th></tr></thead>
+      <tbody>
+        <tr><td><code>new Queue&lt;string&gt;()</code></td><td><code>[]</code> (0)</td><td>0</td><td>0</td>
+          <td>0</td><td>пусто</td></tr>
+        <tr><td><code>Enqueue(a)</code> ×4</td><td><code>[a, b, c, d]</code> (4)</td><td>0</td><td>0</td>
+          <td>4</td><td><code>a, b, c, d</code> — <code>tail</code> обежал круг</td></tr>
+        <tr><td><code>Dequeue()</code> → <code>a</code></td><td><code>[·, b, c, d]</code> (4)</td><td>1</td>
+          <td>0</td><td>3</td><td><code>b, c, d</code> — ячейку обнулили, остальное
+          <strong>не сдвинулось</strong></td></tr>
+        <tr><td><code>Dequeue()</code> → <code>b</code></td><td><code>[·, ·, c, d]</code> (4)</td><td>2</td>
+          <td>0</td><td>2</td><td><code>c, d</code></td></tr>
+        <tr><td><code>Enqueue(e)</code></td><td><code>[e, ·, c, d]</code> (4)</td><td>2</td><td>1</td>
+          <td>3</td><td><code>c, d, e</code> — <code>e</code> легло в освободившуюся ячейку 0</td></tr>
+        <tr><td><code>Enqueue(f)</code></td><td><code>[e, f, c, d]</code> (4)</td><td>2</td><td>2</td>
+          <td>4</td><td><code>c, d, e, f</code> — круг заполнен</td></tr>
+        <tr><td><code>Enqueue(g)</code>: 5-й элемент при длине 4</td>
+          <td><code>[c, d, e, f, g, ·, ·, ·]</code> (8)</td><td>0</td><td>5</td><td>5</td>
+          <td><code>c, d, e, f, g</code> — буфер вырос</td></tr>
+      </tbody>
+    </table>
+    <p>Смотрите на пятую строку: <code>e</code> легло в ячейку 0 — ту самую, которую только что освободило
+      <code>Dequeue</code>. Ничего не сдвигалось, пустота просто ушла под следующий элемент. Это и есть
+      кольцевой буфер: массив один, а очередь «едет» по нему по кругу.</p>
+    <p><strong>Когда всё-таки происходит копирование:</strong> только при росте. Если
+      <code>size == array.Length</code> и приходит ещё один элемент, создаётся массив вдвое больше, элементы
+      копируются в логическом порядке (начиная с <code>head</code>), <code>head</code> становится 0,
+      <code>tail</code> — <code>size</code>. Это O(n), но случается логарифмически редко — в этом и смысл
+      «амортизированно O(1)». Рост удвоением — тот же приём, что у <code>List&lt;T&gt;</code> (глава 6).</p>
+    <div class="box note">
+      <span class="t">Две детали, которые видно на том же дампе</span>
+      <ul>
+        <li><strong>Ячейка обнуляется при <code>Dequeue</code>.</strong> В строке 3 на месте <code>a</code> стоит
+          <code>·</code>, а не <code>a</code>: иначе очередь держала бы ссылку на уже отданный объект и не давала
+          сборщику мусора его собрать.</li>
+        <li><strong>Массив не сжимается сам.</strong> После всплеска очередь продолжает держать большой буфер: в
+          том же прогоне 9 элементов жили в массиве на 16, и только <code>TrimExcess()</code> сжал его до 9
+          (и вернул <code>head</code> в 0). Разобрали 100 000 сообщений и очередь больше не нужна — вызовите
+          <code>TrimExcess()</code>.</li>
+      </ul>
+    </div>
+    <div class="box tip">
+      <span class="t">Как посмотреть внутрь самому</span>
+      <p>Поля приватные, но рефлексией их видно — годится только для экспериментов:</p>
+      <pre><code class="language-csharp">var t = typeof(Queue&lt;string&gt;);
+var flags = BindingFlags.NonPublic | BindingFlags.Instance;
+object? Field(string n) =&gt; t.GetField(n, flags)!.GetValue(q);
+
+var arr = (string[])Field("_array")!;
+Console.WriteLine(string.Join(",", arr.Select(x =&gt; x ?? "·"))
+    + " head=" + Field("_head") + " tail=" + Field("_tail") + " size=" + Field("_size"));</code></pre>
+      <p>Имена полей — внутренняя деталь реализации: в другой версии .NET они могут называться иначе. Для
+        понимания это не важно, важно что <code>head</code>, <code>tail</code> и <code>size</code> есть
+        всегда.</p>
+    </div>
 
     <h2>Пустая очередь: исключение или <code>Try*</code></h2>
     <p><code>Peek</code> и <code>Dequeue</code> на пустой коллекции бросают исключение, и текст у него общий
@@ -150,7 +220,13 @@ catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }<
 
 
     <h2>Что выбрать: FIFO или LIFO</h2>
-    <p>Разница видна на одном и том же дереве: обойти его очередью и стеком — значит получить разный порядок.</p>
+    <p>Разница видна на одних и тех же данных: обойти дерево очередью и стеком — значит получить разный
+      порядок. Прежде чем смотреть на код, разберём, что в нём происходит и зачем нужна каждая строка.</p>
+
+    <h3>Данные: дерево, записанное словарём</h3>
+    <p>Дерево в примере — это связи «узел → его дети». Держать их удобно словарём (глава 9): ключ — имя узла,
+      значение — массив детей, у листьев массив пустой. Ничего специфически «словарного» тут не происходит,
+      это просто способ хранить граф в коде:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">var tree = new Dictionary&lt;string, string[]&gt;
 {
@@ -159,47 +235,107 @@ catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }<
     ["E"] = Array.Empty&lt;string&gt;(),
 };
 
-// очередь: обход «в ширину» — уровень за уровнем
-var bfs = new List&lt;string&gt;();
+// A
+// ├── B
+// │   └── D
+// └── C
+//     └── E</code></pre>
+    </div>
+    <p><code>tree["A"]</code> — это <code>["B", "C"]</code>, то есть «у A два ребёнка». Оба обхода делают одно
+      и то же: берут узел, записывают его в ответ и кладут в коллекцию его детей. Разница только в том,
+      <em>какая это коллекция</em>.</p>
+
+    <h3>Код: два одинаковых цикла, одна разница</h3>
+    <ul>
+      <li><code>var bfsOrder = new List&lt;string&gt;()</code> — «тетрадка» для порядка посещения. К обходу она
+        отношения не имеет: это место, куда складываем ответ, чтобы в конце напечатать и сравнить два порядка.
+        Не нужен результат — не нужен и <code>List</code>.</li>
+      <li><code>var q = new Queue&lt;string&gt;()</code> — очередь; в ней лежат узлы, которые <em>уже найдены, но
+        ещё не посещены</em>.</li>
+      <li><code>q.Enqueue("A")</code> — начинаем с корня.</li>
+      <li><code>while (q.TryDequeue(out var node))</code> — «пока очередь не пуста, взять следующий узел».
+        <code>TryDequeue</code> вернёт <code>false</code>, когда элементов нет, поэтому цикл закончится сам и
+        <code>Count &gt; 0</code> проверять не нужно.</li>
+      <li><code>bfsOrder.Add(node)</code> — отметили узел посещённым (в графе с циклами здесь была бы ещё
+        проверка «не посещали ли уже»).</li>
+      <li><code>foreach (var child in tree[node]) q.Enqueue(child)</code> — дети встают в очередь <em>в
+        конец</em>, то есть будут обработаны после всех, кто пришёл раньше.</li>
+      <li>Второй блок отличается двумя словами: <code>Stack</code> вместо <code>Queue</code> и
+        <code>Push</code>/<code>TryPop</code> вместо <code>Enqueue</code>/<code>TryDequeue</code>. Дети ложатся
+        <em>наверх</em>, поэтому обрабатываются сразу, а не после всех.</li>
+    </ul>
+
+    <div class="codewrap">
+      <pre><code class="language-csharp">// очередь: обход «в ширину» — уровень за уровнем
+var bfsOrder = new List&lt;string&gt;();       // тетрадка для ответа, к обходу не относится
 var q = new Queue&lt;string&gt;();
-q.Enqueue("A");
-while (q.TryDequeue(out var node))
+q.Enqueue("A");                            // стартуем с корня
+while (q.TryDequeue(out var node))         // пока в очереди есть узлы
 {
-    bfs.Add(node);
-    foreach (var child in tree[node]) q.Enqueue(child);
+    bfsOrder.Add(node);                    // посетили узел
+    foreach (var child in tree[node])      // а его детей — в конец очереди
+        q.Enqueue(child);
 }
 
 // стек: обход «в глубину» — до самого низа, потом сосед
-var dfs = new List&lt;string&gt;();
+var dfsOrder = new List&lt;string&gt;();
 var stack = new Stack&lt;string&gt;();
 stack.Push("A");
 while (stack.TryPop(out var node))
 {
-    dfs.Add(node);
-    foreach (var child in tree[node]) stack.Push(child);
+    dfsOrder.Add(node);
+    foreach (var child in tree[node])
+        stack.Push(child);                 // дети ложатся наверх — их возьмут сразу
 }
 
-Console.WriteLine(string.Join(" ", bfs));
-Console.WriteLine(string.Join(" ", dfs));</code></pre>
+Console.WriteLine(string.Join(" ", bfsOrder));
+Console.WriteLine(string.Join(" ", dfsOrder));</code></pre>
       <p class="cap">Вывод</p>
       <pre><code class="language-text">A B C D E
 A C E B D</code></pre>
     </div>
+    <h3>Что происходит на каждом шаге</h3>
+    <p>Тот же прогон, но с состоянием коллекции. У очереди смотрим «кто в ней стоит», у стека — «кто наверху»
+      (снимают правого):</p>
     <table>
-      <thead><tr><th>Задача</th><th>Чем</th><th>Почему</th></tr></thead>
+      <thead><tr><th>Шаг</th><th>Взяли</th><th>Положили детей</th><th>Очередь после шага</th></tr></thead>
       <tbody>
-        <tr><td>Обработать задачи в порядке поступления</td><td><code>Queue</code></td><td>Справедливо: кто
-          раньше пришёл, тот раньше обслужен</td></tr>
-        <tr><td>Обход в ширину (BFS), «уровни»</td><td><code>Queue</code></td><td>Соседи обрабатываются раньше
-          их детей</td></tr>
-        <tr><td>Отмена последнего действия (undo)</td><td><code>Stack</code></td><td>Отменяется то, что
-          сделано последним</td></tr>
-        <tr><td>Обход в глубину (DFS), парсер скобок</td><td><code>Stack</code></td><td>Вложенность: закрываем
-          то, что открыто последним</td></tr>
-        <tr><td>Сначала самое важное</td><td><code>PriorityQueue</code></td><td>Порядок задаётся приоритетом,
-          а не временем прихода</td></tr>
+        <tr><td>1</td><td>A</td><td>B, C</td><td><code>[B, C]</code></td></tr>
+        <tr><td>2</td><td>B</td><td>D</td><td><code>[C, D]</code></td></tr>
+        <tr><td>3</td><td>C</td><td>E</td><td><code>[D, E]</code></td></tr>
+        <tr><td>4</td><td>D</td><td>—</td><td><code>[E]</code></td></tr>
+        <tr><td>5</td><td>E</td><td>—</td><td><code>[]</code> — цикл закончился</td></tr>
       </tbody>
     </table>
+    <table>
+      <thead><tr><th>Шаг</th><th>Взяли (сняли с верхушки)</th><th>Положили детей</th>
+        <th>Стек после шага (верхний справа)</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>A</td><td>B, C</td><td><code>[B, C]</code></td></tr>
+        <tr><td>2</td><td>C</td><td>E</td><td><code>[B, E]</code></td></tr>
+        <tr><td>3</td><td>E</td><td>—</td><td><code>[B]</code></td></tr>
+        <tr><td>4</td><td>B</td><td>D</td><td><code>[D]</code></td></tr>
+        <tr><td>5</td><td>D</td><td>—</td><td><code>[]</code></td></tr>
+      </tbody>
+    </table>
+    <h3>Что из этого вынести</h3>
+    <ul>
+      <li><strong>Данные одни и те же, порядок разный.</strong> Коллекция и есть правило порядка: очередь
+        отдаёт того, кто пришёл раньше, стек — того, кто пришёл последним.</li>
+      <li><strong><code>A B C D E</code> — это уровни дерева:</strong> корень, затем его дети (B, C), затем
+        внуки (D, E). Так работает BFS — поиск кратчайшего пути в невзвешенном графе, «волной» от
+        источника.</li>
+      <li><strong><code>A C E B D</code> — это ветка до конца, потом соседняя:</strong> спустились
+        A → C → E, вернулись и пошли в B → D. Так работает DFS: парсеры, обход дерева каталогов,
+        топологическая сортировка.</li>
+      <li><strong>Почему не <code>A B D C E</code>?</strong> Потому что дети легли в стек в порядке B, C —
+        и <code>C</code> оказался сверху, поэтому его сняли первым. Стек <em>переворачивает</em> порядок
+        детей. Нужно «по алфавиту» — кладите их наоборот:
+        <code>foreach (var child in tree[node].Reverse())</code>, и получится <code>A B D C E</code>.</li>
+      <li><strong>В настоящем обходе графа</strong>, где есть циклы, дополнительно хранят посещённые узлы
+        (<code>HashSet</code>, глава 10), иначе обход зациклится. В дереве из примера циклов нет, поэтому
+        проверка не нужна.</li>
+    </ul>
     <div class="box tip">
       <span class="t">Очередь ≠ <code>List&lt;T&gt;</code> с <code>RemoveAt(0)</code></span>
       <p>Соблазн сделать очередь из списка велик, но <code>list.RemoveAt(0)</code> сдвигает <em>все</em>
@@ -272,11 +408,32 @@ Console.WriteLine(string.Join(",", order));</code></pre>
       сохранять порядок вставки. Нужна стабильность — делайте приоритет составным:
       <code>(int Priority, long Sequence)</code>, где <code>Sequence</code> — счётчик добавления.</p>
 
+    <h2>Итог: какую коллекцию под какую задачу</h2>
+    <p>Теперь разобраны все три — <code>Queue</code>, <code>Stack</code> и <code>PriorityQueue</code>, — так
+      что таблицу выбора можно читать без забегания вперёд:</p>
+    <table>
+      <thead><tr><th>Задача</th><th>Чем</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>Обработать задачи в порядке поступления</td><td><code>Queue</code></td><td>Справедливо: кто
+          раньше пришёл, тот раньше обслужен</td></tr>
+        <tr><td>Обход в ширину (BFS), «уровни»</td><td><code>Queue</code></td><td>Соседи обрабатываются раньше
+          их детей</td></tr>
+        <tr><td>Отмена последнего действия (undo)</td><td><code>Stack</code></td><td>Отменяется то, что
+          сделано последним</td></tr>
+        <tr><td>Обход в глубину (DFS), парсер скобок</td><td><code>Stack</code></td><td>Вложенность: закрываем
+          то, что открыто последним</td></tr>
+        <tr><td>Сначала самое важное</td><td><code>PriorityQueue</code></td><td>Порядок задаётся приоритетом,
+          а не временем прихода</td></tr>
+      </tbody>
+    </table>
+
     <h2>Как это устроено и где применять</h2>
     <ul>
-      <li><strong><code>Queue</code> и <code>Stack</code></strong> — массив с указателями: O(1) на добавление и
-        извлечение, O(n) на поиск значения (<code>Contains</code>). Память — как у массива, с запасом на
-        рост.</li>
+      <li><strong><code>Queue</code></strong> — кольцевой буфер (разобран выше): массив плюс
+        <code>head</code>/<code>tail</code>, O(1) на <code>Enqueue</code> и <code>Dequeue</code>.
+        <strong><code>Stack</code></strong> — массив плюс указатель на верхушку: <code>Push</code> и
+        <code>Pop</code> тоже O(1). У обоих поиск значения (<code>Contains</code>) — O(n), память — как у
+        массива, с запасом на рост.</li>
       <li><strong><code>PriorityQueue</code></strong> — <em>двоичная куча</em> в массиве: добавление и
         извлечение O(log n), просмотр минимума O(1), полный перебор — O(n) в произвольном порядке.</li>
       <li><strong>Где пригодится приоритет:</strong> планировщик задач (сначала критичные), ограничитель
@@ -307,8 +464,9 @@ Console.WriteLine(string.Join(",", order));</code></pre>
       <code>Channel</code> с <code>ReadAllAsync</code>.</p>
 
     <h2>Шпаргалка: операция → коллекция (вся часть II)</h2>
-    <p>Сводка по коллекциям из глав 6–11 — сюда возвращаются с вопросом «а чем это делать». Словари
-      разобраны в главе 9, множества — в главе 10, очереди и стеки — в этой главе.</p>
+    <p>Сводка по коллекциям из глав 6–12 — сюда возвращаются с вопросом «а чем это делать». Словари
+      разобраны в главе 9, множества — в главе 10, очереди и стеки — в этой главе, связный список — в
+      главе 12.</p>
     <table>
       <thead><tr><th>Что нужно</th><th>Чем пользоваться</th><th>Стоимость</th></tr></thead>
       <tbody>
