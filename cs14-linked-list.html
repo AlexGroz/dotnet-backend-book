@@ -86,6 +86,23 @@ nodeB.Value=b Next=b2 Prev=a</code></pre>
       <code>null</code> на концах) и <code>List</code> (какому списку принадлежит, или <code>null</code>, если
       узел удалён). Ссылки <code>Next</code>/<code>Previous</code> — это и есть весь список: пройти от
       <code>list.First</code> по <code>Next</code> до <code>null</code> — значит перебрать всё.</p>
+    <div class="box note">
+      <span class="t">Что за <code>!</code> в конце: <code>nodeB!</code>, <code>list.First!</code></span>
+      <p><code>Find</code>, <code>First</code> и <code>Last</code> возвращают <strong>nullable-узел</strong> —
+        <code>LinkedListNode&lt;T&gt;?</code>: узла может не быть (значение не нашли, список пуст), а у крайних
+        узлов <code>Next</code>/<code>Previous</code> равны <code>null</code>. Поэтому написать просто
+        <code>list.First.Value</code> компилятор не даст:
+        <code>warning CS8602: Dereference of a possibly null reference</code>.</p>
+      <p><code>!</code> — <strong>оператор «я знаю, что тут не null»</strong> (null-forgiving). Он ничего не
+        проверяет и ничего не создаёт: это сообщение <em>только компилятору</em> — «не предупреждай, я
+        отвечаю». В примере выше он уместен: <code>Find("b")</code> ищет значение, которое мы сами только что
+        добавили, а <code>nodeB.Next</code> точно есть, потому что перед ним вставлен <code>b2</code>. Но если
+        список окажется пустым, <code>list.First!</code> даст самый настоящий
+        <code>NullReferenceException</code>: <code>!</code> его не предотвращает, а только отодвигает ошибку от
+        места причины. Когда значение <em>действительно может</em> отсутствовать, честнее
+        <code>list.First ?? throw new InvalidOperationException("пустой список")</code>. Подробно про
+        <code>?</code>, <code>!</code> и <code>??</code> — глава 20.</p>
+    </div>
     <table>
       <thead><tr><th>Член</th><th>Что делает</th><th>Стоимость</th></tr></thead>
       <tbody>
@@ -309,6 +326,22 @@ static int Middle(LinkedList&lt;int&gt; list)
       <p class="cap">Вывод (у чётного списка берётся левая середина)</p>
       <pre><code class="language-text">середина: 3</code></pre>
     </div>
+    <p>Словами, что здесь происходит. По списку одновременно идут <strong>два указателя</strong>: медленный
+      (<code>slow</code>) сдвигается на один узел за итерацию, быстрый (<code>fast</code>) — на два. Оба
+      стартуют с первого узла, поэтому после каждой итерации быстрый прошёл ровно <em>вдвое</em> больше
+      медленного. Как только быстрый упёрся в конец, медленный стоит на середине — это и есть ответ.</p>
+    <p>Зачем в условии два <code>Next</code>: у <code>null</code> нельзя спросить <code>.Next</code>.
+      Проверка <code>fast.Next is not null</code> отсекает случай «быстрый стоит на последнем узле», а
+      <code>fast.Next.Next is not null</code> — случай «быстрый стоит на предпоследнем», когда шаг на два увёл
+      бы его за конец списка. Вместе эти две проверки дают корректную остановку на любой длине.</p>
+    <p>На практике (проверено запуском): <code>{1,2,3,4,5}</code> → <code>3</code>, ровно середина;
+      <code>{1,2,3,4,5,6}</code> → <code>3</code>, левая из двух средних; <code>{1}</code> → <code>1</code>,
+      цикл не выполняется ни разу. Стоимость — один проход: O(n) времени и O(1) памяти (два указателя, никаких
+      копий), против «узнать <code>Count</code> и пройти половину» — те же O(n), но <em>два</em> прохода.</p>
+    <p><code>!</code> в этом коде — тот же оператор из начала главы: <code>First</code> и <code>Next</code>
+      объявлены nullable, и мы обещаем компилятору, что список не пуст. Если <code>Middle</code> вызовут на
+      пустом списке, будет <code>NullReferenceException</code> — на собеседовании это стоит назвать вслух и
+      предложить <code>?? throw</code>.</p>
     <p><strong>2. Развернуть список.</strong> Здесь видно главное преимущество: узлы можно переставлять, не
       создавая новых объектов — ни одной аллокации на весь разворот:</p>
     <div class="codewrap">
@@ -330,6 +363,24 @@ static void Reverse(LinkedList&lt;int&gt; list)
       <p class="cap">Вывод</p>
       <pre><code class="language-text">4,3,2,1</code></pre>
     </div>
+    <p>Словами. Мы идём по списку слева направо и каждый встреченный узел <strong>вынимаем и вставляем в
+      начало</strong>. Уже обработанная часть всегда лежит в начале списка в перевёрнутом порядке; новый узел
+      встаёт <em>перед</em> ней, то есть становится её первым элементом. Когда обработаны все узлы, весь список и
+      есть перевёрнутая последовательность — отдельного «результата» не создаётся.</p>
+    <p>Почему это без аллокаций: <code>Remove</code> и <code>AddFirst</code> не создают узлов, а только
+      переставляют ссылки <code>Next</code>/<code>Previous</code> у уже существующих объектов. <code>new</code>
+      за весь разворот не вызывается ни разу — в этом и главное преимущество связного списка перед
+      <code>List&lt;T&gt;</code>, где вставка в начало сдвигает весь массив (O(n²) на весь разворот вместо
+      O(n)).</p>
+    <p>Зачем строка <code>var next = node.Next;</code>: после <code>Remove</code> узел уже ни к чему не
+      привязан, и <code>node.Next</code> станет <code>null</code> (проверено: после <code>Remove</code> у узла
+      <code>Next</code> и <code>List</code> равны <code>null</code>, а сохранённая заранее ссылка по-прежнему
+      ведёт на следующий узел). Не сохранив её, мы потеряли бы хвост списка на первой же итерации.</p>
+    <p>Почему не «поменять ссылки местами», как в учебниках по C: у <code>LinkedListNode&lt;T&gt;.Next</code>
+      нет сеттера — <code>node.Next = …</code> не компилируется
+      (<code>error CS0200: Property or indexer 'LinkedListNode&lt;int&gt;.Next' cannot be assigned to -- it is
+      read only</code>). Связями владеет сам список, поэтому единственный законный способ переставить узлы —
+      <code>Remove</code> + <code>AddFirst</code>, и обе операции O(1), потому что узел уже в руках.</p>
 
     <h2>Что спрашивают на собеседовании</h2>
     <table>
@@ -399,6 +450,11 @@ static void Reverse(LinkedList&lt;int&gt; list)
         <li><strong>Сравнение:</strong> <code>List</code> — по умолчанию; <code>Queue</code>/<code>Stack</code> —
           только края на массиве (глава 13); <code>LinkedList</code> — вставки и удаления по уже известному
           узлу.</li>
+        <li><strong><code>!</code> — обещание компилятору, а не проверка:</strong> <code>First</code> и
+          <code>Next</code> объявлены nullable, <code>!</code> лишь убирает предупреждение
+          (<code>CS8602</code>). На пустом списке <code>First!.Value</code> падает с
+          <code>NullReferenceException</code> — если пустота возможна, нужен <code>?? throw</code>
+          (глава 20).</li>
       </ul>
     </div>
 

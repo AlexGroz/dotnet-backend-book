@@ -157,6 +157,10 @@ Console.WriteLine(Zero&lt;string&gt;() ?? "&lt;null&gt;");      // &lt;null&gt;
 Console.WriteLine(Zero&lt;DateTime&gt;().ToString("yyyy-MM-dd"));   // 0001-01-01
 Console.WriteLine(Zero&lt;int?&gt;() is null);           // True</code></pre>
     </div>
+    <p>Заодно про <code>!</code> в конце строки: это оператор «я знаю, что тут возможен null, не предупреждай»
+      (null-forgiving). Без него компилятор скажет
+      <code>warning CS8603: Possible null reference return</code> — ведь для <code>string</code> результат
+      <code>default</code> и есть <code>null</code>. Полный разбор оператора — глава 20.</p>
     <p>А оператора <code>+</code> у «любого типа» нет — и ошибка ровно та же по смыслу, что и с конструктором:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">static T Add&lt;T&gt;(T a, T b) =&gt; a + b;   // ✘</code></pre>

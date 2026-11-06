@@ -89,6 +89,15 @@ public async Task&lt;Tariff&gt; GetTariffAsync(int id, CancellationToken ct)
 }</code></pre>
     </div>
 
+    <div class="box note">
+      <span class="t">Что за <code>!</code> в <code>return cached!;</code></span>
+      <p><code>TryGetValue(key, out Tariff? cached)</code> возвращает <code>bool</code>, но компилятор не
+        связывает «<code>true</code>» с «<code>cached</code> не <code>null</code>»: по типу там
+        <code>Tariff?</code>. Поэтому <code>cached!</code> — обещание «если ветка сработала, значение точно
+        есть». В рантайме оператор ничего не проверяет, он только снимает предупреждение
+        <code>CS8602</code>; подробно — «C#: язык и типы», глава 20.</p>
+    </div>
+
     <h2>Код: <code>IMemoryCache</code> и <code>IDistributedCache</code></h2>
     <div class="codewrap">
       <pre><code class="language-csharp">// L1: в памяти процесса. Регистрируется как singleton

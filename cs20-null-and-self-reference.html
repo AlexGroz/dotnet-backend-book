@@ -83,6 +83,69 @@ if (order is null) { … }
 if (order is not null) { … }</code></pre>
     </div>
 
+    <h2><code>!</code> — «я знаю, что тут не null»</h2>
+    <p>Четвёртый оператор из этого набора пишется как восклицательный знак после выражения:
+      <code>list.First!</code>, <code>s!.Length</code>, <code>default!</code>. Называется
+      <strong>null-forgiving</strong> («прощающий null», появился в C# 8 вместе с nullable-ссылками). Важно
+      понимать: он <em>ничего не делает во время работы</em> — это сообщение компилятору «считай, что здесь
+      <code>null</code> невозможен, не предупреждай меня».</p>
+    <p>Зачем он нужен, видно на параметре:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static int Len(string? s) =&gt; s!.Length;     // компилятор молчит
+static int Bad(string? s) =&gt; s.Length;      // а здесь предупредит
+
+Console.WriteLine(Len("abc"));
+Console.WriteLine(Len(null));               // а теперь сломаем обещание</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">3
+Unhandled exception. System.NullReferenceException: Object reference not set to an instance of an object.</code></pre>
+    </div>
+    <p>Без <code>!</code> компилятор предупредит:
+      <code>warning CS8602: Dereference of a possibly null reference</code> — «<code>s</code> может быть
+      <code>null</code>, а ты лезешь в <code>.Length</code>». С <code>!</code> предупреждение исчезает, но
+      ничего не проверяется: <code>Len(null)</code> падает с <code>NullReferenceException</code> там же, где
+      упал бы и без оператора.</p>
+    <p>Второй частый случай — коллекции и методы поиска, где «не <code>null</code>» следует из логики, а не из
+      типа. В главе 14 <code>list.First!</code> и <code>slow.Next!</code> стоят потому, что <code>First</code>
+      и <code>Next</code> объявлены как <code>LinkedListNode&lt;T&gt;?</code>. На пустом списке
+      <code>First!.Value</code> даёт тот же <code>NullReferenceException</code> — проверено.</p>
+    <p>Третий случай — <code>null!</code> у поля, которое заполняется позже:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">sealed class ReportService
+{
+    private string _name = null!;      // «поверь, я заполню в Init»
+
+    public void Init(string name) =&gt; _name = name;
+    public int Length() =&gt; _name.Length;
+}</code></pre>
+    </div>
+    <p>Без <code>= null!</code> компилятор предупредит:
+      <code>warning CS8618: Non-nullable field '_name' must contain a non-null value when exiting
+      constructor</code> — и будет прав: <code>new ReportService().Length()</code> падает, если
+      <code>Init</code> не вызвали. С <code>null!</code> предупреждение исчезает, а падение остаётся — только
+      теперь оно случается далеко от причины. Это <strong>худшее</strong> применение оператора: заглушка
+      вместо решения. Правильнее инициализировать в конструкторе, требовать значение через
+      <code>required</code> (глава 3) или не отдавать объект наружу до <code>Init</code>.</p>
+    <table>
+      <thead><tr><th>Запись</th><th>Что делает в рантайме</th><th>Когда уместна</th></tr></thead>
+      <tbody>
+        <tr><td><code>a?.B()</code></td><td>Проверяет: если <code>null</code> — не вызывает</td>
+          <td><code>null</code> допустим и значит «ничего не делать»</td></tr>
+        <tr><td><code>a ?? b</code></td><td>Подставляет <code>b</code>, если <code>a</code> — <code>null</code></td>
+          <td>Нужно значение по умолчанию</td></tr>
+        <tr><td><code>a!</code></td><td><strong>Ничего</strong>: ни проверки, ни замены</td>
+          <td>Инвариант доказан: проверили строкой выше, или тип из BCL «слишком широкий»</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Правило: <code>!</code> — обещание, а не проверка</span>
+      <p>Каждый <code>!</code> в коде — место, где вы лично отвечаете за отсутствие <code>null</code>. Если
+        обещание неверно, ошибка случится не в строке с <code>!</code>, а позже и в другом месте — поэтому
+        такие баги и дорогие. В книге оператор встречается ещё в главах 8 (<code>default!</code>),
+        10 (сравнение nullable-значений) и 22 (после <code>GetMethod</code>/<code>GetProperty</code>, которые
+        по типу возвращают nullable).</p>
+    </div>
+
     <h2>Класс, который ссылается на самого себя</h2>
     <p>Вопрос из главы про цепочку: «как класс <code>Check</code> может содержать поле своего же типа
       <code>private Check? _next</code>, если класса ещё нет?» Ответ: потому что поле — это <strong>ссылка</strong>,
@@ -159,6 +222,9 @@ Run(100):   Positive → null (ок) → Limit → null (ок) → _next == null
         <li><code>?.</code> = «если слева не null — вызови, иначе верни null»; результат всегда nullable.</li>
         <li><code>??</code> — значение по умолчанию, <code>??=</code> — присвоить, если null,
           <code>?? throw …</code> — «получить или упасть».</li>
+        <li><code>!</code> — <strong>не проверка, а обещание</strong> компилятору: в рантайме ничего не делает
+          и <code>null</code> не убирает. Уместен, когда инвариант доказан; <code>null!</code> у поля —
+          крайняя мера, а не способ «убрать предупреждение».</li>
         <li>Класс может содержать поле своего типа, потому что это <strong>ссылка</strong> фиксированного размера;
           struct — не может.</li>
         <li>В цепочке <code>_next?.Run(…)</code> возвращает <code>null</code> на последнем звене — это и есть
