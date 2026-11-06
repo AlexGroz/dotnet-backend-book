@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 15 · Делегаты, лямбды и события: как метод становится значением</title>
+<title>Глава 16 · Делегаты, лямбды и события: как метод становится значением</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs16-class-modifiers.html"><span class="sp">Глава 16. Модификаторы типов: sealed, abstract, static, record</span> →</a>
+  <a href="cs17-class-modifiers.html"><span class="sp">Глава 17. Модификаторы типов: sealed, abstract, static, record</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть III · Типы, делегаты и асинхронность</div>
-    <h1>Глава 15. Делегаты, лямбды и события: как метод становится значением</h1>
+    <h1>Глава 16. Делегаты, лямбды и события: как метод становится значением</h1>
     <p class="sublead">Почему <code>(sender, total) =&gt; …</code> — это метод, а не «магия», откуда берутся
       его параметры, что значит <code>+=</code> у события и где здесь утечка памяти.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -117,6 +117,11 @@ Console.WriteLine(add(2, 3));    // 5</code></pre>
     <p>Читается так: слева от <code>=&gt;</code> — параметры, справа — тело. У лямбды нет собственного типа: она
       получает его от того места, куда её кладут. Такое место называется <strong>целевым типом</strong> —
       именно поэтому в примере выше не написано ни одного <code>int</code>.</p>
+    <p>Ненужный параметр называют <code>_</code> — это тот же discard, что был в главе 5:
+      <code>Func&lt;int, int, int&gt; twice = (_, b) =&gt; b * 2;</code>, вызов
+      <code>twice(1, 21)</code> даёт <code>42</code> — первый аргумент принят и выброшен. А если метод
+      возвращает два значения, его пишут как <code>(bool ok, int half) Try(…) =&gt; (…, …)</code> — это
+      выражение-тело плюс кортеж из главы 6.</p>
     <div class="box note">
       <span class="t">Почему в <code>(sender, total) =&gt; …</code> ничего не объявлено снаружи</span>
       <p>Параметры лямбды <strong>объявлены в ней самой</strong>, в скобках, — как в обычном методе. Отдельной
@@ -431,8 +436,8 @@ Console.WriteLine(SumPositive(new List&lt;int&gt; { -2, 5, 0, 7 }));   // 12</co
     </div>
 
     <div class="pager">
-      <a href="cs14-ienumerable.html">← <span class="sp">Глава 14. IEnumerable, yield и IAsyncEnumerable</span></a>
-      <a href="cs16-class-modifiers.html"><span class="sp">Глава 16. Модификаторы типов: sealed, abstract, static, record</span> →</a>
+      <a href="cs15-ienumerable.html">← <span class="sp">Глава 15. IEnumerable, yield и IAsyncEnumerable</span></a>
+      <a href="cs17-class-modifiers.html"><span class="sp">Глава 17. Модификаторы типов: sealed, abstract, static, record</span> →</a>
     </div>
   </div>
 </div>

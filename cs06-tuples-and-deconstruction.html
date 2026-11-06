@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 6 · Кортежи: (bool ok, int half) и деконструкция</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs07-ref-struct-span.html"><span class="sp">Глава 7. ref struct и Span: окно в память без аллокаций</span> →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть I · Как устроена память</div>
+    <h1>Глава 6. Кортежи: <code>(bool ok, int half)</code> и деконструкция</h1>
+    <p class="sublead">Кортеж — это несколько значений, склеенных в одно, без объявления класса. Им возвращают
+      «второй результат» из метода, им же разбирают результат на части одной строкой. Внутри — обычная
+      структура <code>ValueTuple</code>, поэтому аллокаций нет, а имена элементов существуют только до
+      компиляции.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>В главе 5 был <code>out</code>: метод «дописывает» значение в вашу переменную. Это работает, но
+      выглядит странно, когда результатов два-три и они равноправны:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static bool TryHalf(int v, out int half)      // глава 5: out
+{
+    half = v / 2;
+    return v % 2 == 0;
+}
+
+static (bool ok, int half) TryHalfTuple(int v) // глава 6: кортеж
+    =&gt; (v % 2 == 0, v / 2);</code></pre>
+    </div>
+    <p>Вторая строка делает то же самое, но результат — <strong>одно значение</strong> из двух элементов.
+      Его можно вернуть, присвоить, передать дальше, положить в <code>List</code> или в <code>Dictionary</code>
+      и разобрать на части. Дальше — что это за тип, как он устроен и где ломается.</p>
+
+    <h2>Что такое кортеж</h2>
+    <p>Кортеж (tuple) — это тип, который «собирается на месте» из перечисленных типов. Пишется в скобках:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var t = (5, 7);                  // кортеж из двух int, тип выводится
+Console.WriteLine(t);            // (5, 7)
+Console.WriteLine(t.Item1);      // 5
+Console.WriteLine(t.Item2);      // 7</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">(5, 7)
+5
+7</code></pre>
+    </div>
+    <p>Запись <code>(int, int)</code> — сокращение для типа
+      <code>System.ValueTuple&lt;int, int&gt;</code>. Это <strong>структура</strong> (глава 4): лежит там же,
+      где и переменная, отдельных объектов в куче не появляется. <code>Item1</code>/<code>Item2</code> —
+      не свойства, а <strong>public-поля</strong>: их можно менять напрямую (<code>t.Item1 = 9</code>), а
+      печать структуры выводит значения по порядку.</p>
+    <div class="box note">
+      <span class="t">Имена <code>Item1</code>, <code>Item2</code> — не прихоть</span>
+      <p>Так элементы называются в самом типе. Свои имена (следующий раздел) — это только псевдонимы для
+        компилятора; если их нет, остаются <code>Item1…Item7</code>.</p>
+    </div>
+
+
+    <h2>Имена элементов: <code>(bool ok, int half)</code></h2>
+    <p>В объявлении можно дать элементам имена. Тогда вместо <code>Item1</code> пишут <code>ok</code>, и
+      код читается как обычный объект с полями:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">(bool ok, int half) res = (true, 4);
+
+Console.WriteLine(res);              // печать имён не показывает
+Console.WriteLine($"{res.ok} {res.half}");
+Console.WriteLine(res.Item1);        // Item1 никуда не делся
+Console.WriteLine(res.GetType());    // что за тип на самом деле</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">(True, 4)
+True 4
+True
+System.ValueTuple`2[System.Boolean,System.Int32]</code></pre>
+    </div>
+    <p>Вывод выше говорит главное: <strong>имена — подсказка компилятора, а не часть типа</strong>.
+      В рантайме существует <code>ValueTuple&lt;bool, int&gt;</code>, и никаких <code>ok</code>/<code>half</code>
+      в нём нет. Компилятор хранит имена отдельно, в атрибуте <code>TupleElementNamesAttribute</code> — его
+      читают IDE и рефлексия (глава 22), чтобы подсказывать вам <code>.ok</code> вместо <code>.Item1</code>.</p>
+    <div class="box note">
+      <span class="t">Практические следствия</span>
+      <ul>
+        <li>Имена <strong>не влияют на равенство</strong>: <code>(x: 1, y: 2) == (1, 2)</code> — это
+          <code>true</code>, тип один и тот же.</li>
+        <li>Имена <strong>берутся из целевого типа</strong>: если метод возвращает <code>(bool ok, int half)</code>,
+          а вы объявили <code>(bool first, int second) x = …</code>, обращаться надо к
+          <code>x.first</code>/<code>x.second</code>.</li>
+        <li>Присваивание между кортежами с разными именами работает — типы совпадают.</li>
+        <li>Имена <strong>не переживают</strong> упаковку, JSON и передачу через границу типов — см. «Ловушки».</li>
+      </ul>
+    </div>
+
+    <h2>Возврат из метода: разбираем строку по частям</h2>
+    <p>Вот та строка, из-за которой обычно и возникает вопрос. Разберём её слева направо:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static (bool ok, int half) TryHalfTuple(int v) =&gt; (v % 2 == 0, v / 2);</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Кусок</th><th>Что это</th></tr></thead>
+      <tbody>
+        <tr><td><code>static</code></td><td>Метод (здесь — локальная функция) ничего не захватывает снаружи.
+          Захват и лямбды — глава 16; для кортежей это не важно, но <code>static</code> запрещает случайный
+          захват</td></tr>
+        <tr><td><code>(bool ok, int half)</code></td><td><strong>Тип возвращаемого значения</strong>: кортеж из
+          двух элементов с именами. То же, что <code>ValueTuple&lt;bool, int&gt;</code>, только с именами</td></tr>
+        <tr><td><code>TryHalfTuple(int v)</code></td><td>Имя и параметры. Один параметр <code>int</code>, без
+          <code>out</code>: результат уходит в возвращаемое значение, а не в параметр</td></tr>
+        <tr><td><code>=&gt;</code></td><td><strong>Выражение-тело</strong> (expression body): сокращение
+          вместо <code>{ return …; }</code>. Это <em>не</em> лямбда — слева стоит обычное имя метода. Та же
+          запись бывает у свойств: <code>public int Double =&gt; _x * 2;</code></td></tr>
+        <tr><td><code>(v % 2 == 0, v / 2)</code></td><td><strong>Литерал кортежа</strong>: два выражения через
+          запятую, каждое становится элементом — первое (<code>bool</code>) в <code>ok</code>, второе
+          (<code>int</code>) в <code>half</code></td></tr>
+      </tbody>
+    </table>
+    <p>То же самое в полной форме — чтобы связь была очевидной:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static (bool ok, int half) TryHalfTuple(int v)
+{
+    bool ok = v % 2 == 0;
+    int half = v / 2;
+    return (ok, half);              // литерал кортежа из двух переменных
+}</code></pre>
+    </div>
+    <p>Проверим, что возвращается:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(TryHalfTuple(8));         // чётное
+Console.WriteLine(TryHalfTuple(7));         // нечётное
+Console.WriteLine(TryHalfTuple(7).half);    // к элементу можно обратиться сразу</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">(True, 4)
+(False, 3)
+3</code></pre>
+    </div>
+    <p>Обратите внимание: при нечётном <code>v</code> метод вернул <code>(False, 3)</code> — «половина»
+      посчитана всегда, даже когда <code>ok</code> равно <code>false</code>. Если такое значение недопустимо,
+      это оговаривают отдельно: возвращают <code>bool</code> плюс <code>out</code> (глава 5), запись
+      с валидацией в конструкторе (глава 17) или бросают исключение (глава 21).</p>
+
+
+    <h2>Деконструкция: разобрать кортеж на переменные</h2>
+    <p>Обратная операция — <strong>деконструкция</strong>: кортеж «раскладывается» по переменным в том же
+      порядке, в котором объявлены элементы.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static (bool ok, int half) TryHalfTuple(int v) =&gt; (v % 2 == 0, v / 2);
+
+var (ok, half) = TryHalfTuple(8);           // две НОВЫЕ переменные
+Console.WriteLine($"{ok} {half}");
+
+(bool o2, int h2) = TryHalfTuple(7);        // то же, но типы написаны явно
+Console.WriteLine($"{o2} {h2}");
+
+int a = 0, b = 0;
+(a, b) = (1, 2);                            // в уже существующие
+Console.WriteLine($"{a} {b}");
+
+var (onlyOk, _) = TryHalfTuple(9);          // второе значение не нужно
+Console.WriteLine(onlyOk);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True 4
+False 3
+1 2
+False</code></pre>
+    </div>
+    <p>Четыре формы — это одно и то же действие. Ключевое отличие от «просто присваивания»: переменных
+      становится несколько, а справа стоит одно значение. <code>_</code> в последней строке — тот самый
+      discard из главы 5: значение вычислено, но переменной не существует.</p>
+    <table>
+      <thead><tr><th>Запись</th><th>Что делает</th></tr></thead>
+      <tbody>
+        <tr><td><code>var (ok, half) = …</code></td><td>Объявляет переменные, типы выводит из кортежа</td></tr>
+        <tr><td><code>(bool o2, int h2) = …</code></td><td>Объявляет переменные с явными типами</td></tr>
+        <tr><td><code>(a, b) = …</code></td><td>Присваивает существующим переменным (они должны быть объявлены
+          заранее)</td></tr>
+        <tr><td><code>var (ok, _) = …</code></td><td>Нужен только первый элемент, второй выбрасывается</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Ловушка: деконструкция — это не «две переменные с одним значением»</span>
+      <p>Справа обязан быть кортеж (или тип с методом <code>Deconstruct</code>). Запись
+        <code>var (ok, half) = TryHalfTuple(8);</code> — <strong>одно</strong> присваивание: сначала
+        вычисляется кортеж целиком, потом раскладывается. Поэтому если метод бросает исключение, ни одна из
+        переменных не будет создана.</p>
+    </div>
+
+    <h2>Равенство, хеш и кортеж как ключ</h2>
+    <p>Кортеж сравнивается <strong>поэлементно</strong>: для <code>ValueTuple</code> оператор <code>==</code>
+      существует с C# 7.3 и сравнивает элементы через их собственный <code>==</code>. Имена в сравнении не
+      участвуют, участвуют только значения и типы.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine((1, 2) == (1, 2));
+Console.WriteLine((x: 1, y: 2) == (1, 2));      // имена не важны
+
+var m = new Dictionary&lt;(int, int), string&gt; { [(1, 2)] = "a" };
+Console.WriteLine(m[(1, 2)]);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True
+True
+a</code></pre>
+    </div>
+    <p>Последняя строка объясняет, почему кортеж годится в ключ: <code>ValueTuple</code> реализует
+      <code>IEquatable</code> и <code>GetHashCode</code> по всем элементам (глава 3), поэтому пара
+      «координата → значение» работает без собственного типа. Подробно про словари — глава 11.</p>
+    <div class="box warn">
+      <span class="t">Не путайте с <code>Tuple&lt;,&gt;</code></span>
+      <p>До C# 7 в .NET был класс <code>Tuple&lt;int, int&gt;</code>. Он жил в куче, элементы были
+        <em>свойствами</em> без имён, и <code>==</code> сравнивал <strong>ссылки</strong>:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">Console.WriteLine(Tuple.Create(1, 2) == Tuple.Create(1, 2));       // False
+Console.WriteLine(Tuple.Create(1, 2).Equals(Tuple.Create(1, 2)));   // True</code></pre>
+        <p class="cap">Вывод</p>
+        <pre><code class="language-text">False
+True</code></pre>
+      </div>
+      <p>Сегодня <code>Tuple</code> нужен только для совместимости со старыми API. Везде, где вы пишете
+        «кортеж», имеется в виду <code>ValueTuple</code> и синтаксис со скобками.</p>
+    </div>
+
+
+    <h2>Кортеж изменяемый: это поля, а не свойства</h2>
+    <p>У <code>ValueTuple</code> элементы — открытые <strong>поля</strong>. Значит, кортеж в переменной можно
+      менять по частям, а <code>default</code> даёт «нулевой» кортеж:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var t = (ok: true, half: 4);
+t.ok = false;                 // поле, поэтому компилятор не против
+Console.WriteLine(t);
+
+(bool ok, int half) empty = default;
+Console.WriteLine(empty);     // все элементы по умолчанию</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">(False, 4)
+(False, 0)</code></pre>
+    </div>
+    <p>Изменяемость — следствие того, что <code>ValueTuple</code> структура (глава 4). Плюс: не нужно
+      создавать новый кортеж ради одного поля. Минус: получив кортеж из метода, помните, что вы держите
+      <em>копию</em> — изменения не «дойдут» до того, кто этот кортеж создал.</p>
+
+    <h2>Где кортежи уже работают</h2>
+    <p>Два места, где вы встретите их постоянно:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var ages = new Dictionary&lt;string, int&gt; { ["Аня"] = 30, ["Боб"] = 25 };
+
+foreach (var (name, age) in ages)          // деконструкция KeyValuePair
+    Console.WriteLine($"{name}: {age}");
+
+var picked = new[] { "Аня", "Боб" }.Select(n =&gt; (n, n.Length)).ToList();
+foreach (var (n, len) in picked)
+    Console.WriteLine($"{n}={len}");</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Аня: 30
+Боб: 25
+Аня=3
+Боб=3</code></pre>
+    </div>
+    <p>В первом случае кортеж создаёт сам <code>Dictionary</code>: элемент перебора — пара «ключ-значение»,
+      и её можно разложить прямо в <code>foreach</code> (глава 11). Во втором кортеж создаёте вы, чтобы
+      вернуть из <code>Select</code> два значения сразу (глава 15).</p>
+
+    <h2>Ловушки, на которых кортежи кусаются</h2>
+    <table>
+      <thead><tr><th>Ловушка</th><th>Что происходит</th><th>Как не попасть</th></tr></thead>
+      <tbody>
+        <tr><td>Кортеж в JSON</td><td><code>System.Text.Json</code> по умолчанию сериализует
+          <strong>свойства</strong>, а у <code>ValueTuple</code> — поля. Результат: <code>{}</code></td>
+          <td>Для DTO — <code>record</code>, а не кортеж</td></tr>
+        <tr><td>Имена в отладчике/логах</td><td>Печать даёт <code>(True, 4)</code>; имена не видны</td>
+          <td>Печатать по элементам или использовать <code>record.ToString()</code></td></tr>
+        <tr><td>Публичный API</td><td>Имена живут в атрибуте: сгенерированный клиент/Swagger их не увидит</td>
+          <td>Публичные контракты — <code>record</code> или класс</td></tr>
+        <tr><td>Девять и больше элементов</td><td>Восьмой элемент — вложенный кортеж
+          <code>ValueTuple&lt;…, ValueTuple&lt;int,int&gt;&gt;</code></td>
+          <td>Больше трёх результатов — уже <code>record</code></td></tr>
+        <tr><td>Кортеж как ключ с изменяемыми элементами</td><td>Поменяли поле — хеш изменился, запись в
+          словаре «потерялась» (глава 11)</td><td>Ключ не менять после вставки</td></tr>
+      </tbody>
+    </table>
+    <p>Первая ловушка — самая дорогая, посмотрим на неё в коде:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">(bool ok, int half) res = (true, 4);
+
+Console.WriteLine(JsonSerializer.Serialize(res));
+Console.WriteLine(JsonSerializer.Serialize(res, new JsonSerializerOptions { IncludeFields = true }));</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">{}
+{"Item1":true,"Item2":4}</code></pre>
+    </div>
+    <p>Даже с <code>IncludeFields</code> имена потеряны — в JSON уйдут <code>Item1</code>/<code>Item2</code>.
+      Для записи (глава 17) тот же код даёт <code>{"Ok":true,"Half":4}</code>: имена полей — часть типа, их
+      видно и сериализатору, и клиенту.</p>
+
+
+
+    <h2><code>out</code>, кортеж или <code>record</code></h2>
+    <p>Три инструмента для одной задачи «вернуть больше одного значения». В главе 5 был <code>out</code>;
+      вот как выбирать между всеми тремя:</p>
+    <table>
+      <thead><tr><th>Ситуация</th><th>Инструмент</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>«Получилось ли» + значение, шаблон <code>Try*</code></td><td><code>out</code></td>
+          <td>Так устроен BCL: <code>TryParse</code>, <code>TryGetValue</code>, <code>TryDequeue</code></td></tr>
+        <tr><td>Два-три равноправных значения в своём коде</td><td>кортеж</td>
+          <td>Аллокаций нет, работает в <code>async</code>, разбирается деконструкцией</td></tr>
+        <tr><td>Имена нужны снаружи: JSON, лог, публичный метод</td><td><code>record</code></td>
+          <td>Имена — часть типа: их видят сериализатор, IDE и клиент</td></tr>
+        <tr><td>Результат «обрастает» логикой и меняется со временем</td><td><code>record</code>/класс</td>
+          <td>Можно добавить свойства, валидацию, методы; кортеж так расширять нельзя</td></tr>
+        <tr><td>Нужен <code>null</code> как «не получилось»</td><td><code>T?</code> / <code>record</code></td>
+          <td>Кортеж — структура, <code>null</code> у него не бывает: <code>default</code> даст
+          <code>(False, 0)</code></td></tr>
+      </tbody>
+    </table>
+    <p>Та же логика, но записью:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var r = new HalfResult(true, 4);
+Console.WriteLine(r);                              // печать с именами
+Console.WriteLine(r.Ok);
+Console.WriteLine(JsonSerializer.Serialize(r));    // имена в JSON
+
+public readonly record struct HalfResult(bool Ok, int Half);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">HalfResult { Ok = True, Half = 4 }
+True
+{"Ok":true,"Half":4}</code></pre>
+    </div>
+    <p>Разница в двух строках: кортеж — <strong>одноразовая форма</strong> («здесь и сейчас, внутри
+      метода»), запись — <strong>тип</strong> с именем, который живёт в API и документации. Правило простое:
+      если кортеж выходит за пределы сборки или попадает в JSON — меняйте на <code>record</code>
+      (подробно — глава 17).</p>
+
+    <h2>Что спрашивают на собеседовании</h2>
+    <div class="box note">
+      <span class="t">Вопросы, которые стоит держать в голове</span>
+      <ul>
+        <li><strong>Чем <code>ValueTuple</code> отличается от <code>Tuple</code>?</strong> Структура против
+          класса: нет аллокации, есть имена и <code>==</code> по значениям; у <code>Tuple</code>
+          <code>==</code> — сравнение ссылок.</li>
+        <li><strong>Где лежит кортеж?</strong> Там же, где переменная: локальная — на стеке, поле класса — в
+          куче внутри объекта, элемент массива — в массиве. Сам по себе «в куче» он не оказывается.</li>
+        <li><strong>Имена элементов — часть типа?</strong> Нет. Тип — <code>ValueTuple&lt;bool, int&gt;</code>;
+          имена хранятся в <code>TupleElementNamesAttribute</code> и нужны компилятору и IDE.</li>
+        <li><strong>Почему кортеж можно вернуть из <code>async</code>, а <code>out</code> — нельзя?</strong>
+          <code>ValueTuple</code> — обычное значение, а <code>ref</code>/<code>out</code>/<code>in</code> в
+          асинхронных методах запрещены (<code>CS1988</code>): метод завершается не сразу.</li>
+        <li><strong>Почему кортеж годится в ключ словаря?</strong> Он реализует <code>IEquatable</code> и
+          <code>GetHashCode</code> по всем элементам (глава 3).</li>
+        <li><strong>Когда кортеж — плохая идея?</strong> В публичном API, в JSON-контрактах и там, где
+          результатов больше трёх: имена теряются, читаемость падает.</li>
+      </ul>
+    </div>
+
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong>Преобразования между кортежами — поэлементные.</strong> <code>(int, int)</code> спокойно
+        станет <code>(long, long)</code>: компилятор преобразует каждый элемент отдельно. Но если хотя бы у
+        одного элемента преобразования нет, падает весь кортеж:
+        <code>error CS0029: Cannot implicitly convert type '(int a, string b)' to '(long p, int q)'</code>.</li>
+      <li><strong>Деконструкция требует точного количества.</strong> <code>var (a, b, c) = (1, 2);</code> —
+        <code>error CS8132: Cannot deconstruct a tuple of '2' elements into '3' variables</code>; отказаться
+        можно только от «хвоста» через <code>_</code>.</li>
+      <li><strong>Кортеж в сигнатуре — часть контракта.</strong> Поменяли порядок элементов — сломали
+        вызывающих молча: типы совпадают, если оба элемента <code>int</code>. Два безымянных <code>int</code>
+        рядом — повод взять <code>record</code> с осмысленными именами.</li>
+      <li><strong>Экономия на читаемости.</strong> <code>(int, int, string, bool)</code> в возврате метода
+        никто, кроме автора, не разберёт.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Кортеж — это <code>ValueTuple</code></strong>: структура из нужных вам типов, аллокаций
+          нет, элементы — поля <code>Item1…ItemN</code>.</li>
+        <li><strong>Имена (<code>ok</code>, <code>half</code>) — подсказка компилятора.</strong> В типе их
+          нет: <code>GetType()</code> покажет <code>ValueTuple`2[Boolean,Int32]</code>, а JSON — <code>{}</code>.</li>
+        <li><strong>Деконструкция</strong> — <code>var (ok, half) = …</code>; работает и для
+          <code>KeyValuePair</code> в <code>foreach</code>.</li>
+        <li><strong><code>==</code> сравнивает поэлементно</strong> (в отличие от старого
+          <code>Tuple</code>), поэтому кортеж годится в ключ словаря.</li>
+        <li><strong>Кортеж — для «здесь и сейчас».</strong> Как только результат выходит в API или JSON —
+          берите <code>record</code> (глава 17).</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs05-ref-out-in-discard.html">← <span class="sp">Глава 5. ref, out, in и _: передача по ссылке на практике</span></a>
+      <a href="cs07-ref-struct-span.html"><span class="sp">Глава 7. ref struct и Span: окно в память без аллокаций</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

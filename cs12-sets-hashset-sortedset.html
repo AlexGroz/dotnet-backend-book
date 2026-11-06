@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 11 · Множества: HashSet и SortedSet</title>
+<title>Глава 12 · Множества: HashSet и SortedSet</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs12-queues-stacks.html"><span class="sp">Глава 12. Очереди и стеки: Queue, Stack, PriorityQueue</span> →</a>
+  <a href="cs13-queues-stacks.html"><span class="sp">Глава 13. Очереди и стеки: Queue, Stack, PriorityQueue</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 11. Множества: HashSet и SortedSet</h1>
+    <h1>Глава 12. Множества: HashSet и SortedSet</h1>
     <p class="sublead">Полный API множеств: <code>Add</code>/<code>Remove</code>/<code>Contains</code>,
       операции над множествами (<code>UnionWith</code>, <code>IntersectWith</code>, <code>ExceptWith</code>,
       <code>SymmetricExceptWith</code>), отношения (<code>IsSubsetOf</code>, <code>Overlaps</code>), компаратор,
@@ -27,7 +27,7 @@
 
     <p><code>HashSet&lt;T&gt;</code> — это <code>Dictionary</code>, у которого выкинули значения и оставили
       ключи. Отсюда всё остальное: хеш-таблица внутри, добавление и поиск за ~O(1), никакого порядка и та же
-      ловушка с изменяемым элементом (глава 10). Сортированная версия — <strong>отдельный тип</strong>
+      ловушка с изменяемым элементом (глава 11). Сортированная версия — <strong>отдельный тип</strong>
       <code>SortedSet&lt;T&gt;</code> на красно-чёрном дереве: O(log n) и всегда по порядку.</p>
     <p>Множество нужно там, где вопрос звучит «есть ли это у нас?», а не «что лежит под номером 3»:
       дедупликация, «уже видели этот id», пересечение прав, разница двух выборок.</p>
@@ -204,14 +204,14 @@ Console.WriteLine(new HashSet&lt;string&gt; { "Аня" }.Contains("АНЯ"));   
       <pre><code class="language-text">True
 False</code></pre>
     </div>
-    <p>Правила те же, что в главе 10: <code>Ordinal</code> для идентификаторов и тестов,
+    <p>Правила те же, что в главе 11: <code>Ordinal</code> для идентификаторов и тестов,
       <code>OrdinalIgnoreCase</code> — когда регистр не должен различать. Компаратор влияет не только на
       <code>Contains</code>, но и на <code>Remove</code>, и на операции над множествами — они работают по тем
       же правилам равенства.</p>
 
     <h2>Порядок перебора и <code>SortedSet&lt;T&gt;</code></h2>
     <p><code>HashSet</code> порядок не хранит: элементы перебираются в порядке корзин, и полагаться на это
-      нельзя (как и с <code>Dictionary</code>, глава 10). Если порядок нужен как часть контракта — берут
+      нельзя (как и с <code>Dictionary</code>, глава 11). Если порядок нужен как часть контракта — берут
       <code>SortedSet&lt;T&gt;</code>. Он умеет всё то же плюс доступ к краям и диапазонам:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">var sorted = new SortedSet&lt;int&gt; { 5, 1, 3 };
@@ -240,13 +240,13 @@ Console.WriteLine(string.Join(",", view));   // 1,2,3 — новый элеме�
         <tr><td>Края и диапазоны</td><td>Нет (<code>Min</code>/<code>Max</code> — через LINQ, O(n))</td>
           <td><code>Min</code>, <code>Max</code>, <code>GetViewBetween</code></td></tr>
         <tr><td>Требования к <code>T</code></td><td>Любой (равенство по <code>Equals</code>/хешу)</td>
-          <td><code>IComparable&lt;T&gt;</code> или компаратор (глава 9)</td></tr>
+          <td><code>IComparable&lt;T&gt;</code> или компаратор (глава 10)</td></tr>
         <tr><td>Когда брать</td><td>Проверки «есть ли», дедупликация</td><td>Нужен порядок, диапазон,
           «ближайший больше/меньше»</td></tr>
       </tbody>
     </table>
     <p>Для <code>SortedSet</code> без компаратора тип обязан реализовывать <code>IComparable&lt;T&gt;</code>
-      — иначе конструктор бросит исключение. Свой порядок задаётся так же, как в главе 9:
+      — иначе конструктор бросит исключение. Свой порядок задаётся так же, как в главе 10:
       <code>new SortedSet&lt;Order&gt;(Comparer&lt;Order&gt;.Create((x, y) =&gt; y.Total.CompareTo(x.Total)))</code>.</p>
 
     <h2>Сколько это стоит: <code>List.Contains</code> против <code>HashSet.Contains</code></h2>
@@ -269,7 +269,7 @@ HashSet.Contains x2000:  0.08 ms</code></pre>
 
 
     <h2>Изменяемый элемент — та же ловушка, что с ключом словаря</h2>
-    <p>Элемент множества — это ключ словаря. Значит, правило из главы 10 действует целиком: если
+    <p>Элемент множества — это ключ словаря. Значит, правило из главы 11 действует целиком: если
       <code>GetHashCode</code> зависит от изменяемого поля, после мутации элемент «теряется» — он есть в
       перечислении, но <code>Contains</code> его не находит.</p>
     <div class="codewrap">
@@ -286,7 +286,7 @@ Console.WriteLine(set.Count + " " + set.Contains(key));       // 1 False</code><
     </div>
     <p>Лечится тем же способом: неизменяемый элемент (<code>record</code> с <code>init</code>, позиционный
       <code>record</code>), суррогатный ключ или удаление <em>до</em> мутации — три варианта разобраны в
-      главе 10, раздел «Как надо: три способа не потерять запись».</p>
+      главе 11, раздел «Как надо: три способа не потерять запись».</p>
 
     <h2>Неизменяемое и «замороженное»: <code>ImmutableHashSet</code> и <code>FrozenSet</code></h2>
     <p>Если множество заполняется один раз (справочник, набор разрешений, список синонимов), обычный
@@ -367,11 +367,11 @@ s.Add(new NoCompare { Id = 2 });     // ✘ нужно сравнение</code>
     </div>
 
     <p>Сводная шпаргалка «операция → коллекция» по всем коллекциям части II — в конце
-      <strong>главы 12</strong>, вместе с очередями и стеками.</p>
+      <strong>главы 13</strong>, вместе с очередями и стеками.</p>
 
     <div class="pager">
-      <a href="cs10-dictionaries.html">← <span class="sp">Глава 10. Словари: Dictionary на практике</span></a>
-      <a href="cs12-queues-stacks.html"><span class="sp">Глава 12. Очереди и стеки: Queue, Stack, PriorityQueue</span> →</a>
+      <a href="cs11-dictionaries.html">← <span class="sp">Глава 11. Словари: Dictionary на практике</span></a>
+      <a href="cs13-queues-stacks.html"><span class="sp">Глава 13. Очереди и стеки: Queue, Stack, PriorityQueue</span> →</a>
     </div>
   </div>
 </div>

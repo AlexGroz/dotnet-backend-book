@@ -13,7 +13,7 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs06-ref-struct-span.html"><span class="sp">Глава 6. ref struct и Span: окно в память без аллокаций</span> →</a>
+  <a href="cs06-tuples-and-deconstruction.html"><span class="sp">Глава 6. Кортежи: (bool ok, int half) и деконструкция</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
@@ -165,7 +165,7 @@ TryGet(v);                     // error CS1620: Argument 1 must be passed with t
       <p>«Ключа нет», «строка не число», «очередь пуста» — это <em>ожидаемые</em> исходы, а не аварии.
         Исключение на каждый такой случай дорого: раскрутка стека, сбор <code>StackTrace</code>, а в цикле — ещё
         и постоянный мусор. <code>Try*</code> возвращает ответ бесплатно. Когда исключения уместны, а когда
-        нет — глава 20.</p>
+        нет — глава 21.</p>
     </div>
 
 
@@ -215,9 +215,18 @@ x
 42
 x</code></pre>
     </div>
+    <p>Строка с <code>Func</code> требует пояснения — в главе 1 он встретился мимоходом, но не разбирался:
+      <code>Func&lt;int, int, int&gt;</code> — готовый <strong>делегат</strong>, то есть тип, значением
+      которого является метод. Параметры типа описывают его сигнатуру, и <strong>последний — то, что метод
+      возвращает</strong>, а все предыдущие — аргументы. Значит <code>Func&lt;int, int, int&gt;</code> — это
+      <code>int (int, int)</code>: <em>два</em> аргумента и один результат. Поэтому <code>twice(1, 21)</code>
+      передаёт два аргумента, а не три, и печатает <code>42</code>; попытка передать три —
+      <code>error CS1593: Delegate 'Func&lt;int, int, int&gt;' does not take 3 arguments</code>. Лямбда
+      <code>(_, b) =&gt; b * 2</code> — метод из двух параметров, первый из которых не нужен и назван
+      <code>_</code>. Делегаты, лямбды и замыкания целиком — глава 16.</p>
     <p>Четвёртый случай — отказ от <em>результата вызова</em>:
       <code>_ = Task.Run(() =&gt; Work());</code>. Это уже не про параметры, а про «я сознательно не жду задачу»;
-      чем это опасно на сервере — глава 18. А чтобы компилятор не ругался предупреждением CS4014 («вызов не
+      чем это опасно на сервере — глава 19. А чтобы компилятор не ругался предупреждением CS4014 («вызов не
       ожидается»), <code>_</code> как раз и ставят.</p>
     <div class="box warn">
       <span class="t">Ловушка: <code>var _ = 5</code> — это не discard</span>
@@ -311,7 +320,7 @@ Console.WriteLine(string.Join(",", arr));  // 10,99,30</code></pre>
       <pre><code class="language-text">10,99,30</code></pre>
     </div>
     <p>На этом механизме держится <code>Span&lt;T&gt;</code>: его индексатор возвращает <code>ref</code> на
-      элемент массива, а не копию. Как это устроено и почему такая ссылка не может уехать в кучу — глава 6.
+      элемент массива, а не копию. Как это устроено и почему такая ссылка не может уехать в кучу — глава 7.
       Ограничение, которое стоит помнить: <code>ref</code>-локальную нельзя захватить в лямбду —
       <code>error CS8175: Cannot use ref local 'r' inside an anonymous method, lambda expression, or query
       expression</code>.</p>
@@ -336,8 +345,8 @@ Console.WriteLine(string.Join(",", arr));  // 10,99,30</code></pre>
       переменной.</p>
 
     <h2><code>out</code> или кортеж?</h2>
-    <p>С C# 7 «второй результат» можно вернуть кортежем, и обычно это читается лучше, потому что значения
-      приходят в одном объекте, а не через параметры:</p>
+    <p>С C# 7 «второй результат» можно вернуть <strong>кортежем</strong> — значением из нескольких частей.
+      Тогда результаты приходят в одном объекте, а не через параметры:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">var (ok, half) = TryHalfTuple(10);
 Console.WriteLine($"{ok} {half}");       // True 5
@@ -346,6 +355,9 @@ static (bool ok, int half) TryHalfTuple(int v) =&gt; (v % 2 == 0, v / 2);</code>
       <p class="cap">Вывод</p>
       <pre><code class="language-text">True 5</code></pre>
     </div>
+    <p>Что означает <code>(bool ok, int half)</code> в типе возврата, откуда берётся
+      <code>(v % 2 == 0, v / 2)</code> в теле и как разобрать результат на переменные — целиком следующая
+      глава.</p>
     <table>
       <thead><tr><th>Когда</th><th>Что выбрать</th><th>Почему</th></tr></thead>
       <tbody>
@@ -375,11 +387,11 @@ static (bool ok, int half) TryHalfTuple(int v) =&gt; (v % 2 == 0, v / 2);</code>
           <td>частное и остаток одним вызовом</td><td>—</td></tr>
         <tr><td><code>Dictionary.TryGetValue(key, out var value)</code></td>
           <td>одно обращение к таблице вместо двух (<code>ContainsKey</code> + индексатор)</td>
-          <td>глава 10</td></tr>
+          <td>глава 11</td></tr>
         <tr><td><code>Queue.TryDequeue(out var item)</code></td><td>цикл без проверки <code>Count</code></td>
-          <td>глава 12</td></tr>
+          <td>глава 13</td></tr>
         <tr><td><code>PriorityQueue.TryDequeue(out var el, out var priority)</code></td>
-          <td>два <code>out</code> в одном вызове</td><td>глава 12</td></tr>
+          <td>два <code>out</code> в одном вызове</td><td>глава 13</td></tr>
         <tr><td><code>Interlocked.CompareExchange(ref int, …)</code></td>
           <td>атомарная замена: нужен именно <code>ref</code>, иначе некому менять</td>
           <td>глава 13 .NET-книги</td></tr>
@@ -465,7 +477,7 @@ Console.WriteLine($"частное {quotient}, остаток {remainder}");   /
 
     <div class="pager">
       <a href="cs04-struct.html">← <span class="sp">Глава 4. struct: что это и когда применять</span></a>
-      <a href="cs06-ref-struct-span.html"><span class="sp">Глава 6. ref struct и Span: окно в память без аллокаций</span> →</a>
+      <a href="cs06-tuples-and-deconstruction.html"><span class="sp">Глава 6. Кортежи: (bool ok, int half) и деконструкция</span> →</a>
     </div>
   </div>
 </div>

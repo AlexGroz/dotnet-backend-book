@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 13 · LinkedList: связный список</title>
+<title>Глава 14 · LinkedList: связный список</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs14-ienumerable.html"><span class="sp">Глава 14. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+  <a href="cs15-ienumerable.html"><span class="sp">Глава 15. IEnumerable, yield и IAsyncEnumerable</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 13. LinkedList: связный список</h1>
+    <h1>Глава 14. LinkedList: связный список</h1>
     <p class="sublead">Коллекция, которую почти не берут в руки, но почти всегда спрашивают: как устроен связный
       список, что даёт <code>LinkedListNode&lt;T&gt;</code>, почему O(1) на вставке так редко помогает, где
       <code>LinkedList</code> действительно незаменим (LRU-кэш) и чем он отличается от <code>List</code>,
@@ -352,7 +352,7 @@ static void Reverse(LinkedList&lt;int&gt; list)
           умеют только с краями (зато O(1) и без объектов-узлов). <code>LinkedList</code> даёт доступ к любому
           узлу, если вы его сохранили.</td></tr>
         <tr><td>Можно ли сделать из него очередь?</td><td>Да: <code>AddLast</code> + <code>RemoveFirst</code>.
-          Но <code>Queue&lt;T&gt;</code> проще, экономнее и быстрее (глава 12).</td></tr>
+          Но <code>Queue&lt;T&gt;</code> проще, экономнее и быстрее (глава 13).</td></tr>
         <tr><td>Потокобезопасен?</td><td>Нет. Как и <code>List</code>: нужен <code>lock</code> или другая
           коллекция.</td></tr>
         <tr><td>Зачем в словаре хранят <code>LinkedListNode</code>?</td><td>Чтобы получать узел за ~O(1) и
@@ -397,14 +397,14 @@ static void Reverse(LinkedList&lt;int&gt; list)
           <code>Dictionary&lt;TKey, LinkedListNode&lt;TValue&gt;&gt;</code> + <code>LinkedList</code>, где голова
           — самый свежий элемент, хвост — кандидат на вылет.</li>
         <li><strong>Сравнение:</strong> <code>List</code> — по умолчанию; <code>Queue</code>/<code>Stack</code> —
-          только края на массиве (глава 12); <code>LinkedList</code> — вставки и удаления по уже известному
+          только края на массиве (глава 13); <code>LinkedList</code> — вставки и удаления по уже известному
           узлу.</li>
       </ul>
     </div>
 
     <div class="pager">
-      <a href="cs12-queues-stacks.html">← <span class="sp">Глава 12. Очереди и стеки: Queue, Stack, PriorityQueue</span></a>
-      <a href="cs14-ienumerable.html"><span class="sp">Глава 14. IEnumerable, yield и IAsyncEnumerable</span> →</a>
+      <a href="cs13-queues-stacks.html">← <span class="sp">Глава 13. Очереди и стеки: Queue, Stack, PriorityQueue</span></a>
+      <a href="cs15-ienumerable.html"><span class="sp">Глава 15. IEnumerable, yield и IAsyncEnumerable</span> →</a>
     </div>
   </div>
 </div>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 9 · Сравнение и порядок: IComparable, IComparer и сортировка</title>
+<title>Глава 10 · Сравнение и порядок: IComparable, IComparer и сортировка</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs10-dictionaries.html"><span class="sp">Глава 10. Словари: Dictionary на практике</span> →</a>
+  <a href="cs11-dictionaries.html"><span class="sp">Глава 11. Словари: Dictionary на практике</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 9. Сравнение и порядок: IComparable, IComparer и сортировка</h1>
+    <h1>Глава 10. Сравнение и порядок: IComparable, IComparer и сортировка</h1>
     <p class="sublead">«Равны ли» и «кто раньше» — два разных вопроса с двумя разными интерфейсами. Как устроен
       <code>CompareTo</code>, зачем нужен <code>IComparer&lt;T&gt;</code>, почему <code>List.Sort</code> и
       <code>OrderBy</code> дают разный порядок равных элементов и почему строки нельзя сравнивать «просто
@@ -37,7 +37,7 @@ var set = new SortedSet&lt;int&gt;();  // всегда по порядку
 var pq = new PriorityQueue&lt;Job, int&gt;();        // «самый важный» — это тоже порядок</code></pre>
     </div>
     <p>Все они опираются на один контракт — <strong><code>IComparable&lt;T&gt;</code></strong> (у самого типа)
-      или <strong><code>IComparer&lt;T&gt;</code></strong> (снаружи). В главах 7–8 эти интерфейсы встречались как
+      или <strong><code>IComparer&lt;T&gt;</code></strong> (снаружи). В главах 8–9 эти интерфейсы встречались как
       ограничения <code>where T : IComparable&lt;T&gt;</code>; здесь — что они на самом деле обещают.</p>
 
     <h2><code>CompareTo</code>: важен не результат, а знак</h2>
@@ -336,8 +336,8 @@ catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }<
     </div>
 
     <div class="pager">
-      <a href="cs08-generic-constraints-variance.html">← <span class="sp">Глава 8. Generic глубже: ограничения, вариантность и generic math</span></a>
-      <a href="cs10-dictionaries.html"><span class="sp">Глава 10. Словари: Dictionary на практике</span> →</a>
+      <a href="cs09-generic-constraints-variance.html">← <span class="sp">Глава 9. Generic глубже: ограничения, вариантность и generic math</span></a>
+      <a href="cs11-dictionaries.html"><span class="sp">Глава 11. Словари: Dictionary на практике</span> →</a>
     </div>
   </div>
 </div>
