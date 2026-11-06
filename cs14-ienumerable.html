@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 13 · IEnumerable, yield и IAsyncEnumerable</title>
+<title>Глава 14 · IEnumerable, yield и IAsyncEnumerable</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs14-delegates-events.html"><span class="sp">Глава 14. Делегаты, лямбды и события: как метод становится значением</span> →</a>
+  <a href="cs15-delegates-events.html"><span class="sp">Глава 15. Делегаты, лямбды и события: как метод становится значением</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 13. IEnumerable, yield и IAsyncEnumerable</h1>
+    <h1>Глава 14. IEnumerable, yield и IAsyncEnumerable</h1>
     <p class="sublead">Что значит «по чему-то можно пройти в <code>foreach</code>», откуда берётся отложенное
       выполнение LINQ и зачем понадобился <code>IAsyncEnumerable</code>.</p>
     <p><span class="tag core">основная глава</span></p>
@@ -185,7 +185,7 @@ await foreach (var row in StreamAsync(ct))
         один объект в другой»; в LINQ то же делает <code>Select(order =&gt; …)</code>. Имя пришло из
         функциональных языков, а в .NET его закрепили библиотеки маппинга (в AutoMapper есть интерфейс
         <code>IMapper</code>). Типа-коллекции <code>Map</code> в BCL нет: встретили <code>Map(x)</code> —
-        ищите объявление, это всегда чей-то метод. С главой 6 его роднит только то, что такой метод часто
+        ищите объявление, это всегда чей-то метод. С главой 7 его роднит только то, что такой метод часто
         принимает и возвращает <code>IEnumerable&lt;T&gt;</code>.</p>
     </div>
     <ul>
@@ -205,7 +205,7 @@ await foreach (var row in StreamAsync(ct))
         <code>[JsonPropertyName("id")]</code> — <code>System.Text.Json</code> так называет поле в JSON;
         <code>[FromQuery]</code> — ASP.NET Core берёт значение из query-строки;
         <code>[EnumeratorCancellation]</code> — компилятор меняет сгенерированный код итератора.
-        Как объявить свой атрибут и прочитать его через рефлексию — глава 20.</p>
+        Как объявить свой атрибут и прочитать его через рефлексию — глава 21.</p>
     </div>
     <div class="box note">
       <span class="t">Почему не <code>Task&lt;IEnumerable&lt;T&gt;&gt;</code></span>
@@ -277,8 +277,8 @@ public Task&lt;List&lt;Order&gt;&gt; GetForYearAsync(int year, CancellationToken
     </div>
 
     <div class="pager">
-      <a href="cs12-linked-list.html">← <span class="sp">Глава 12. LinkedList: связный список</span></a>
-      <a href="cs14-delegates-events.html"><span class="sp">Глава 14. Делегаты, лямбды и события: как метод становится значением</span> →</a>
+      <a href="cs13-linked-list.html">← <span class="sp">Глава 13. LinkedList: связный список</span></a>
+      <a href="cs15-delegates-events.html"><span class="sp">Глава 15. Делегаты, лямбды и события: как метод становится значением</span> →</a>
     </div>
   </div>
 </div>

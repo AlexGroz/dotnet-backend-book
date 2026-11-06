@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 11 · Очереди и стеки: Queue, Stack, PriorityQueue</title>
+<title>Глава 12 · Очереди и стеки: Queue, Stack, PriorityQueue</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs12-linked-list.html"><span class="sp">Глава 12. LinkedList: связный список</span> →</a>
+  <a href="cs13-linked-list.html"><span class="sp">Глава 13. LinkedList: связный список</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 11. Очереди и стеки: Queue, Stack, PriorityQueue</h1>
+    <h1>Глава 12. Очереди и стеки: Queue, Stack, PriorityQueue</h1>
     <p class="sublead">Три коллекции «взять крайний»: <code>Queue</code> (первым пришёл — первым вышел),
       <code>Stack</code> (последним пришёл — первым вышел) и <code>PriorityQueue</code> (первым выходит самый
       важный). Полный API, поведение на пустой коллекции, разница между «посмотреть» и «забрать», кольцевой
@@ -126,7 +126,7 @@ True
       <code>size == array.Length</code> и приходит ещё один элемент, создаётся массив вдвое больше, элементы
       копируются в логическом порядке (начиная с <code>head</code>), <code>head</code> становится 0,
       <code>tail</code> — <code>size</code>. Это O(n), но случается логарифмически редко — в этом и смысл
-      «амортизированно O(1)». Рост удвоением — тот же приём, что у <code>List&lt;T&gt;</code> (глава 6).</p>
+      «амортизированно O(1)». Рост удвоением — тот же приём, что у <code>List&lt;T&gt;</code> (глава 7).</p>
     <div class="box note">
       <span class="t">Две детали, которые видно на том же дампе</span>
       <ul>
@@ -224,7 +224,7 @@ catch (Exception e) { Console.WriteLine(e.GetType().Name + ": " + e.Message); }<
       порядок. Прежде чем смотреть на код, разберём, что в нём происходит и зачем нужна каждая строка.</p>
 
     <h3>Данные: дерево, записанное словарём</h3>
-    <p>Дерево в примере — это связи «узел → его дети». Держать их удобно словарём (глава 9): ключ — имя узла,
+    <p>Дерево в примере — это связи «узел → его дети». Держать их удобно словарём (глава 10): ключ — имя узла,
       значение — массив детей, у листьев массив пустой. Ничего специфически «словарного» тут не происходит,
       это просто способ хранить граф в коде:</p>
     <div class="codewrap">
@@ -333,7 +333,7 @@ A C E B D</code></pre>
         детей. Нужно «по алфавиту» — кладите их наоборот:
         <code>foreach (var child in tree[node].Reverse())</code>, и получится <code>A B D C E</code>.</li>
       <li><strong>В настоящем обходе графа</strong>, где есть циклы, дополнительно хранят посещённые узлы
-        (<code>HashSet</code>, глава 10), иначе обход зациклится. В дереве из примера циклов нет, поэтому
+        (<code>HashSet</code>, глава 11), иначе обход зациклится. В дереве из примера циклов нет, поэтому
         проверка не нужна.</li>
     </ul>
     <div class="box tip">
@@ -387,7 +387,7 @@ True критичный/1
     </table>
     <p>Два поведения, которые чаще всего удивляют:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// 1. Максимум вместо минимума — обратный компаратор (глава 8)
+      <pre><code class="language-csharp">// 1. Максимум вместо минимума — обратный компаратор (глава 9)
 var maxHeap = new PriorityQueue&lt;string, int&gt;(Comparer&lt;int&gt;.Create((a, b) =&gt; b.CompareTo(a)));
 maxHeap.Enqueue("a", 1); maxHeap.Enqueue("c", 3); maxHeap.Enqueue("b", 2);
 while (maxHeap.TryDequeue(out var el, out _)) Console.Write(el + " ");
@@ -439,7 +439,7 @@ Console.WriteLine(string.Join(",", order));</code></pre>
       <li><strong>Где пригодится приоритет:</strong> планировщик задач (сначала критичные), ограничитель
         частоты (сначала те, у кого кончается квота), алгоритм Дейкстры (сначала ближайшая вершина), обработка
         таймаутов (сначала тот, кто истекает раньше). Обычно приоритетом служит <code>DateTime</code> или
-        <code>TimeSpan</code> — они сравнимы (глава 8).</li>
+        <code>TimeSpan</code> — они сравнимы (глава 9).</li>
       </ul>
 
 
@@ -464,9 +464,9 @@ Console.WriteLine(string.Join(",", order));</code></pre>
       <code>Channel</code> с <code>ReadAllAsync</code>.</p>
 
     <h2>Шпаргалка: операция → коллекция (вся часть II)</h2>
-    <p>Сводка по коллекциям из глав 6–12 — сюда возвращаются с вопросом «а чем это делать». Словари
-      разобраны в главе 9, множества — в главе 10, очереди и стеки — в этой главе, связный список — в
-      главе 12.</p>
+    <p>Сводка по коллекциям из глав 7–13 — сюда возвращаются с вопросом «а чем это делать». Словари
+      разобраны в главе 10, множества — в главе 11, очереди и стеки — в этой главе, связный список — в
+      главе 13.</p>
     <table>
       <thead><tr><th>Что нужно</th><th>Чем пользоваться</th><th>Стоимость</th></tr></thead>
       <tbody>
@@ -475,7 +475,7 @@ Console.WriteLine(string.Join(",", order));</code></pre>
         <tr><td>Ключи по порядку, диапазон</td><td><code>SortedDictionary</code>,
           <code>SortedList</code></td><td>O(log n)</td></tr>
         <tr><td>Порядок вставки + поиск по ключу</td><td><code>List&lt;T&gt;</code> +
-          <code>Dictionary</code> (глава 9)</td><td>поиск ~O(1), удаление O(n)</td></tr>
+          <code>Dictionary</code> (глава 10)</td><td>поиск ~O(1), удаление O(n)</td></tr>
         <tr><td>Один ключ → много значений</td><td><code>ILookup&lt;TKey, TElement&gt;</code>
           (<code>ToLookup</code>)</td><td>построение O(n)</td></tr>
         <tr><td>«Есть ли элемент», дедупликация</td><td><code>HashSet&lt;T&gt;</code></td><td>~O(1)</td></tr>
@@ -484,7 +484,7 @@ Console.WriteLine(string.Join(",", order));</code></pre>
         <tr><td>Порядок добавления + доступ по номеру</td><td><code>List&lt;T&gt;</code></td>
           <td>индекс O(1), поиск O(n)</td></tr>
         <tr><td>Вставка и удаление в середине, когда узел уже найден</td><td><code>LinkedList&lt;T&gt;</code></td>
-          <td>по узлу O(1), поиск узла O(n); подробно — глава 12</td></tr>
+          <td>по узлу O(1), поиск узла O(n); подробно — глава 13</td></tr>
         <tr><td>FIFO: обработка по очереди</td><td><code>Queue&lt;T&gt;</code>,
           <code>Channel&lt;T&gt;</code> (между потоками)</td><td>O(1)</td></tr>
         <tr><td>LIFO: «отменить последнее»</td><td><code>Stack&lt;T&gt;</code></td><td>O(1)</td></tr>
@@ -498,22 +498,22 @@ Console.WriteLine(string.Join(",", order));</code></pre>
       </tbody>
     </table>
     <p>Таблица «что хорошо / что дорого» для тех же коллекций и выбор интерфейса для сигнатуры
-      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — глава 6;
-      порядок и сравнение, на которых всё это держится, — глава 8.</p>
+      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — глава 7;
+      порядок и сравнение, на которых всё это держится, — глава 9.</p>
 
     <div class="box note">
       <span class="t">Почему глав про <code>List</code> и <code>SortedList</code> нет, а про <code>LinkedList</code> есть</span>
       <p>В части II коллекции разобраны не «по одной на каждую», а по тому, где чаще ошибаются: словари
-        (глава 9), множества (глава 10), очереди и стеки (эта глава), связный список (глава 12).</p>
+        (глава 10), множества (глава 11), очереди и стеки (эта глава), связный список (глава 13).</p>
       <ul>
-        <li><strong><code>List&lt;T&gt;</code></strong> — глава 6: внутри массив, <code>Capacity</code> и
+        <li><strong><code>List&lt;T&gt;</code></strong> — глава 7: внутри массив, <code>Capacity</code> и
           <code>EnsureCapacity</code>, рост удвоением, скрытая аллокация в <code>foreach</code>, какой
           интерфейс возвращать из метода. Отдельная глава была бы пересказом этого плюс
           <code>Add</code>/<code>RemoveAt</code>.</li>
-        <li><strong><code>SortedList&lt;TKey, TValue&gt;</code></strong> — глава 9, таблица рядом с
+        <li><strong><code>SortedList&lt;TKey, TValue&gt;</code></strong> — глава 10, таблица рядом с
           <code>SortedDictionary</code>: API у них одинаковый, разница только во внутренней структуре (два
           массива против дерева), поэтому это сравнение на полстраницы, а не глава.</li>
-        <li><strong><code>LinkedList&lt;T&gt;</code></strong> — вынесен в отдельную <strong>главу 12</strong>:
+        <li><strong><code>LinkedList&lt;T&gt;</code></strong> — вынесен в отдельную <strong>главу 13</strong>:
           он устроен принципиально иначе (узлы вместо массива), и про него спрашивают на собеседованиях —
           почему перебор медленнее, где O(1) реально помогает, как устроен LRU-кэш.</li>
       </ul>
@@ -531,7 +531,7 @@ Console.WriteLine(string.Join(",", order));</code></pre>
         <code>while (q.Count &gt; 0) q.Dequeue()</code> работает, но в многопоточном коде между проверкой и
         извлечением элемент может исчезнуть — исключение. <code>TryDequeue</code> атомарен по смыслу.</li>
       <li><strong>Изменение очереди во время <code>foreach</code></strong> — <code>InvalidOperationException</code>
-        (глава 13). Забирать элементы нужно через цикл с <code>TryDequeue</code>.</li>
+        (глава 14). Забирать элементы нужно через цикл с <code>TryDequeue</code>.</li>
       <li><strong><code>ToArray</code> у стека — сверху вниз</strong>, а не снизу вверх: перечисление
         <code>Stack&lt;T&gt;</code> идёт в порядке извлечения.</li>
       <li><strong>Равные приоритеты в <code>PriorityQueue</code></strong> идут в произвольном порядке — не
@@ -560,8 +560,8 @@ Console.WriteLine(string.Join(",", order));</code></pre>
     </div>
 
     <div class="pager">
-      <a href="cs10-sets-hashset-sortedset.html">← <span class="sp">Глава 10. Множества: HashSet и SortedSet</span></a>
-      <a href="cs12-linked-list.html"><span class="sp">Глава 12. LinkedList: связный список</span> →</a>
+      <a href="cs11-sets-hashset-sortedset.html">← <span class="sp">Глава 11. Множества: HashSet и SortedSet</span></a>
+      <a href="cs13-linked-list.html"><span class="sp">Глава 13. LinkedList: связный список</span> →</a>
     </div>
   </div>
 </div>

@@ -13,7 +13,7 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs05-ref-struct-span.html"><span class="sp">Глава 5. ref struct и Span: окно в память без аллокаций</span> →</a>
+  <a href="cs05-ref-out-in-discard.html"><span class="sp">Глава 5. <code>ref</code>, <code>out</code>, <code>in</code> и <code>_</code>: передача по ссылке на практике</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
@@ -93,7 +93,7 @@ False</code></pre>
     <p>То же самое верно для <code>double</code> (<code>System.Double</code>), <code>bool</code>,
       <code>long</code>, <code>DateTime</code>, <code>Guid</code>, <code>decimal</code>. В исходниках .NET они
       объявлены примерно так: <code>public readonly struct Int32 : …</code>. А <code>int?</code> — это
-      <code>Nullable&lt;int&gt;</code>, тоже структура (глава 18).</p>
+      <code>Nullable&lt;int&gt;</code>, тоже структура (глава 19).</p>
     <p>Вывод: «struct» — не экзотика, а способ сделать <em>свой</em> такой тип. Вопрос только в том, стоит ли:
       ниже — когда да, а когда нет.</p>
     <div class="box tip">
@@ -252,6 +252,9 @@ static double Length(in Point p) =&gt; Math.Sqrt(p.X * p.X + p.Y * p.Y);</code><
         <em>защитную копию</em> даже при <code>in</code> — и выгода исчезает. Поэтому <code>in</code> имеет смысл
         вместе с <code>readonly struct</code>.</li>
     </ul>
+    <p>Здесь <code>in</code> нужен только чтобы понять структуру. Полная картина — <code>ref</code>,
+      <code>out</code>, <code>in</code>, <code>out var</code> и discard <code>_</code>, с правилами, кодами
+      ошибок и замерами — в главе 5.</p>
 
 
     <h2>Равенство: почему «по умолчанию» дорого</h2>
@@ -336,7 +339,7 @@ list.Add(p);</code></pre>
         <strong>семантику значения</strong>, а не про «оптимизацию на всякий случай».</p>
     </div>
     <p>Особый подвид — <strong><code>ref struct</code></strong> (например, <code>Span&lt;T&gt;</code>): такие типы
-      принципиально живут только на стеке. Это отдельная тема — глава 5.</p>
+      принципиально живут только на стеке. Это отдельная тема — глава 6.</p>
 
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
@@ -353,8 +356,8 @@ list.Add(p);</code></pre>
     </div>
 
     <div class="pager">
-      <a href="cs03-equality.html">← <span class="sp">Глава 3. Равенство, хеш и ToString: Equals, GetHashCode, IEquatable, with</span></a>
-      <a href="cs05-ref-struct-span.html"><span class="sp">Глава 5. ref struct и Span: окно в память без аллокаций</span> →</a>
+      <a href="cs03-equality.html">← <span class="sp">Глава 3. Равенство, хеш и <code>ToString</code>: <code>Equals</code>, <code>GetHashCode</code>, <code>IEquatable</code>, <code>with</code></span></a>
+      <a href="cs05-ref-out-in-discard.html"><span class="sp">Глава 5. <code>ref</code>, <code>out</code>, <code>in</code> и <code>_</code>: передача по ссылке на практике</span> →</a>
     </div>
   </div>
 </div>

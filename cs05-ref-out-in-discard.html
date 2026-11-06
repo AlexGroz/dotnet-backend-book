@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · ref, out, in и _: передача по ссылке на практике</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs06-ref-struct-span.html"><span class="sp">Глава 6. ref struct и Span: окно в память без аллокаций</span> →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть I · Как устроена память</div>
+    <h1>Глава 5. <code>ref</code>, <code>out</code>, <code>in</code> и <code>_</code>: передача по ссылке на практике</h1>
+    <p class="sublead">Метод по умолчанию получает копию: структура копируется целиком, ссылка на объект —
+      тоже копия ссылки. <code>ref</code>, <code>out</code> и <code>in</code> — три способа сказать «не копируй»,
+      а <code>_</code> — способ сказать «результат мне не нужен».</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>Это глава про маленькие слова, которые встречаются в каждой второй сигнатуре:
+      <code>TryParse(s, out var n)</code>, <code>Interlocked.CompareExchange(ref x, …)</code>,
+      <code>Sum(in value)</code>, <code>TryDequeue(out var item, out _)</code>. Все четыре отвечают на один
+      вопрос: <strong>что именно попало в метод — копия или сама переменная?</strong></p>
+    <p>Короткая версия того же разговора есть и в .NET-книге (глава 5 «ref, out и in»), но там она нужна как
+      вводная к <code>Interlocked</code> и памяти. Здесь — язык целиком: правила, коды ошибок, область видимости
+      <code>out var</code>, discard и замеры.</p>
+
+    <h2>Проблема: метод получает копию</h2>
+    <p>Из главы 4 известно, что структура копируется при присваивании. Аргумент метода — то же самое:
+      <strong>в метод попадает копия</strong>, и всё, что метод с ней сделает, вызывающего не касается.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var p = new Point(1, 2);
+p.MoveThis(10);                  // метод вызван НА САМОЙ переменной
+Console.WriteLine(p.X);          // 11 — переменная изменилась
+
+var q = new Point(1, 2);
+MoveCopy(q);                     // а тут метод получил КОПИЮ
+Console.WriteLine(q.X);          // 1 — изменилась копия, оригинал цел
+
+static void MoveCopy(Point pt) =&gt; pt.X += 10;
+
+struct Point
+{
+    public int X, Y;
+    public Point(int x, int y) { X = x; Y = y; }
+    public void MoveThis(int by) { X += by; }
+}</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">11
+1</code></pre>
+    </div>
+    <p>С классом история та же, только копируется не объект, а <em>ссылка</em>: через неё объект менять можно,
+      а переприсвоить параметр — нет, это останется внутри метода.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var c = new Cnt { N = 1 };
+Reassign(c);
+Console.WriteLine(c.N);      // 1 — параметр стал указывать на другой объект, c не изменился
+
+static void Reassign(Cnt c) =&gt; c = new Cnt { N = 99 };
+
+class Cnt { public int N; }</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">1</code></pre>
+    </div>
+    <p>Дальше — четыре инструмента, каждый на свой случай:</p>
+    <ul>
+      <li><code>ref</code> — «измени <em>мою</em> переменную»;</li>
+      <li><code>out</code> — «запиши сюда <em>ещё один</em> результат»;</li>
+      <li><code>in</code> — «не копируй, но и не смей менять»;</li>
+      <li><code>_</code> — «этот результат мне не нужен».</li>
+    </ul>
+
+    <h2><code>ref</code>: «работай с моей переменной»</h2>
+    <p><code>ref</code> в сигнатуре означает, что параметр — не копия, а <strong>псевдоним</strong> переменной
+      вызывающего. Всё, что метод сделает с параметром, произойдёт с оригиналом: копии просто нет.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">int n = 5;
+Increase(ref n);
+Console.WriteLine(n);                 // 6 — изменилась наша переменная
+
+var pt = new Point(1, 2);
+MoveRef(ref pt);                      // структура тоже передаётся без копии
+Console.WriteLine(pt.X);              // 11
+
+int a = 1, b = 2;
+Swap(ref a, ref b);
+Console.WriteLine($"a={a} b={b}");    // a=2 b=1
+
+static void Increase(ref int x) =&gt; x++;
+static void MoveRef(ref Point pt) =&gt; pt.X += 10;
+static void Swap(ref int x, ref int y) { int t = x; x = y; y = t; }</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">6
+11
+a=2 b=1</code></pre>
+    </div>
+    <p>Три правила объясняют почти все ошибки с <code>ref</code>:</p>
+    <ul>
+      <li><strong>Аргумент должен быть переменной.</strong> У литерала, результата выражения и свойства нет
+        адреса, который можно взять.</li>
+      <li><strong>Переменная должна быть инициализирована</strong> до вызова: метод имеет право её
+        прочитать.</li>
+      <li><strong><code>ref</code> пишется с двух сторон</strong> — в сигнатуре и у вызывающего. Это сделано
+        специально: по вызову видно, что он может изменить вашу переменную.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">int n = 5;
+Increase(n);                  // error CS1620: Argument 1 must be passed with the 'ref' keyword
+Increase(ref 5);              // error CS1510: A ref or out value must be an assignable variable
+Increase(ref order.Total);    // error CS0206: A non ref-returning property or indexer may not be used
+                              //              as an out or ref value</code></pre>
+    </div>
+    <p>Типичное применение: <code>Swap</code>, счётчики в вызывающем коде, «заполни мой буфер» — словом, когда
+      метод должен оставить результат <em>в вашей</em> переменной. Отдельный случай — методы, которым ссылка
+      нужна по определению: <code>Interlocked.CompareExchange(ref x, …)</code> не смог бы работать с копией.</p>
+
+    <h2><code>out</code>: «верни мне ещё одно значение»</h2>
+    <p><code>out</code> — тоже «по ссылке», но с другим контрактом: метод <strong>обязан</strong> записать в
+      параметр значение, а вызывающий <strong>не обязан</strong> его инициализировать. Из этой пары
+      «обязан записать / можно не готовить» вырос главный шаблон BCL — <code>Try*</code>: успех возвращается
+      <code>bool</code>, а результат уходит в <code>out</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">if (TryHalf(10, out int half))
+    Console.WriteLine($"чётное, половина = {half}");   // чётное, половина = 5
+
+Console.WriteLine($"{TryHalf(7, out int odd)} {odd}"); // False 3 — посчитал, но сказал «нет»
+
+static bool TryHalf(int value, out int half)
+{
+    half = value / 2;          // записать ОБЯЗАНЫ до любого return
+    return value % 2 == 0;
+}</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">чётное, половина = 5
+False 3</code></pre>
+    </div>
+    <p>Обратите внимание: во второй строке метод вернул <code>false</code>, но <code>odd</code> всё равно
+      получил значение <code>3</code>. <code>out</code>-параметр заполняется <em>всегда</em> — «не получилось»
+      сообщается отдельным <code>bool</code>, а не пустотой в <code>out</code>.</p>
+    <p>Компилятор следит за контрактом с обеих сторон:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static bool TryHalf(int v, out int half)
+{
+    if (v &gt; 0) half = v / 2;   // error CS0177: The out parameter 'half' must be assigned to
+    return true;               //              before control leaves the current method
+}
+
+static void ReadFirst(out int x)
+{
+    Console.WriteLine(x);      // error CS0269: Use of unassigned out parameter 'x'
+    x = 1;
+}
+
+TryGet(v);                     // error CS1620: Argument 1 must be passed with the 'out' keyword</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Почему <code>Try*</code>, а не исключение</span>
+      <p>«Ключа нет», «строка не число», «очередь пуста» — это <em>ожидаемые</em> исходы, а не аварии.
+        Исключение на каждый такой случай дорого: раскрутка стека, сбор <code>StackTrace</code>, а в цикле — ещё
+        и постоянный мусор. <code>Try*</code> возвращает ответ бесплатно. Когда исключения уместны, а когда
+        нет — глава 20.</p>
+    </div>
+
+
+    <h2><code>out var</code>: переменная, объявленная на месте</h2>
+    <p>Раньше рядом с вызовом приходилось заводить переменную заранее. С C# 7 её объявляют прямо в вызове, а тип
+      выводится из сигнатуры метода:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">if (int.TryParse("42", out var parsed))
+    Console.WriteLine(parsed + 1);       // 43
+Console.WriteLine(parsed);               // 42 — переменная жива до конца блока
+
+var q = new Queue&lt;string&gt;();
+q.Enqueue("a"); q.Enqueue("b");
+while (q.TryDequeue(out var item))
+    Console.Write(item + " ");           // a b
+// Console.WriteLine(item);              // error CS0103: The name 'item' does not exist in the current context</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">43
+42
+a b</code></pre>
+    </div>
+    <p>Тонкость ровно одна, но её ловят на практике: <strong>область видимости зависит от конструкции</strong>.
+      В <code>if</code> переменная объявляется в <em>окружающем блоке</em> — поэтому <code>parsed</code> видна и
+      после <code>if</code>. В <code>while</code> условие образует свою область, и после цикла
+      <code>item</code> не существует — это и есть ошибка CS0103 в комментарии.</p>
+
+    <h2><code>_</code> — discard: «значение не нужно»</h2>
+    <p>Иногда результат нужен только чтобы понять «получилось ли». Тогда на месте переменной пишут
+      <code>_</code> — <strong>discard</strong> (дословно «выбрасывание»). Это <em>не переменная</em>: у неё нет
+      типа, её нельзя прочитать и нельзя передать дальше. Встречается в четырёх местах:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(int.TryParse("abc", out _));    // False — важно только «да или нет»
+
+var pq = new PriorityQueue&lt;string, int&gt;();
+pq.Enqueue("x", 1);
+while (pq.TryDequeue(out var el, out _))          // приоритет не нужен
+    Console.Write(el + " ");                      // x
+
+Func&lt;int, int, int&gt; twice = (_, b) =&gt; b * 2;     // первый аргумент не нужен
+Console.WriteLine(twice(1, 21));                  // 42
+
+var (_, name) = (7, "x");                         // деконструкция кортежа
+Console.WriteLine(name);                          // x</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">False
+x
+42
+x</code></pre>
+    </div>
+    <p>Четвёртый случай — отказ от <em>результата вызова</em>:
+      <code>_ = Task.Run(() =&gt; Work());</code>. Это уже не про параметры, а про «я сознательно не жду задачу»;
+      чем это опасно на сервере — глава 18. А чтобы компилятор не ругался предупреждением CS4014 («вызов не
+      ожидается»), <code>_</code> как раз и ставят.</p>
+    <div class="box warn">
+      <span class="t">Ловушка: <code>var _ = 5</code> — это не discard</span>
+      <p>Если написать <code>var _ = 5;</code>, вы объявите <strong>обычную переменную с именем
+        <code>_</code></strong>, и её можно прочитать: <code>Console.WriteLine(_)</code> напечатает
+        <code>5</code>. Discard — это <em>отсутствие</em> переменной, и он возможен только в контекстах
+        <code>out _</code>, <code>(_, x) = …</code> и параметров лямбды. Разница видна по коду ошибки: попытка
+        прочитать настоящий discard даёт
+        <code>CS0103: The name '_' does not exist in the current context</code>.</p>
+    </div>
+    <p>В лямбде с двумя параметрами (C# 9 и новее) можно выбросить и оба сразу — <code>(_, _) =&gt; …</code>,
+      если важны только побочные действия, а не аргументы.</p>
+
+
+    <h2><code>in</code>: без копии, но только на чтение</h2>
+    <p><code>in</code> — компромисс между «без копии» и «нельзя менять»: параметр передаётся по ссылке, но метод
+      не имеет права его изменять. Смысл появляется на больших структурах, которые жалко копировать ради
+      чтения.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var big = new Big(1, 2, 3, 4);
+Console.WriteLine(SumByValue(big));     // 10 — структура скопирована в параметр
+Console.WriteLine(SumIn(in big));       // 10 — та же ссылка, без копии
+
+static long SumByValue(Big b) =&gt; b.A + b.B + b.C + b.D;
+static long SumIn(in Big b) =&gt; b.A + b.B + b.C + b.D;
+
+struct Big
+{
+    public long A, B, C, D;
+    public Big(long a, long b, long c, long d) { A = a; B = b; C = c; D = d; }
+}</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">10
+10</code></pre>
+    </div>
+    <p>Запись в <code>in</code>-параметр компилятор запрещает:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static long Bad(in Big b) { b.A = 1; return b.A; }
+// error CS8332: Cannot assign to a member of variable 'b' or use it as the right hand side of
+// a ref assignment because it is a readonly variable</code></pre>
+    </div>
+    <div class="box danger">
+      <span class="t">Ловушка: <code>in</code> не отменяет копию насовсем</span>
+      <p>Если внутри метода вызвать у <code>in</code>-параметра <em>изменяющий</em> метод, компилятор не
+        ошибётся: он молча сделает <strong>защитную копию</strong>, и все изменения пропадут.</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">var s = new S { A = 1 };
+Bump(in s);
+Console.WriteLine(s.A);        // 1 — Bump менял копию
+
+static void Bump(in S s) =&gt; s.Grow();
+
+struct S { public long A; public void Grow() { A++; } }</code></pre>
+        <p class="cap">Вывод</p>
+        <pre><code class="language-text">1</code></pre>
+      </div>
+      <p>Поэтому структуры, которые передают через <code>in</code>, объявляют <code>readonly struct</code>
+        (глава 4): у неё нет изменяющих методов, защитных копий не возникает, а намерение видно в типе.</p>
+    </div>
+
+    <h2>Сколько это стоит: два замера</h2>
+    <p>Первое ожидание — «<code>in</code> всегда быстрее, копии ведь нет». На маленьких структурах это неправда:
+      JIT встраивает метод и передаёт поля в регистрах, так что копирования как такового не остаётся.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">struct 32 байта, 200 млн вызовов, Release:
+by value 187 ms, in 186 ms        — разницы нет</code></pre>
+    </div>
+    <p>А теперь структура на 512 байт и метод, который JIT не встраивает
+      (<code>[MethodImpl(MethodImplOptions.NoInlining)]</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">struct 512 байт, 20 млн вызовов, Release, NoInlining:
+by value 615 ms, in 36 ms         — в 17 раз</code></pre>
+    </div>
+    <p>Вывод не «пишите <code>in</code> везде», а «сначала измерьте». Для <code>int</code>, <code>DateTime</code>,
+      <code>Guid</code>, пары полей — смысла нет (только шум в сигнатуре). Для структур в десятки байт, которые
+      передают в горячем цикле, — есть. Как мерить так, чтобы цифры не врали, — глава 21 .NET-книги.</p>
+    <p><strong>Когда <code>in</code> не работает как задумано:</strong> если аргумент — не переменная, а,
+      например, свойство или результат выражения, компилятор сначала создаёт временную переменную, и копия всё
+      равно случается. Проверять надо на реальном коде, а не на «кажется, так быстрее».</p>
+
+
+    <h2><code>ref</code>-локальные и <code>ref</code>-возврат</h2>
+    <p>Тот же смысл работает не только у параметров: переменная может быть <em>псевдонимом</em> чужого
+      значения, и менять через неё — значит менять оригинал.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var arr = new[] { 10, 20, 30 };
+ref int slot = ref arr[1];                 // slot — второе имя для arr[1]
+slot = 99;
+Console.WriteLine(string.Join(",", arr));  // 10,99,30</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">10,99,30</code></pre>
+    </div>
+    <p>На этом механизме держится <code>Span&lt;T&gt;</code>: его индексатор возвращает <code>ref</code> на
+      элемент массива, а не копию. Как это устроено и почему такая ссылка не может уехать в кучу — глава 6.
+      Ограничение, которое стоит помнить: <code>ref</code>-локальную нельзя захватить в лямбду —
+      <code>error CS8175: Cannot use ref local 'r' inside an anonymous method, lambda expression, or query
+      expression</code>.</p>
+
+    <h2>Таблица: четыре способа передать параметр</h2>
+    <table>
+      <thead><tr><th>Модификатор</th><th>Копия</th><th>Инициализация до вызова</th>
+        <th>Метод обязан присвоить</th><th>Может менять</th><th>Типичное применение</th></tr></thead>
+      <tbody>
+        <tr><td>без модификатора</td><td>да</td><td>да</td><td>—</td><td>только копию</td>
+          <td>по умолчанию — для всего, что не горячий путь</td></tr>
+        <tr><td><code>ref</code></td><td>нет</td><td>да</td><td>—</td><td>да</td>
+          <td><code>Swap</code>, <code>Interlocked</code>, «измени мою переменную»</td></tr>
+        <tr><td><code>out</code></td><td>нет</td><td>нет</td><td>да</td><td>да</td>
+          <td>второй результат: <code>TryParse</code>, <code>TryGetValue</code>, <code>TryDequeue</code></td></tr>
+        <tr><td><code>in</code></td><td>нет</td><td>да</td><td>—</td><td>нет</td>
+          <td>большая структура только на чтение</td></tr>
+      </tbody>
+    </table>
+    <p>Что стоит запомнить по таблице: <code>ref</code> и <code>out</code> отличаются <em>только</em> тем, кто
+      отвечает за значение до вызова. Всё остальное у них одинаково — и то и другое даёт методу доступ к вашей
+      переменной.</p>
+
+    <h2><code>out</code> или кортеж?</h2>
+    <p>С C# 7 «второй результат» можно вернуть кортежем, и обычно это читается лучше, потому что значения
+      приходят в одном объекте, а не через параметры:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var (ok, half) = TryHalfTuple(10);
+Console.WriteLine($"{ok} {half}");       // True 5
+
+static (bool ok, int half) TryHalfTuple(int v) =&gt; (v % 2 == 0, v / 2);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">True 5</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Когда</th><th>Что выбрать</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>Метод уже следует шаблону <code>Try*</code> (в BCL или в вашем коде)</td><td><code>out</code></td>
+          <td>Так устроен весь BCL: <code>TryParse</code>, <code>TryGetValue</code>, <code>TryDequeue</code>.
+          Ломать единообразие хуже, чем сэкономить строку</td></tr>
+        <tr><td>Результатов два-три и хочется вернуть их вместе</td><td>кортеж</td>
+          <td>Читается как одно значение, работает в <code>async</code>, аллокаций нет —
+          <code>ValueTuple</code> это структура</td></tr>
+        <tr><td>Результатов много или они значат что-то своё</td><td>небольшой <code>record</code></td>
+          <td>У полей есть имена и смысл; кортеж из шести элементов никто не запомнит</td></tr>
+        <tr><td>Нужен и успех, и значение, и это <code>async</code>-метод</td><td>кортеж или <code>record</code></td>
+          <td><code>out</code> в <code>async</code> запрещён: <code>CS1988: Async methods cannot have ref, in or
+          out parameters</code></td></tr>
+      </tbody>
+    </table>
+
+
+    <h2>Где это встречается в BCL</h2>
+    <p>Дальше по книге эти модификаторы будут попадаться постоянно — вот карта, чтобы не спотыкаться:</p>
+    <table>
+      <thead><tr><th>Сигнатура</th><th>Что даёт</th><th>Где разобрано</th></tr></thead>
+      <tbody>
+        <tr><td><code>int.TryParse(s, out int value)</code></td><td>разбор строки без исключения</td>
+          <td>—</td></tr>
+        <tr><td><code>Math.DivRem(7, 2, out int rem)</code> → <code>3</code>, <code>rem = 1</code></td>
+          <td>частное и остаток одним вызовом</td><td>—</td></tr>
+        <tr><td><code>Dictionary.TryGetValue(key, out var value)</code></td>
+          <td>одно обращение к таблице вместо двух (<code>ContainsKey</code> + индексатор)</td>
+          <td>глава 10</td></tr>
+        <tr><td><code>Queue.TryDequeue(out var item)</code></td><td>цикл без проверки <code>Count</code></td>
+          <td>глава 12</td></tr>
+        <tr><td><code>PriorityQueue.TryDequeue(out var el, out var priority)</code></td>
+          <td>два <code>out</code> в одном вызове</td><td>глава 12</td></tr>
+        <tr><td><code>Interlocked.CompareExchange(ref int, …)</code></td>
+          <td>атомарная замена: нужен именно <code>ref</code>, иначе некому менять</td>
+          <td>глава 13 .NET-книги</td></tr>
+      </tbody>
+    </table>
+    <p>Тот же <code>Math.DivRem</code> — самый короткий пример «зачем <code>out</code> вообще придумали»:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">int quotient = Math.DivRem(7, 2, out int remainder);
+Console.WriteLine($"частное {quotient}, остаток {remainder}");   // частное 3, остаток 1</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">частное 3, остаток 1</code></pre>
+    </div>
+
+
+    <h2>Что спрашивают на собеседовании</h2>
+    <table>
+      <thead><tr><th>Вопрос</th><th>Короткий ответ</th></tr></thead>
+      <tbody>
+        <tr><td>Чем <code>ref</code> отличается от <code>out</code>?</td>
+          <td>Оба передают по ссылке. <code>ref</code>: значение уже есть, метод может читать и менять.
+          <code>out</code>: значение обязан записать метод, до вызова оно не нужно.</td></tr>
+        <tr><td>Зачем <code>in</code>, если есть <code>ref</code>?</td>
+          <td><code>in</code> запрещает запись — контракт «только читаю». Для больших структур: без копии и без
+          риска, что метод их испортит.</td></tr>
+        <tr><td>Почему <code>ref</code>/<code>out</code> нельзя в <code>async</code>?</td>
+          <td>Ссылка указывает на стек вызывающего, а тело <code>async</code>-метода после первого
+          <code>await</code> продолжается уже в другом месте. Компилятор: CS1988. Для итераторов с
+          <code>yield</code> — CS1623.</td></tr>
+        <tr><td>Можно <code>ref</code> на свойство?</td>
+          <td>Нет, CS0206: свойство — это вызов метода, у него нет адреса. Исключение —
+          <code>ref</code>-возвращающие свойства.</td></tr>
+        <tr><td>Что такое discard?</td>
+          <td><code>_</code> — «не сохраняй»: <code>out _</code>, параметр лямбды, элемент деконструкции. Не
+          переменная: прочитать нельзя.</td></tr>
+        <tr><td><code>TryGetValue</code> правда быстрее <code>ContainsKey</code> + индексатора?</td>
+          <td>Да: в варианте из двух вызовов ключ ищется дважды. <code>TryGetValue</code> ищет один раз и отдаёт
+          значение через <code>out</code>.</td></tr>
+        <tr><td>Когда <code>in</code> реально ускоряет?</td>
+          <td>Когда структура большая (десятки байт) и метод не встраивается. На 32 байтах разницы может не быть
+          вовсе — надо мерить.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong>Забыли модификатор у вызывающего.</strong>
+        <code>CS1620: Argument 1 must be passed with the 'ref' keyword</code> (или <code>'out'</code>).
+        Модификатор пишется с двух сторон намеренно.</li>
+      <li><strong>Передали не переменную.</strong> Литерал — <code>CS1510</code>, свойство —
+        <code>CS0206</code>.</li>
+      <li><strong><code>out</code> не присвоен на всех путях</strong> — <code>CS0177</code>; попытка прочитать
+        его до присваивания — <code>CS0269</code>.</li>
+      <li><strong><code>in</code> + изменяющий метод = тихая защитная копия.</strong> Кода ошибки нет, просто
+        изменения пропали. Лечится <code>readonly struct</code>.</li>
+      <li><strong><code>out var</code> в <code>while</code> не видна после цикла</strong> (CS0103), а в
+        <code>if</code> — видна: условие цикла образует свою область видимости.</li>
+      <li><strong><code>var _ = 5</code> — не discard</strong>, а настоящая переменная с именем
+        <code>_</code>.</li>
+      <li><strong><code>ref</code> в лямбде.</strong> Захватить <code>ref</code>-локальную нельзя — CS8175.</li>
+      <li><strong>«Поставлю <code>in</code> — станет быстрее»</strong> без замера: на маленьких структурах JIT и
+        так обходится без копии.</li>
+    </ul>
+
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li>По умолчанию <strong>параметр — копия</strong>: что метод с ней сделает, вызывающий не увидит.</li>
+        <li><code>ref</code> — псевдоним переменной: инициализирована до вызова, может меняться, пишется с двух
+          сторон.</li>
+        <li><code>out</code> — «обязан записать»: до вызова не нужна, после вызова заполнена всегда. Отсюда шаблон
+          <code>Try*</code> во всём BCL.</li>
+        <li><code>out var</code> — объявление на месте; в <code>if</code> переменная живёт до конца блока, в
+          <code>while</code> — только внутри цикла.</li>
+        <li><code>_</code> — <strong>discard</strong>: значения не существует, прочитать нельзя.
+          <code>var _ = 5</code> — это уже обычная переменная.</li>
+        <li><code>in</code> — без копии, только чтение; выгода есть на больших структурах, и её надо
+          <strong>мерить</strong>.</li>
+        <li>В <code>async</code> и итераторах <code>ref</code>/<code>out</code>/<code>in</code> запрещены
+          (CS1988, CS1623) — там возвращают кортеж.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="cs04-struct.html">← <span class="sp">Глава 4. struct: что это и когда применять</span></a>
+      <a href="cs06-ref-struct-span.html"><span class="sp">Глава 6. ref struct и Span: окно в память без аллокаций</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

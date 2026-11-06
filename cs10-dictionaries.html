@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 9 · Словари: Dictionary на практике</title>
+<title>Глава 10 · Словари: Dictionary на практике</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,19 +13,19 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs10-sets-hashset-sortedset.html"><span class="sp">Глава 10. Множества: HashSet и SortedSet</span> →</a>
+  <a href="cs11-sets-hashset-sortedset.html"><span class="sp">Глава 11. Множества: HashSet и SortedSet</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 9. Словари: Dictionary на практике</h1>
+    <h1>Глава 10. Словари: Dictionary на практике</h1>
     <p class="sublead">Полный разбор <code>Dictionary</code>: что бросает исключение, а что молча возвращает
       <code>default</code> (и чему он равен), из чего состоит элемент перебора, почему порядок перебора нельзя
       считать порядком вставки, почему изменяемый ключ теряет запись и как этого не допустить. Множества —
-      глава 10, очереди и стеки — глава 11.</p>
+      глава 11, очереди и стеки — глава 12.</p>
     <p><span class="tag core">основная глава</span></p>
 
-    <p>Глава 6 объясняла, <em>почему</em> generic-коллекции лучше non-generic, и давала таблицу «что выбрать».
+    <p>Глава 7 объясняла, <em>почему</em> generic-коллекции лучше non-generic, и давала таблицу «что выбрать».
       Здесь — вторая половина: <strong>как этим пользоваться</strong>, не наступая на грабли. Каждый пример
       ниже прогнан на .NET 8, в блоках «вывод» — реальный результат, а не пересказ.</p>
     <p><code>Dictionary</code> построен на <strong>хеш-таблице</strong>: ключ превращается в хеш, хеш — в
@@ -263,7 +263,7 @@ Console.WriteLine(string.Join(",", dict.Keys));          // у Dictionary пор
 Console.WriteLine(string.Join(",", sortedDict.Keys));    // всегда по возрастанию ключа
 Console.WriteLine(string.Join(",", sortedList.Keys));
 
-// обратный порядок задаётся компаратором (глава 8)
+// обратный порядок задаётся компаратором (глава 9)
 var desc = new SortedDictionary&lt;int, string&gt;(Comparer&lt;int&gt;.Create((a, b) =&gt; b.CompareTo(a)));
 desc[1] = "a"; desc[2] = "b"; desc[3] = "c";
 Console.WriteLine(string.Join(",", desc.Keys));
@@ -293,7 +293,7 @@ Console.WriteLine(sortedList.Keys[0] + " = " + sortedList.Values[0]);</code></pr
       </tbody>
     </table>
     <p>Обоим нужны <em>сравнимые</em> ключи — <code>IComparable&lt;T&gt;</code> или компаратор в конструкторе
-      (глава 8). Ключ без сравнения упадёт только на второй вставке, когда появится с чем сравнивать, причём
+      (глава 9). Ключ без сравнения упадёт только на второй вставке, когда появится с чем сравнивать, причём
       разными исключениями: <code>SortedDictionary</code> — <code>ArgumentException: At least one object must
       implement IComparable.</code>, <code>SortedList</code> — <code>InvalidOperationException: Failed to
       compare two elements in the array.</code></p>
@@ -489,7 +489,7 @@ Console.WriteLine(lookup[99].Count());               // 0 — пустая по�
     <ul>
       <li><strong>Только чтение после заполнения</strong> — обычный <code>Dictionary</code> подходит:
         конкурентные чтения безопасны. Чтобы это было видно по типу, наружу отдают
-        <code>IReadOnlyDictionary&lt;TKey, TValue&gt;</code> (глава 6).</li>
+        <code>IReadOnlyDictionary&lt;TKey, TValue&gt;</code> (глава 7).</li>
       <li><strong>Изменение из нескольких потоков</strong> — <code>ConcurrentDictionary&lt;TKey,
         TValue&gt;</code>: атомарные операции вместо «прочитать-изменить-записать».</li>
       <li><strong>Редкие изменения, много чтений</strong> — <code>ImmutableDictionary</code> (изменение
@@ -514,9 +514,9 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
 
 
     <p>Куда смотреть дальше: общий разбор «что хорошо / что дорого» и выбор интерфейса для сигнатуры
-      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — глава 6;
-      множества — <strong>глава 10</strong>; очереди и стеки — <strong>глава 11</strong>; связный список —
-      <strong>глава 12</strong>, и там же, в конце главы 11, — сводная шпаргалка «операция → коллекция» по всей
+      (<code>IReadOnlyDictionary</code>, <code>IReadOnlyList</code>, <code>IEnumerable</code>) — глава 7;
+      множества — <strong>глава 11</strong>; очереди и стеки — <strong>глава 12</strong>; связный список —
+      <strong>глава 13</strong>, и там же, в конце главы 12, — сводная шпаргалка «операция → коллекция» по всей
       части II.</p>
 
 
@@ -531,7 +531,7 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
       <li><strong>Не звать <code>ToDictionary</code> на данных с дублями</strong> — <code>ToLookup</code> или
         <code>GroupBy</code>.</li>
       <li><strong>Не менять коллекцию во время <code>foreach</code></strong> —
-        <code>InvalidOperationException</code> (глава 13).</li>
+        <code>InvalidOperationException</code> (глава 14).</li>
       <li><strong>Не передавать <code>Dictionary</code> между потоками без синхронизации.</strong></li>
     </ul>
 
@@ -554,8 +554,8 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
         <li>Ключ должен быть неизменяемым: мутация ломает <code>GetHashCode</code>, и запись становится
           недостижимой (и неудаляемой). Правильно — неизменяемый <code>record</code>, ключ-<code>Id</code> или
           удаление записи <em>до</em> мутации. Одинаковость ключей задаёт <code>IEqualityComparer</code>.</li>
-        <li>Множества и очереди — в следующих главах: <code>HashSet</code>/<code>SortedSet</code> — глава 10,
-          <code>Queue</code>/<code>Stack</code>/<code>PriorityQueue</code> — глава 11.</li>
+        <li>Множества и очереди — в следующих главах: <code>HashSet</code>/<code>SortedSet</code> — глава 11,
+          <code>Queue</code>/<code>Stack</code>/<code>PriorityQueue</code> — глава 12.</li>
         <li>Дубли ключей — <code>ToLookup</code>/<code>GroupBy</code>, а не <code>ToDictionary</code>;
           запись из нескольких потоков — <code>ConcurrentDictionary</code>, «только чтение» —
           <code>FrozenDictionary</code>.</li>
@@ -563,8 +563,8 @@ Console.WriteLine(cache.TryRemove(1, out var rm) + " " + rm);   // True 11</code
     </div>
 
     <div class="pager">
-      <a href="cs08-comparison-and-sorting.html">← <span class="sp">Глава 8. Сравнение и порядок: IComparable, IComparer и сортировка</span></a>
-      <a href="cs10-sets-hashset-sortedset.html"><span class="sp">Глава 10. Множества: HashSet и SortedSet</span> →</a>
+      <a href="cs09-comparison-and-sorting.html">← <span class="sp">Глава 9. Сравнение и порядок: IComparable, IComparer и сортировка</span></a>
+      <a href="cs11-sets-hashset-sortedset.html"><span class="sp">Глава 11. Множества: HashSet и SortedSet</span> →</a>
     </div>
   </div>
 </div>

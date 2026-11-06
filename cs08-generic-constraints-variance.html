@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 7 · Generic глубже: ограничения, вариантность и generic math</title>
+<title>Глава 8 · Generic глубже: ограничения, вариантность и generic math</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,18 +13,18 @@
 <div class="topbar"><div class="in">
   <a href="csharp.html">← Оглавление</a>
   <span class="booktitle">C#: язык и типы</span>
-  <a href="cs08-comparison-and-sorting.html"><span class="sp">Глава 8. Сравнение и порядок: IComparable, IComparer и сортировка</span> →</a>
+  <a href="cs09-comparison-and-sorting.html"><span class="sp">Глава 9. Сравнение и порядок: IComparable, IComparer и сортировка</span> →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">C# · Часть II · Коллекции и перечисления</div>
-    <h1>Глава 7. Generic глубже: ограничения, вариантность и generic math</h1>
+    <h1>Глава 8. Generic глубже: ограничения, вариантность и generic math</h1>
     <p class="sublead">Что именно компилятор знает о <code>T</code>, как расширить этот список через
       <code>where</code>, почему <code>List&lt;string&gt;</code> нельзя отдать туда, где ждут
       <code>List&lt;object&gt;</code>, и как складывать «числа неизвестного типа».</p>
     <p><span class="tag core">основная глава</span></p>
 
-    <p>В главе 6 была механика: параметр типа, подстановка, открытый и закрытый тип. Здесь — то, что из этой
+    <p>В главе 7 была механика: параметр типа, подстановка, открытый и закрытый тип. Здесь — то, что из этой
       механики следует на практике. Главная мысль главы в одном предложении: <strong>ограничения
       (<code>where</code>) — единственный способ сообщить компилятору, что у <code>T</code> есть что-то,
       чего нет у всех типов</strong>. Больше о <code>T</code> он не знает ничего.</p>
@@ -95,7 +95,7 @@ error CS0401: The new() constraint must be the last constraint specified</code><
 
     <h2><code>new()</code>, <code>class</code>, <code>struct</code>: что можно вызвать</h2>
     <p><strong><code>new()</code></strong> — обещание «есть открытый конструктор без параметров». Почему без
-      него не работает <code>new T()</code> и что говорит CS0304 — разобрано в главе 6; здесь важны три
+      него не работает <code>new T()</code> и что говорит CS0304 — разобрано в главе 7; здесь важны три
       следствия, которые всплывают в реальном коде.</p>
     <ul>
       <li><strong>Абстрактные классы не проходят.</strong> Даже с <code>new()</code> подставить абстрактный
@@ -228,7 +228,7 @@ Console.WriteLine(Avg(new[] { 1.0, 2.0 }));// 1.5    — double</code></pre>
       <code>Ã</code>). Не подходят <code>string</code>, <code>bool</code>, <code>DateTime</code>,
       <code>Guid</code>. Диагностика зависит от вида типа: для структуры это CS0315 («нет упаковочного
       преобразования»), для класса — CS0311 («нет ссылочного»), а <code>Sum(1, "a")</code> вообще не даёт
-      вывести <code>T</code> (CS0411). Все три вывода компилятора — в главе 6.</p>
+      вывести <code>T</code> (CS0411). Все три вывода компилятора — в главе 7.</p>
 
 
     <h2>Вариантность: когда <code>IEnumerable&lt;A&gt;</code> можно заменить на <code>IEnumerable&lt;B&gt;</code></h2>
@@ -279,7 +279,7 @@ Action&lt;string&gt; actString = actObject;                     // ✔ пара�
 actString("ok");                                          // ok</code></pre>
     </div>
     <p>Логика одной фразой: <strong>если коллекция только отдаёт элементы, её можно считать коллекцией более
-      общих типов; если только принимает — более узких</strong>. Отсюда и правило проектирования из главы 6:
+      общих типов; если только принимает — более узких</strong>. Отсюда и правило проектирования из главы 7:
       возвращайте <code>IEnumerable&lt;T&gt;</code>/<code>IReadOnlyList&lt;T&gt;</code> (они ковариантны),
       а не <code>List&lt;T&gt;</code>.</p>
     <div class="box note">
@@ -410,8 +410,8 @@ parameter 'TEnum' in the generic type or method 'Enum.IsDefined&lt;TEnum&gt;(TEn
     </div>
 
     <div class="pager">
-      <a href="cs06-collections.html">← <span class="sp">Глава 6. Коллекции: generic против non-generic</span></a>
-      <a href="cs08-comparison-and-sorting.html"><span class="sp">Глава 8. Сравнение и порядок: IComparable, IComparer и сортировка</span> →</a>
+      <a href="cs07-collections.html">← <span class="sp">Глава 7. Коллекции: generic против non-generic</span></a>
+      <a href="cs09-comparison-and-sorting.html"><span class="sp">Глава 9. Сравнение и порядок: IComparable, IComparer и сортировка</span> →</a>
     </div>
   </div>
 </div>
