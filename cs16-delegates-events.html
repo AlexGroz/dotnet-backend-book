@@ -122,16 +122,11 @@ Console.WriteLine(add(2, 3));    // 5</code></pre>
       <code>twice(1, 21)</code> даёт <code>42</code> — первый аргумент принят и выброшен. А если метод
       возвращает два значения, его пишут как <code>(bool ok, int half) Try(…) =&gt; (…, …)</code> — это
       выражение-тело плюс кортеж из главы 6.</p>
-    <div class="box note">
-      <span class="t">Почему в <code>(sender, total) =&gt; …</code> ничего не объявлено снаружи</span>
-      <p>Параметры лямбды <strong>объявлены в ней самой</strong>, в скобках, — как в обычном методе. Отдельной
-        строки «где-то задать <code>sender</code>» не нужно: значения приходят в момент вызова, а не при
-        подписке. Например, у события <code>event EventHandler&lt;decimal&gt; Paid</code> целевой тип —
-        <code>void (object? sender, decimal total)</code>, и значения в него кладёт тот, кто поднимает
-        событие: <code>Paid?.Invoke(this, Total)</code> — <code>this</code> уходит в <code>sender</code>,
-        <code>Total</code> — в <code>total</code>. Ненужный параметр заменяют на <code>_</code>:
-        <code>(_, total) =&gt; …</code>. Подробный разбор — «Паттерны в .NET», глава 8.</p>
-    </div>
+    <p>Имена параметров при этом ваши: <code>Func&lt;int, int, int&gt; f = (a, b) =&gt; a + b;</code> и
+      <code>Func&lt;int, int, int&gt; g = (x, y) =&gt; x + y;</code> — одна и та же сигнатура
+      <code>int (int, int)</code>, просто с разными именами; на поведение имена не влияют. А на событиях у
+      лямбды появляется параметр <code>sender</code>, которого вы нигде не объявляли, — почему так, разобрано
+      ниже, в разделе «<code>sender</code>, <code>_</code> и почему параметров ровно два».</p>
     <p><strong>Несколько параметров без скобок нельзя:</strong> <code>x =&gt; …</code> — один параметр,
       <code>(a, b) =&gt; …</code> — два и больше (или ни одного: <code>() =&gt; …</code>). Типы можно указать
       явно, если компилятор не догадывается: <code>(decimal a, decimal b) =&gt; a * b</code>.</p>
@@ -250,7 +245,7 @@ Unhandled exception. System.InvalidOperationException: первый
 {
     public decimal Total { get; init; }
 
-    // EventHandler&lt;decimal&gt; = void (object? sender, decimal total)
+    // EventHandler&lt;decimal&gt; = void (object? sender, decimal e)
     public event EventHandler&lt;decimal&gt;? Paid;
 
     public void Pay()
@@ -279,11 +274,62 @@ order.Pay();
 [склад] зарезервировать товары
 [аналитика] +1 оплата на 1500</code></pre>
     </div>
-    <p>Три вещи, которые здесь стоит проговорить явно:</p>
+
+    <h2><code>sender</code>, <code>_</code> и почему параметров ровно два</h2>
+    <p>Подписка <code>order.Paid += (_, total) =&gt; …</code> вызывает вопрос: почему в ней нет
+      <code>sender</code>? Ответ: его сигнатуру задаёт <strong>тип события</strong>, а не лямбда.
+      <code>EventHandler&lt;decimal&gt;</code> объявлен в BCL как делегат
+      <code>void (object? sender, decimal e)</code> — значит у обработчика <em>всегда</em> два параметра: первый
+      «кто поднял событие», второй «данные». Лямбда только даёт этим параметрам имена — или не даёт: в BCL
+      второй параметр называется <code>e</code>, в наших лямбдах он <code>total</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var order = new Order { Total = 1500m };
+
+order.Paid += (sender, total) =&gt; Console.WriteLine($"[sender] {sender}");
+order.Paid += (sender, total) =&gt; Console.WriteLine($"[тот же объект?] {ReferenceEquals(sender, order)}");
+order.Paid += (sender, total) =&gt;
+{
+    if (sender is Order o)                    // тип sender — object?, нужен разбор
+        Console.WriteLine($"[разобрали sender] заказ на {o.Total}");
+};
+order.Paid += (_, total) =&gt; Console.WriteLine($"[аналитика] +1 оплата на {total}");
+order.Paid += (_, _) =&gt; Console.WriteLine("[оба не нужны]");        // C# 9+
+
+order.Pay();</code></pre>
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">списываем 1500
+[sender] Order
+[тот же объект?] True
+[разобрали sender] заказ на 1500
+[аналитика] +1 оплата на 1500
+[оба не нужны]</code></pre>
+    </div>
+    <p>Что здесь видно:</p>
     <ul>
-      <li><strong>Параметры <code>(sender, total)</code> объявлены в самой лямбде</strong>, а значения им
-        передаёт <code>Invoke</code> в момент события. <code>sender</code> — это <code>this</code>, то есть сам
-        заказ: в обработчике его можно проверить через <code>if (sender is Order o)</code>.</li>
+      <li><strong><code>sender</code> — это тот, кто вызвал <code>Invoke</code>.</strong> В
+        <code>Paid?.Invoke(this, Total)</code> первым аргументом идёт <code>this</code>, то есть сам заказ:
+        печать даёт <code>Order</code> (имя типа — <code>ToString</code> у класса не переопределён), а
+        <code>ReferenceEquals(sender, order)</code> — <code>True</code>.</li>
+      <li><strong>Тип <code>sender</code> — <code>object?</code>.</strong> Поэтому «достать» из него заказ можно
+        только разбором типа: <code>sender is Order o</code>, и дальше <code>o.Total</code>.</li>
+      <li><strong>В <code>(_, total)</code> нет никакой другой лямбды</strong>: параметров по-прежнему два,
+        просто первый назван <code>_</code> — это discard из главы 5. «Почему нет <code>sender</code>» значит
+        «он есть, но нам не нужен, поэтому имени ему не дали».</li>
+      <li><strong>Назовёте <code>sender</code> — ничего не изменится</strong>: тот же код скомпилируется и
+        сработает так же, просто появится возможность этим параметром пользоваться. Обратное тоже верно:
+        <code>(_, _) =&gt;</code> отбрасывает оба параметра.</li>
+    </ul>
+    <p>А вот <em>число</em> параметров менять нельзя — оно часть сигнатуры делегата:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">order.Paid += total =&gt; Console.WriteLine(total);      // ✘ один параметр
+order.Paid += (a, b, c) =&gt; Console.WriteLine(a);      // ✘ три параметра</code></pre>
+      <p class="cap">Что скажет компилятор</p>
+      <pre><code class="language-text">error CS1593: Delegate 'EventHandler&lt;decimal&gt;' does not take 1 arguments
+error CS1593: Delegate 'EventHandler&lt;decimal&gt;' does not take 3 arguments</code></pre>
+    </div>
+
+    <p>Две вещи, которые здесь стоит проговорить явно:</p>
+    <ul>
       <li><strong><code>?.Invoke</code> вместо <code>Invoke</code></strong> — потому что поле-делегат равно
         <code>null</code>, пока нет ни одного подписчика: без <code>?</code> был бы
         <code>NullReferenceException</code> на первом же вызове.</li>
@@ -421,8 +467,10 @@ Console.WriteLine(SumPositive(new List&lt;int&gt; { -2, 5, 0, 7 }));   // 12</co
       <ul>
         <li><strong>Делегат — тип, значением которого является метод.</strong> <code>Func&lt;…&gt;</code> и
           <code>Action&lt;…&gt;</code> покрывают почти всё, свой делегат нужен редко.</li>
-        <li><strong>Лямбда — метод без имени</strong>: параметры объявлены в ней самой, типы берутся из целевого
-          делегата, а значения приходят в момент вызова (<code>Invoke</code>), а не при подписке.</li>
+        <li><strong>Лямбда — метод без имени</strong>: параметры объявлены в ней самой, а их число и типы
+          задаёт целевой делегат; значения приходят в момент вызова (<code>Invoke</code>), а не при подписке.
+          У <code>EventHandler&lt;T&gt;</code> параметров всегда два — <code>(object? sender, T e)</code>,
+          поэтому <code>(_, total) =&gt;</code> — это те же два параметра, просто первому не дали имени.</li>
         <li><strong>Захват переменной = объект в куче.</strong> Переменная цикла <code>for</code> одна на все
           итерации — копируйте её внутрь тела; <code>static</code>-лямбда запрещает захват.</li>
         <li><strong><code>+=</code> — это мультикаст:</strong> возвращается результат последнего делегата, а
