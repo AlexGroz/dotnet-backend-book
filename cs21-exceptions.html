@@ -79,10 +79,47 @@ finally
     </ul>
 
     <h2>Фильтры <code>when</code>: поймать не «всё такое», а «именно это»</h2>
-    <p><code>catch (Тип e) when (условие)</code> — обработчик срабатывает, только если условие истинно.
-      Главное отличие от <code>if</code> внутри <code>catch</code>: <strong>фильтр проверяется до раскрутки
-      стека</strong>. Если условие ложно, исключение выглядит так, будто этого <code>catch</code> не было:
-      стек не портится, отладчик останавливается в исходной точке.</p>
+    <p><code>catch (Тип e) when (условие)</code> — это обычный <code>catch</code> с условием входа: блок
+      выполняется, только если условие истинно. Возьмём конкретный обработчик
+      <code>catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)</code> и
+      разберём оба исхода.</p>
+    <table>
+      <tr><th>Условие <code>when</code></th><th>Что происходит</th></tr>
+      <tr><td><strong>Истинно</strong><br>(пришёл 429)</td>
+        <td>Работает как обычный <code>catch</code>: его блок выполняется, исключение считается
+          <strong>обработанным</strong>, остальные <code>catch</code> цепочки даже не рассматриваются, а
+          управление идёт дальше — на строку после <code>try/catch</code>.</td></tr>
+      <tr><td><strong>Ложно</strong><br>(любой другой код)</td>
+        <td>Блок не выполняется вообще — исключение выглядит так, будто этого <code>catch</code> нет.
+          Оно продолжает искать обработчик: проверяется следующий <code>catch</code> в этой же цепочке,
+          потом кадры выше по стеку. Здесь <strong>ничего не сработало</strong>: обработчик не вызван
+          (поставьте в него точку останова — она не остановит), стек не раскручивался, поэтому
+          <code>StackTrace</code> остаётся исходным — от <code>throw</code>, а не от строки с фильтром.</td></tr>
+    </table>
+    <p>Проверим: один и тот же метод, меняется только код ответа.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static void Request(HttpStatusCode code) =&gt;
+    throw new HttpRequestException("ответ зависимости", null, code);
+
+foreach (var code in new[] { HttpStatusCode.TooManyRequests, HttpStatusCode.BadRequest })
+{
+    try
+    {
+        Request(code);
+    }
+    catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
+    {
+        Console.WriteLine($"{code}: сработал фильтр про 429");   // условие истинно
+    }
+    catch (HttpRequestException)
+    {
+        Console.WriteLine($"{code}: дошло до общего catch");     // фильтр не пропустил
+    }
+}</code></pre>
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">TooManyRequests: сработал фильтр про 429
+BadRequest: дошло до общего catch</code></pre>
+    </div>
     <div class="codewrap">
       <pre><code class="language-csharp">// 1) различаем «отменил клиент» и «истёк наш таймаут»
 try
@@ -97,22 +134,37 @@ catch (OperationCanceledException) when (!ct.IsCancellationRequested)
 // если клиент отменил — фильтр ложен, и исключение идёт дальше как обычная отмена
 
 // 2) разные HTTP-коды — разные реакции, без вложенных if
-catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
+for (var attempt = 1; ; attempt++)
 {
-    await Task.Delay(TimeSpan.FromSeconds(1), ct);   // 429: подождать и повторить
-}
-catch (HttpRequestException ex) when (ex.StatusCode >= HttpStatusCode.InternalServerError)
-{
-    throw;                                           // 5xx: отдать наверх как есть
+    try
+    {
+        return await _client.GetStringAsync(url, ct);
+    }
+    catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests &amp;&amp; attempt &lt; 3)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(attempt), ct);   // 429: пауза и ещё одна попытка
+    }
+    catch (HttpRequestException ex) when (ex.StatusCode >= HttpStatusCode.InternalServerError)
+    {
+        throw;                                                 // 5xx: наверх как есть
+    }
 }</code></pre>
     </div>
     <ul>
-      <li><strong>Зачем фильтр, а не <code>if</code>:</strong> с <code>if</code> исключение уже поймано, и чтобы
-        «не обрабатывать», придётся писать <code>throw;</code> — обработчик уже сработал. Фильтр просто не даёт
-        ему сработать.</li>
-      <li><strong>Проверка дешёвая и без побочных эффектов:</strong> фильтр выполняется в момент исключения.</li>
+      <li><strong>Зачем фильтр, а не <code>if</code> внутри <code>catch</code>:</strong> с <code>if</code>
+        обработчик уже сработал — исключение поймано, и чтобы «не обрабатывать», нужно писать
+        <code>throw;</code>. И более тонкое: к моменту, когда начинает выполняться тело <code>catch</code>,
+        стек уже раскручен до этого метода, то есть <code>finally</code> и <code>using</code> внутренних
+        кадров <em>уже отработали</em>. Фильтр проверяется раньше — до раскрутки стека, пока состояние ещё
+        такое, каким было при ошибке.</li>
+      <li><strong>Фильтр должен быть дешёвым и без побочных эффектов:</strong> он выполняется в момент
+        исключения, и легко получить двойную работу — например, залогировать в фильтре, а потом ту же ошибку
+        залогирует обработчик выше.</li>
       <li><strong>Классика бэкенда:</strong> <code>when (!ct.IsCancellationRequested)</code> отделяет «клиент
         ушёл» (не ошибка, не логируем) от «мы не успели» (ошибка зависимости).</li>
+      <li><strong>Фильтр видит не только исключение:</strong> в нём доступны локальные переменные, поэтому
+        <code>when (… &amp;&amp; attempt &lt; 3)</code> ограничивает повторы, а когда попытки кончились,
+        429 уходит наверх как обычная ошибка — отдельного кода для этого не нужно.</li>
     </ul>
 
     <h2>Свои исключения: когда нужны, а когда нет</h2>
@@ -172,8 +224,9 @@ throw new PaymentFailedException("платёж отклонён", innerException
         <li><code>catch</code> — от конкретного к общему; <code>finally</code> выполняется всегда (для ресурсов
           есть <code>using</code>).</li>
         <li><code>throw;</code> сохраняет стек, <code>throw ex;</code> — нет.</li>
-        <li><code>when</code> — фильтр, который проверяется <strong>до</strong> раскрытия стека; так различают
-          «отменил клиент» и «наш таймаут», 429 и 5xx.</li>
+        <li><code>when</code> — фильтр, который проверяется <strong>до</strong> раскрутки стека: если он ложен,
+          обработчик не срабатывает вообще (и <code>StackTrace</code> остаётся исходным), если истинен —
+          работает как обычный <code>catch</code>; так различают «отменил клиент» и «наш таймаут», 429 и 5xx.</li>
         <li>Своё исключение — когда вызывающий должен различать ситуации; имя — <code>…Exception</code>,
           причина — в <code>innerException</code>.</li>
         <li>Исключение в <code>async</code> живёт в задаче и всплывает при <code>await</code>;
