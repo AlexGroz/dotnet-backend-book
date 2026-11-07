@@ -30,6 +30,43 @@
     <p>В книге она уже встречалась: «<code>Equals</code> по умолчанию сравнивает поля через рефлексию»
       (глава 3), «<code>Activator</code> ищет конструктор в рантайме» (глава 9), «DI и рефлексия видят настоящий
       тип-аргумент» (глава 9). Здесь — что это за механизм, из чего состоит и когда им пользоваться.</p>
+    <p>Типы, которые встречаются в главе, объявлены сразу — чтобы дальше ни один не появлялся из воздуха:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Order                       // свойства, а не поля — это важно ниже
+{
+    [Column("order_id")] public int Id { get; init; }
+    [Column("total")]    public decimal Total { get; init; }
+    public string Comment { get; init; } = "";
+}
+
+[AttributeUsage(AttributeTargets.Property)]     // что такое атрибут — в разделе про атрибуты
+public sealed class ColumnAttribute : Attribute
+{
+    public ColumnAttribute(string name) =&gt; Name = name;
+    public string Name { get; }
+}
+
+public interface IClock { DateTime Now { get; } }
+public sealed class SystemClock : IClock { public DateTime Now =&gt; DateTime.UtcNow; }
+
+public sealed class Report                      // участник примера «мини-DI»
+{
+    private readonly IClock _clock;
+    public Report(IClock clock) =&gt; _clock = clock;
+    public override string ToString() =&gt; $"Report with {_clock.GetType().Name}";
+}
+
+public sealed class Boom { public Boom() =&gt; throw new InvalidOperationException("inside ctor"); }
+
+internal sealed class Hidden                    // тип «не для нас»: не public, конструктор private
+{
+    private readonly int _secret;
+    private Hidden() =&gt; _secret = 42;
+    internal Hidden(int secret) =&gt; _secret = secret;
+    private string Secret() =&gt; $"secret={_secret}";
+    public static Hidden Create() =&gt; new(99);
+}</code></pre>
+    </div>
     <p>Два входа в метаданные:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">Type t1 = typeof(Order);            // тип известен на компиляции
@@ -49,15 +86,37 @@ Order / Order</code></pre>
       глава 9).</p>
 
     <h2><code>Type</code>: что можно узнать о типе</h2>
+    <p>Почти всё, что обычно пишут в комментарии к объявлению типа, читается кодом:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var t = typeof(Order);      // public sealed class Order { public int Id; public decimal Total; }
+      <pre><code class="language-csharp">var t = typeof(Order);          // Order объявлен в начале главы
 
-Console.WriteLine(t.Name + " " + t.IsClass + " " + t.IsValueType + " " + t.BaseType!.Name);
+Console.WriteLine($"{t.Name} {t.IsClass} {t.IsValueType} {t.BaseType!.Name}");
+Console.WriteLine($"sealed={t.IsSealed} abstract={t.IsAbstract} public={t.IsPublic} visible={t.IsVisible}");
+Console.WriteLine($"namespace={t.Namespace ?? "&lt;global&gt;"} full={t.FullName}");
+Console.WriteLine(t.Attributes);            // флаги из метаданных
+
+foreach (var p in t.GetProperties())
+    Console.WriteLine($"  {p.PropertyType.Name} {p.Name} set={p.CanWrite}");
+
+Console.WriteLine($"полей: {t.GetFields().Length}");     // 0: Id и Total — свойства, а не поля
 Console.WriteLine(typeof(int).IsValueType + " " + typeof(int).BaseType!.Name);</code></pre>
       <p class="cap">Вывод</p>
       <pre><code class="language-text">Order True False Object
+sealed=True abstract=False public=True visible=True
+namespace=&lt;global&gt; full=Order
+Public, Sealed, BeforeFieldInit
+  Int32 Id set=True
+  Decimal Total set=True
+  String Comment set=True
+полей: 0
 True ValueType</code></pre>
     </div>
+    <p>Всё, что пишут в комментарии к типу — «<code>public sealed</code>, свойства <code>Id</code> и
+      <code>Total</code>» — это и есть метаданные: <code>IsPublic</code> и <code>IsSealed</code> (они же флаги
+      <code>Public, Sealed</code> в <code>Attributes</code>), а свойства видны через
+      <code>GetProperties()</code> вместе со своими типами. Обратите внимание на
+      <code>полей: 0</code>: <code>Id</code> и <code>Total</code> объявлены свойствами, поэтому
+      <code>GetFields()</code> пуст, а <code>GetField("Id")</code> вернул бы <code>null</code>.</p>
     <table>
       <thead><tr><th>Член <code>Type</code></th><th>Что даёт</th></tr></thead>
       <tbody>
@@ -67,6 +126,10 @@ True ValueType</code></pre>
           <code>IsEnum</code>, <code>IsAbstract</code>, <code>IsSealed</code></td>
           <td>Классификация типа</td></tr>
         <tr><td><code>BaseType</code>, <code>GetInterfaces()</code></td><td>Наследование</td></tr>
+        <tr><td><code>IsPublic</code>, <code>IsVisible</code>, <code>Attributes</code></td>
+          <td>Видимость типа и «сырые» флаги метаданных: <code>sealed</code> — это <code>IsSealed</code>,
+            <code>public</code> — <code>IsPublic</code>, а <code>IsVisible</code> отвечает на вопрос «виден
+            ли тип другим сборкам»</td></tr>
         <tr><td><code>IsGenericType</code>, <code>IsGenericTypeDefinition</code></td>
           <td>Обобщённый ли тип, подставлены ли аргументы (глава 9)</td></tr>
         <tr><td><code>GetGenericArguments()</code>, <code>MakeGenericType(…)</code></td>
@@ -117,8 +180,9 @@ Int32 CanWrite=True</code></pre>
       <li><strong>Имя чувствительно к регистру</strong>: <code>GetProperty("id")</code> вернёт
         <code>null</code>, и следующая строка упадёт с <code>NullReferenceException</code>. Именно поэтому
         библиотеки кэшируют найденные <code>PropertyInfo</code> и проверяют на <code>null</code> явно.</li>
-      <li><strong>По умолчанию — только публичные члены.</strong> Приватные доступны через
-        <code>BindingFlags.NonPublic</code>, но это почти всегда признак того, что вы лезете не туда.</li>
+      <li><strong>По умолчанию — только публичные члены.</strong> Остальные достаются через
+        <code>BindingFlags.NonPublic</code> — как именно и почему видимость тут вообще ни при чём, в следующем
+        разделе.</li>
       <li><strong>Ошибка в имени — ошибка в рантайме.</strong> Компилятор строку <code>"Id"</code> не
         проверяет, поэтому рефлексию в горячем коде прячут за <code>nameof</code> и тестами.</li>
     </ul>
@@ -127,6 +191,70 @@ Int32 CanWrite=True</code></pre>
       <p class="cap">Вывод</p>
       <pre><code class="language-text">True</code></pre>
     </div>
+
+    <h2>Видимость: метаданные видят всё</h2>
+    <p>Частое заблуждение: «рефлексия читает только то, что доступно и мне, — <code>public</code>-члены моего
+      типа или хотя бы члены наследника». Нет. <code>public</code> / <code>internal</code> /
+      <code>protected</code> / <code>private</code> — правила <strong>компилятора</strong>: они не дают
+      написать <code>order.Id</code> в чужом коде. В метаданных лежит всё, и рефлексия читает это независимо
+      от того, какой доступ есть у вас: ни <code>public</code>, ни наследование не требуются.</p>
+    <table>
+      <thead><tr><th>Что нужно достать</th><th>Как</th></tr></thead>
+      <tbody>
+        <tr><td><code>public</code>-член</td>
+          <td><code>GetProperty("X")</code>, <code>GetField("x")</code> — так ищется по умолчанию</td></tr>
+        <tr><td><code>private</code> / <code>internal</code> / <code>protected</code></td>
+          <td><code>BindingFlags.NonPublic | BindingFlags.Instance</code> (для статики — <code>Static</code>
+            вместо <code>Instance</code>). Наследником быть не нужно: <code>protected</code> берётся так же</td></tr>
+        <tr><td>модификатор как данные</td>
+          <td><code>FieldInfo.IsPrivate</code>, <code>MethodBase.IsFamily</code> (это <code>protected</code>),
+            <code>IsAssembly</code> (<code>internal</code>), <code>Type.IsPublic</code></td></tr>
+        <tr><td>объект типа с непубличным конструктором</td>
+          <td><code>Activator.CreateInstance(type, nonPublic: true)</code>; конструктор с параметрами —
+            <code>Activator.CreateInstance(type, BindingFlags.NonPublic | BindingFlags.Instance, null, args, null)</code></td></tr>
+        <tr><td>тип, невидимый из кода</td>
+          <td><code>assembly.GetType("Namespace.Hidden")</code> или <code>GetTypes()</code>: имя строкой,
+            поэтому компилятору тип знать не нужно — работает и для чужой сборки</td></tr>
+      </tbody>
+    </table>
+    <p>Проверим на <code>Hidden</code> из начала главы: тип <code>internal</code>, конструктор
+      <code>private</code>, поле и метод тоже <code>private</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var t = typeof(Hidden);
+
+Console.WriteLine($"public={t.IsPublic} visible={t.IsVisible}");
+
+var instance = t.GetMethod("Create")!.Invoke(null, null);      // public static — по имени
+var field = t.GetField("_secret", BindingFlags.NonPublic | BindingFlags.Instance)!;
+Console.WriteLine($"{field.GetValue(instance)} private={field.IsPrivate}");
+
+var secret = t.GetMethod("Secret", BindingFlags.NonPublic | BindingFlags.Instance)!;
+Console.WriteLine(secret.Invoke(instance, null));
+
+Console.WriteLine(t.GetField("_secret") is null);              // True — по умолчанию только public
+Console.WriteLine(t.GetFields().Length);                       // 0
+
+try { Activator.CreateInstance(t); }
+catch (Exception e) { Console.WriteLine(e.GetType().Name); }   // приватный ctor не найден
+Console.WriteLine(Activator.CreateInstance(t, nonPublic: true)!.GetType().Name);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">public=False visible=False
+99 private=True
+secret=99
+True
+0
+MissingMethodException
+Hidden</code></pre>
+    </div>
+    <p>Что это значит: тип не виден снаружи (<code>public=False visible=False</code>), и всё равно мы прочитали
+      приватное поле (<code>99</code>), вызвали приватный метод и создали объект. Это не «обход прав» — в
+      современном .NET прав доступа на уровне рефлексии нет: если коду очень нужно, он доберётся до данных.
+      Плата другая — хрупкость: переименовали <code>_secret</code> при рефакторинге, и код упал в рантайме, а
+      компилятор промолчал. Поэтому <code>NonPublic</code> в прикладном коде почти всегда значит «дизайн не
+      тот», а в тестах, сериализаторах, DI и ORM без него не обойтись.</p>
+    <p>И обратная сторона: модификаторы не исчезают — они <em>данные</em>. Поэтому у DI есть выбор
+      «конструктор <code>public</code> или <code>internal</code>», а анализаторы и Swagger читают
+      <code>IsPublic</code>/<code>IsVisible</code>, чтобы не показывать наружу внутренние типы.</p>
 
     <h2><code>Activator</code> и «мини-DI»: создать объект по типу</h2>
     <p>Самый частый сценарий рефлексии — «у меня есть <code>Type</code>, сделай мне экземпляр». Ровно это и
@@ -161,9 +289,7 @@ var typed = Activator.CreateInstance&lt;Order&gt;();     // Order — без п�
       исключение, наружу выйдет <code>TargetInvocationException</code>, а настоящее — внутри
       <code>InnerException</code>.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">public sealed class Boom { public Boom() =&gt; throw new InvalidOperationException("inside ctor"); }
-
-try { Activator.CreateInstance(typeof(Boom)); }
+      <pre><code class="language-csharp">try { Activator.CreateInstance(typeof(Boom)); }
 catch (Exception e)
 {
     Console.WriteLine(e.GetType().Name + " / inner: " + e.InnerException?.GetType().Name);
@@ -171,30 +297,20 @@ catch (Exception e)
       <p class="cap">Вывод</p>
       <pre><code class="language-text">TargetInvocationException / inner: InvalidOperationException</code></pre>
     </div>
-    <p>Запомнить стоит и другой случай: <code>Activator</code> вызывает только <strong>публичный</strong>
-      конструктор без параметров, иначе — <code>MissingMethodException</code>
-      («No parameterless constructor defined for type 'Hidden'»), даже если приватный конструктор есть.</p>
-
+    <p>И ещё один случай: <code>Activator</code> вызывает только <strong>публичный</strong> конструктор без
+      параметров, иначе — <code>MissingMethodException</code> («No parameterless constructor defined for type
+      'Hidden'»), даже если приватный конструктор есть. Обойти можно через
+      <code>Activator.CreateInstance(type, nonPublic: true)</code> (раздел «Видимость» выше), но чаще это
+      сигнал, что тип не рассчитан на создание снаружи.</p>
 
     <h2>Атрибуты: данные, которые читает кто-то другой</h2>
     <p><strong>Атрибут</strong> — класс, унаследованный от <code>System.Attribute</code>, которым помечают тип,
       член или параметр. Сам по себе он <strong>ничего не выполняет</strong>: это данные в метаданных, а смысл им
       придаёт тот, кто их читает — компилятор, библиотека или ваш код.</p>
-    <div class="codewrap">
-      <pre><code class="language-csharp">[AttributeUsage(AttributeTargets.Property)]
-public sealed class ColumnAttribute : Attribute
-{
-    public ColumnAttribute(string name) =&gt; Name = name;
-    public string Name { get; }
-}
-
-public sealed class Order
-{
-    [Column("order_id")] public int Id { get; init; }
-    [Column("total")]    public decimal Total { get; init; }
-    public string Comment { get; init; } = "";
-}</code></pre>
-    </div>
+    <p>Оба участника уже объявлены в начале главы: <code>ColumnAttribute</code> — класс-атрибут с
+      <code>[AttributeUsage(AttributeTargets.Property)]</code> (значит, повесить его можно только на свойство) и
+      одним свойством <code>Name</code>, а у <code>Order</code> этим атрибутом помечены <code>Id</code> и
+      <code>Total</code>: <code>[Column("order_id")]</code>.</p>
     <p>Имя в коде и имя класса различаются: пишут <code>[Column]</code>, а класс называется
       <code>ColumnAttribute</code> — суффикс <code>Attribute</code> компилятор добавляет сам. Чтение — обычная
       рефлексия:</p>
@@ -332,6 +448,10 @@ for (int i = 0; i &lt; 10_000; i++)
         <li><strong><code>Type</code></strong> — классификация (<code>IsClass</code>/<code>IsValueType</code>),
           наследование, generic-часть (<code>IsGenericTypeDefinition</code>, <code>GetGenericArguments</code>,
           <code>MakeGenericType</code>), члены и атрибуты.</li>
+        <li><strong>Видимость — правило компилятора, не рефлексии:</strong> <code>private</code>,
+          <code>internal</code> и <code>protected</code> читаются через <code>BindingFlags.NonPublic</code>
+          (наследником быть не нужно), непубличный конструктор — через <code>nonPublic: true</code>; цена —
+          хрупкость к переименованиям.</li>
         <li><strong>Члены ищутся по имени</strong> (<code>GetProperty("Id")</code>, регистр важен) и вызываются
           через <code>GetValue</code>/<code>SetValue</code>/<code>Invoke</code>; <code>GetValue</code>
           возвращает <code>object</code>.</li>
