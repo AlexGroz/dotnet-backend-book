@@ -51,15 +51,58 @@ Console.WriteLine(task.Status);         // RanToCompletion</code></pre>
     <p><code>ValueTask</code> / <code>ValueTask&lt;T&gt;</code> — это <strong>struct</strong>, который
       внутри хранит либо готовый результат, либо <code>Task</code>, либо источник значения
       (<code>IValueTaskSource</code>). Если результат уже есть — объекта в куче не появляется вообще.</p>
+    <p>Самый частый случай — метод с горячим путём: ответ уже лежит в памяти. Покажем его целиком, вместе с
+      кэшем, — иначе непонятно, откуда берётся «значение уже есть».</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// кэш: чаще всего значение уже есть → Task создавать незачем
-public ValueTask&lt;string&gt; GetNameAsync(int id)
-{
-    if (_cache.TryGetValue(id, out string? cached))
-        return new ValueTask&lt;string&gt;(cached);      // 0 аллокаций: struct с готовым значением
+      <pre><code class="language-csharp">using System.Collections.Concurrent;
 
-    return new ValueTask&lt;string&gt;(LoadFromDbAsync(id));  // реально асинхронный путь
+public sealed class NameService
+{
+    // кэш в памяти процесса: id → имя. Заполняется ниже, в LoadFromDbAsync, после первого
+    // чтения из БД — поэтому в реальной жизни он почти всегда «горячий»
+    private readonly ConcurrentDictionary&lt;int, string&gt; _cache = new();
+
+    public ValueTask&lt;string&gt; GetNameAsync(int id)
+    {
+        if (_cache.TryGetValue(id, out var cached))          // горячий путь: значение уже есть
+            return new ValueTask&lt;string&gt;(cached);            // 0 аллокаций: struct с готовым значением
+
+        return new ValueTask&lt;string&gt;(LoadFromDbAsync(id));   // холодный путь: реальный await
+    }
+
+    private async Task&lt;string&gt; LoadFromDbAsync(int id)       // долгий путь остаётся Task
+    {
+        await Task.Delay(50);                                // здесь был бы запрос к БД
+        var name = $"user-{id}";
+        _cache[id] = name;                                   // вот здесь кэш и заполняется
+        return name;
+    }
 }</code></pre>
+    </div>
+    <p>Про <code>_cache</code>, чтобы не осталось вопросов: это обычное поле класса —
+      <code>ConcurrentDictionary&lt;int, string&gt;</code>, потокобезопасный словарь (метод могут позвать из
+      нескольких потоков сразу, поэтому не <code>Dictionary</code>), живёт он в памяти процесса и заполняется
+      прямо в <code>LoadFromDbAsync</code>: первый вызов идёт в БД, все следующие попадают в горячий путь.
+      Настоящий кэш (<code>IMemoryCache</code>, Redis, TTL, вытеснение) отличается от этого словаря только
+      политикой хранения — это тема гл. 25 .NET-раздела, для выбора между <code>Task</code> и
+      <code>ValueTask</code> она не важна.</p>
+    <p>Проверить, что горячий путь действительно синхронный, можно по <code>IsCompleted</code> — до
+      <code>await</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var service = new NameService();
+
+var first = service.GetNameAsync(42);      // кэш пуст → пошли в БД
+Console.WriteLine(first.IsCompleted);      // False: работа ещё идёт
+Console.WriteLine(await first);
+
+var second = service.GetNameAsync(42);     // значение уже в кэше
+Console.WriteLine(second.IsCompleted);     // True: ждать нечего
+Console.WriteLine(await second);</code></pre>
+      <p class="cap">Что окажется на консоли</p>
+      <pre><code class="language-text">False
+user-42
+True
+user-42</code></pre>
     </div>
     <p>Часто такие методы вызываются в «горячих» местах, где синхронный путь — норма: чтение из кэша,
       <code>PipeReader.ReadAsync</code>, <code>IAsyncEnumerator.MoveNextAsync</code>,
