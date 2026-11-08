@@ -75,38 +75,93 @@ string result = sb.ToString();</code></pre>
       для GC (глава 6).</p>
 
     <div class="codewrap">
-      <p class="cap">ArrayPool: переиспользование буферов-массивов</p>
-      <pre><code class="language-csharp">// Shared — встроенный ОБЩИЙ пул .NET (им пользуется всё приложение).
-// Свой создавать не нужно — достаточно взять этот.
-var pool = ArrayPool&lt;byte&gt;.Shared;
+      <p class="cap">ArrayPool: читаем поток порциями и обрабатываем каждую порцию</p>
+      <pre><code class="language-csharp">const int ChunkSize = 4096;                      // сколько байт читаем за раз
 
-// Rent = «арендовать» массив у пула (минимум 4096 байт).
-byte[] buffer = pool.Rent(4096);
-
-try
+static async Task&lt;int&gt; CountLinesAsync(Stream stream, CancellationToken ct)
 {
-    // Работаем не со всем массивом, а с его частью (0..4096)
-    int read = await stream.ReadAsync(buffer.AsMemory(0, 4096), ct);
-    Process(buffer.AsSpan(0, read));
+    var pool = ArrayPool&lt;byte&gt;.Shared;            // встроенный ОБЩИЙ пул .NET, свой создавать не нужно
+    byte[] buffer = pool.Rent(ChunkSize);         // «арендовать» буфер: минимум ChunkSize байт
+    try
+    {
+        var total = 0;
+        int read;
+        while ((read = await stream.ReadAsync(buffer.AsMemory(0, ChunkSize), ct)) &gt; 0)
+        {
+            var chunk = buffer.AsMemory(0, read);  // ровно read байт: столько пришло в этот раз
+            total += Process(chunk.Span);          // ← обработка одной порции (см. ниже)
+        }
+        return total;
+    }
+    finally
+    {
+        pool.Return(buffer);                       // вернуть в пул — обязательно
+    }
 }
-finally
+
+// «Обработка» — обычный метод, который что-то делает с порцией байт.
+// Здесь: считаем переводы строк. Идём по ReadOnlySpan — без копий и без новых массивов.
+static int Process(ReadOnlySpan&lt;byte&gt; chunk)
 {
-    pool.Return(buffer);   // вернуть массив в пул — обязательно
+    var lines = 0;
+    foreach (var b in chunk)
+        if (b == (byte)'\n') lines++;
+    return lines;
 }</code></pre>
+    </div>
+
+    <div class="codewrap">
+      <p class="cap">Вызываем на файле из 2500 строк (~46 КБ)</p>
+      <pre><code class="language-csharp">await using var file = File.OpenRead("orders.txt");
+Console.WriteLine($"строк: {await CountLinesAsync(file, CancellationToken.None)}");</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">строк: 2500</code></pre>
+    </div>
+
+    <p>На 46 КБ цикл прошёл <strong>12 раз</strong> (11 полных порций по 4096 байт и последняя на 1337
+      байт), и каждая порция отдельно ушла в <code>Process</code> — весь файл в память не читался.</p>
+
+    <div class="codewrap">
+      <p class="cap">Сколько байт даёт Rent и что остаётся в буфере после возврата</p>
+      <pre><code class="language-csharp">var pool = ArrayPool&lt;byte&gt;.Shared;
+
+Console.WriteLine(pool.Rent(4000).Length);        // просили 4000 — получили больше
+
+var first = pool.Rent(4096);
+"secret-token"u8.CopyTo(first);                   // положили что-то в буфер
+pool.Return(first);
+
+var second = pool.Rent(4096);                     // тот же самый массив
+Console.WriteLine(ReferenceEquals(first, second));            // True
+Console.WriteLine(Encoding.UTF8.GetString(second, 0, 12));    // secret-token
+
+pool.Return(second, clearArray: true);            // стереть, если в буфере было что-то секретное</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">4096
+True
+secret-token</code></pre>
     </div>
 
     <div class="box note">
       <span class="t">Пояснения к примеру</span>
       <ul>
         <li><strong><code>ArrayPool&lt;byte&gt;.Shared</code></strong> — «<em>общий</em>» пул, встроенный в
-          .NET. Готовый и потокобезопасный, разделяемый всем приложением: не нужно создавать свой.</li>
+          .NET (пространство имён <code>System.Buffers</code>). Готовый и потокобезопасный, разделяемый всем
+          приложением: не нужно создавать свой.</li>
         <li><strong><code>Rent(4096)</code></strong> — «арендовать» буфер размером <em>минимум</em> 4096 байт.
-          Пул хранит память «корзинами» (8192, 16384, …), поэтому реально массив может оказаться
-          <strong>больше запрошенного</strong>. Именно поэтому дальше мы работаем не со всем массивом, а с его
-          частью — <code>AsMemory(0, 4096)</code>.</li>
+          Пул хранит память «корзинами» (4096, 8192, 16384, …), поэтому массив может оказаться
+          <strong>больше запрошенного</strong>: <code>Rent(4000)</code> тоже вернёт 4096. Именно поэтому дальше мы
+          работаем не со всем массивом, а с его частью — <code>buffer.AsMemory(0, read)</code>.</li>
+        <li><strong>Почему <code>while</code>, а не одно чтение.</strong> <code>ReadAsync</code> не обязан
+          заполнить весь буфер: он отдаёт столько байт, сколько уже пришло (у сетевого потока — одну-две
+          порции). <code>read</code> — это «сколько пришло в этот раз», поэтому в <code>Process</code> уходит
+          <code>AsMemory(0, read)</code>, а не все 4096. <code>read == 0</code> означает конец потока.</li>
         <li><strong><code>Return(buffer)</code></strong> — вернуть массив в пул. Если не вернуть, пул начнёт
           создавать новые массивы, и весь смысл потеряется. Поэтому <code>Return</code> — в
           <code>finally</code>.</li>
+        <li><strong><code>Return(buffer, clearArray: true)</code></strong> — вернуть и <em>стереть</em>.
+          Данные в возвращённом буфере остаются, и следующий <code>Rent</code> их увидит (в примере выше —
+          <code>secret-token</code>). Если в буфере были пароли, токены или персональные данные — стирайте.</li>
         <li><strong><code>ct</code></strong> — это <strong>CancellationToken</strong>, «токен отмены».
           Важно: <code>ct</code> — <em>просто имя параметра</em>, так принято сокращать; это не ключевое слово и
           не «магическая» переменная. Токен приходит в метод <strong>параметром</strong> — его создаёт и

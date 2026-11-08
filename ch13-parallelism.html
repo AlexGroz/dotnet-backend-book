@@ -94,6 +94,70 @@ finally { Gate.Release(); }</code></pre>
       </ul>
     </div>
 
+    <div class="box warn">
+      <span class="t">Что именно ограничивается (частая путаница)</span>
+      <p>Семафор не «блокирует <code>ProcessOneAsync</code>» и не «занимает <code>id</code>». Он ограничивает
+        <strong>участок кода между <code>WaitAsync</code> и <code>Release</code></strong> — критическую секцию.
+        Внутри неё одновременно находятся не больше 8 элементов, а 9-й даже <em>не начнёт</em> работу: он ждёт
+        на <code>WaitAsync</code>, до вызова <code>ProcessOneAsync</code> дело не доходит.</p>
+      <p>Пропуск берётся один раз на элемент и возвращается в <code>finally</code>, когда операция завершилась.
+        Токен <code>ct</code> в <code>WaitAsync</code> — это только «выйти из очереди, если отменили».</p>
+    </div>
+
+    <div class="codewrap">
+      <p class="cap">Проверим: 12 операций по 60 мс, лимит 3 (в логе <code>+id</code> — начал, <code>-id</code> — закончил)</p>
+      <pre><code class="language-csharp">var ids = Enumerable.Range(1, 12);
+var ct = CancellationToken.None;
+
+using var gate = new SemaphoreSlim(3);
+var log = new List&lt;string&gt;();
+
+await Task.WhenAll(ids.Select(async id =&gt;
+{
+    await gate.WaitAsync(ct);
+    try
+    {
+        lock (log) log.Add("+" + id);
+        await Task.Delay(60, ct);              // «работа»: сходить в БД, вызвать сервис
+        lock (log) log.Add("-" + id);
+    }
+    finally { gate.Release(); }                // пропуск вернули — входит следующий
+}));</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">первые 10 событий: +1 +2 +3 -3 -2 +4 +5 -1 +6 -6
+максимум одновременно: 3, время: 247 мс</code></pre>
+    </div>
+    <p>Читается по логу так: начали <code>1, 2, 3</code> — и только когда двое освободили пропуска
+      (<code>-3 -2</code>), пошли <code>+4 +5</code>. Порядок событий от запуска к запуску меняется (потоки
+      соревнуются), а вот <strong>максимум одновременно</strong> — всегда 3. Поэтому 12 операций по 60 мс
+      заняли ~240 мс (12 × 60 / 3), а не 60 мс.</p>
+
+    <div class="codewrap">
+      <p class="cap">Вариант 2 на тех же данных: лимит внутри <code>Parallel.ForEachAsync</code></p>
+      <pre><code class="language-csharp">// ids, ct и log — из блока выше
+await Parallel.ForEachAsync(ids,
+    new ParallelOptions { MaxDegreeOfParallelism = 3, CancellationToken = ct },
+    async (id, token) =&gt;
+    {
+        lock (log) log.Add("+" + id);
+        await Task.Delay(60, token);
+        lock (log) log.Add("-" + id);
+    });                                        // вернётся, когда обработаны ВСЕ элементы</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">первые 10 событий: +1 +2 +3 -1 -2 +4 +5 -3 +6 -6
+максимум одновременно: 3, время: 247 мс</code></pre>
+    </div>
+    <p>Ограничение то же самое — «не больше трёх тел цикла одновременно». Разница в том, что пропусками
+      управляет сам <code>ForEachAsync</code>, а исключение из любого элемента останавливает остальные
+      (в прогоне на 20 элементах, где пятый бросал исключение, успели начаться только 6) и выходит наружу
+      исходным исключением, а не <code>AggregateException</code>.</p>
+
+    <div class="codewrap">
+      <p class="cap">А теперь без лимита — все 12 сразу</p>
+      <pre><code class="language-text">максимум одновременно: 12, время: 62 мс</code></pre>
+    </div>
+    <p>Для 12 операций это нормально, для 1000 — нет: см. начало главы (пул соединений, потоки, таймауты).</p>
+
     <h2>Потоковая обработка: IAsyncEnumerable</h2>
     <p>Если результат большой, не нужно грузить его целиком в память — можно отдавать по мере чтения:</p>
     <div class="codewrap">
@@ -108,6 +172,30 @@ finally { Gate.Release(); }</code></pre>
         yield return o;   // отдаём по мере чтения, память O(1)
     }
 }</code></pre>
+    </div>
+
+    <div class="box note">
+      <span class="t">Как это устроено: запрос один, но всех строк в памяти нет</span>
+      <p>Разница с <code>ToListAsync()</code> в том, <em>что</em> материализуется. Обычный запрос
+        выполняется и складывает <strong>все</strong> строки в список. Потоковый выполняется один раз и читает
+        строки по мере надобности:</p>
+      <ul>
+        <li><code>AsAsyncEnumerable()</code> не делает второй запрос — SQL тот же самый;</li>
+        <li>по сети данные идут порциями: драйвер читает пакет строк (десятки килобайт), отдаёт их по одной, и
+          разобранные строки дальше уже не нужны;</li>
+        <li>в памяти одновременно — текущая строка плюс буфер драйвера, а не весь результат.</li>
+      </ul>
+      <p>Замер на EF Core 8 + SQLite: 300 000 строк, файл базы 12 МБ.</p>
+      <table>
+        <thead><tr><th>Способ чтения</th><th>SQL-команд</th><th>Пик памяти</th><th>Время</th></tr></thead>
+        <tbody>
+          <tr><td><code>ToListAsync()</code></td><td>1</td><td>+13 МБ</td><td>1156 мс</td></tr>
+          <tr><td><code>AsAsyncEnumerable()</code></td><td>1</td><td>+1 МБ</td><td>249 мс</td></tr>
+        </tbody>
+      </table>
+      <p>Команда одна и там, и там — «поток» не означает «много запросов». А быстрее потому, что 300 000
+        элементов в списке — это и память, и работа для GC; на реальной базе добавляется ещё и то, что клиент
+        получает первые строки, не дожидаясь конца выборки.</p>
     </div>
 
     <p><strong>Тот же приём — чтобы отдать данные из базы в HTTP-ответ</strong>, не собирая их в память.
@@ -126,9 +214,24 @@ public IAsyncEnumerable&lt;OrderDto&gt; Export(
           .AsAsyncEnumerable()                 // ← поток из БД, без ToListAsync()
           .WithCancellation(ct);</code></pre>
     </div>
+
+    <div class="box note">
+      <span class="t">Что происходит по шагам в <code>Export</code></span>
+      <ol>
+        <li>ASP.NET Core вызывает метод и получает <code>IAsyncEnumerable</code> — запрос ещё <em>не</em>
+          выполнен.</li>
+        <li>Сериализатор начинает обход: первый <code>MoveNextAsync</code> отправляет SQL в PostgreSQL.</li>
+        <li>Драйвер отдаёт строки порциями; каждая строка превращается в <code>OrderDto</code> и сразу пишется в
+          ответ (в выходной буфер Kestrel, откуда уходит в сокет). Поэтому память и держится на уровне
+          «строка + буфер», а не «весь ответ».</li>
+        <li>Обход закончился — соединение с базой освобождается.</li>
+      </ol>
+      <p>Отсюда цена: <strong>соединение занято всё время отдачи</strong>. Медленный клиент держит и соединение, и
+        открытую транзакцию чтения, поэтому большие выгрузки делят на страницы (keyset-пагинация:
+        <code>WHERE (CreatedAt, Id) &gt; (@last, @lastId)</code>) или пишут CSV в <code>PipeWriter</code>.</p>
+    </div>
+
     <ul>
-      <li><strong>Что происходит:</strong> EF читает результат построчно, сериализатор пишет каждую строку в
-        ответ, клиент видит первые данные почти сразу. Память — <code>O(1)</code> вместо <code>O(N)</code>.</li>
       <li><strong>Что убивает поток:</strong> <code>ToListAsync()</code> в середине цепочки; ручная сборка JSON в
         строку; буферизация на прокси (в nginx — <code>proxy_buffering on</code>) и в самом ответе
         (<code>HttpResponse.Body</code> копится, если включена буферизация).</li>
@@ -144,6 +247,46 @@ public IAsyncEnumerable&lt;OrderDto&gt; Export(
       <li><strong>Отмена работает вся цепочка:</strong> клиент ушёл → <code>WithCancellation(ct)</code> →
         Npgsql отменяет запрос на сервере (а не просто перестаёт читать).</li>
     </ul>
+
+    <div class="box warn">
+      <span class="t">«А если запросов не один, а много?»</span>
+      <p>Количество запросов задаёт <strong>сама цепочка LINQ</strong>, а не способ чтения. Один
+        <code>Select(...).AsAsyncEnumerable()</code> — один SQL, сколько бы строк он ни вернул.</p>
+      <p><strong>Но</strong> <code>IAsyncEnumerable</code> — не кэш, а «фабрика»: каждый новый обход выполняет
+        запрос заново.</p>
+      <pre><code class="language-csharp">async IAsyncEnumerable&lt;int&gt; Rows()
+{
+    queries++;
+    Console.WriteLine($"  [БД]  запрос №{queries} выполнен");
+    for (var i = 1; i &lt;= 3; i++)
+    {
+        Console.WriteLine($"  [БД]  строка {i} прочитана");
+        yield return i;
+    }
+}
+
+await foreach (var r in Rows()) Console.WriteLine($"  [код] получил {r}");
+await foreach (var r in Rows()) { }          // ← это ВТОРОЙ запрос к базе</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">  [БД]  запрос №1 выполнен
+  [БД]  строка 1 прочитана
+  [код] получил 1
+  [БД]  строка 2 прочитана
+  [код] получил 2
+  [БД]  строка 3 прочитана
+  [код] получил 3
+  [БД]  запрос №2 выполнен
+  [БД]  строка 1 прочитана
+  [БД]  строка 2 прочитана
+  [БД]  строка 3 прочитана
+запросов после 2-го обхода: 2</code></pre>
+      <p>Видно и главное достоинство (строки приходят по одной, работа чередуется с чтением), и ловушку:
+        перечислять такой поток нужно <strong>один раз</strong> — не «сохранить в переменную на потом» и не
+        обходить дважды.</p>
+      <p>Много запросов появляется в другом месте — когда внутри обхода дёргают навигационное свойство
+        (<em>N+1</em>: одна строка — один запрос). Лечится <code>Include</code>/<code>Select</code> в том же
+        запросе, и тогда «много» не будет.</p>
+    </div>
 
     <table>
       <thead><tr><th>Сценарий</th><th>Инструмент</th></tr></thead>

@@ -64,6 +64,45 @@ app.Run();</code></pre>
     </div>
 
     <div class="box note">
+      <span class="t">Какой метод выполнится на самом деле</span>
+      <p>Вот контракт и его реализация, о которых дальше идёт речь (в главе 14 контракт был синхронным —
+        <code>Find</code>; здесь он асинхронный, как в реальном EF Core):</p>
+      <pre><code class="language-csharp">public interface IOrderRepository                     // что видит потребитель
+{
+    Task&lt;Order?&gt; GetAsync(int id);
+}
+
+public sealed class OrderRepository : IOrderRepository // что создаёт контейнер
+{
+    public string ConnectionString =&gt; "Host=db;Database=shop";   // есть только у реализации
+
+    public Task&lt;Order?&gt; GetAsync(int id) =&gt; ...;                  // здесь был бы EF Core
+}</code></pre>
+      <p>Выполнится, конечно, <code>OrderRepository.GetAsync</code> — но вызван он <em>через интерфейс</em>. И
+        это важно:</p>
+      <ul>
+        <li>тип переменной <code>repo</code> — <code>IOrderRepository</code>, поэтому компилятор разрешает только
+          то, что объявлено в интерфейсе;</li>
+        <li>объект внутри — <code>OrderRepository</code>, и вызывается именно его метод (обычный виртуальный
+          вызов, как с <code>override</code>).</li>
+      </ul>
+      <div class="codewrap">
+        <pre><code class="language-csharp">var repo = sp.GetRequiredService&lt;IOrderRepository&gt;();
+Console.WriteLine(repo.GetType().Name);        // OrderRepository — настоящий тип объекта
+Console.WriteLine(repo.ConnectionString);      // ❌ такого члена в интерфейсе нет</code></pre>
+        <p class="cap">Вывод</p>
+        <pre><code class="language-text">OrderRepository</code></pre>
+      </div>
+      <p>Хотя настоящий объект — <code>OrderRepository</code>, до его собственного свойства
+        <code>ConnectionString</code> через интерфейс не добраться:</p>
+      <p class="cap">Ошибка компиляции</p>
+      <pre><code class="language-text">error CS1061: 'IOrderRepository' does not contain a definition for 'ConnectionString' and no accessible
+extension method 'ConnectionString' accepting a first argument of type 'IOrderRepository' could be found</code></pre>
+      <p>То есть сервис получает настоящую реализацию, но <em>видит</em> только контракт — и не может случайно
+        завязаться на её детали. Ради этого интерфейс и стоит в конструкторе.</p>
+    </div>
+
+    <div class="box note">
       <span class="t">Где что находится (частая путаница)</span>
       <p>Это не «одно действие в разных местах», а <strong>два разных шага</strong>:</p>
       <ul>
@@ -75,6 +114,28 @@ app.Run();</code></pre>
       <p>Дальше в примерах этой главы строки <code>builder.Services…</code> — это <code>Program.cs</code>,
         а объявления классов — отдельные файлы.</p>
     </div>
+    <h3>Где лежат интерфейс и реализация</h3>
+    <p>Правило простое: <strong>интерфейс — рядом с тем, кто его просит</strong> (потребитель), а
+      <strong>реализация — там, где живёт технология</strong> (EF Core, HTTP, файлы). В
+      <code>Utils</code> не кладут ни то, ни другое: там утилиты без зависимостей.</p>
+    <table>
+      <thead><tr><th>Что</th><th>Один проект (папки)</th><th>Несколько проектов</th></tr></thead>
+      <tbody>
+        <tr><td><code>Order</code> и правила</td><td><code>Domain/</code></td><td><code>Shop.Domain</code></td></tr>
+        <tr><td><code>IOrderRepository</code>, <code>OrderService</code></td>
+          <td><code>Orders/</code> (или <code>Services/</code>)</td><td><code>Shop.Application</code></td></tr>
+        <tr><td><code>OrderRepository</code> на EF Core</td>
+          <td><code>Infrastructure/</code> (она же <code>Persistence/</code>, <code>Repositories/</code>)</td>
+          <td><code>Shop.Infrastructure</code></td></tr>
+        <tr><td>регистрации DI</td><td><code>Program.cs</code> или <code>Orders/OrdersModule.cs</code></td>
+          <td>метод <code>AddOrders()</code> в <code>Shop.Infrastructure</code></td></tr>
+      </tbody>
+    </table>
+    <p>Раскладка «<code>Services/</code> + <code>Infrastructure/</code>» — самая частая; имена папок дело вкуса.
+      Важно направление ссылок: <code>Application</code> не должен знать про EF Core, иначе интерфейс ничего не
+      изолирует. Держать интерфейс и реализацию в одной папке <code>Repositories/</code> можно — но тогда
+      потребитель видит и реализацию, и соблазн сослаться на неё напрямую велик.</p>
+
     <p>Если зависимость не зарегистрирована — приложение падает <strong>на старте</strong>, а не «где-то
       потом». Это заставляет держать граф зависимостей в порядке.</p>
 
@@ -131,7 +192,8 @@ builder.Services.AddScoped&lt;IOrderValidator&gt;(sp =&gt; sp.GetRequiredService
     <h3>Случай 2: один интерфейс — несколько реализаций</h3>
     <p>Это ровно то, ради чего существует стратегия (книга «Паттерны», глава 3). Два способа развести реализации:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// а) ключи (.NET 8+): на запрос с ключом — конкретная реализация
+      <pre><code class="language-csharp">// IPricingStrategy, RegularPricing и VipPricing — стратегии из книги «Паттерны», глава 3
+// а) ключи (.NET 8+): на запрос с ключом — конкретная реализация
 builder.Services.AddKeyedScoped&lt;IPricingStrategy, RegularPricing&gt;(CustomerType.Regular);
 builder.Services.AddKeyedScoped&lt;IPricingStrategy, VipPricing&gt;(CustomerType.Vip);
 
@@ -146,8 +208,29 @@ builder.Services.AddScoped&lt;IPricingStrategy, VipPricing&gt;();
 var one = sp.GetRequiredService&lt;IPricingStrategy&gt;();        // VipPricing
 
 // запрос набора даст ВСЕ, в порядке регистрации:
-var all = sp.GetServices&lt;IPricingStrategy&gt;();               // [RegularPricing, VipPricing]</code></pre>
+var all = sp.GetServices&lt;IPricingStrategy&gt;();               // [RegularPricing, VipPricing]
+
+// а конкретную реализацию из набора достают фильтром по типу:
+var regular = sp.GetServices&lt;IPricingStrategy&gt;().OfType&lt;RegularPricing&gt;().Single();   // RegularPricing
+
+// либо регистрируют ещё и сам класс — тогда его можно просить напрямую:
+builder.Services.AddScoped&lt;RegularPricing&gt;();
+var regular2 = sp.GetRequiredService&lt;RegularPricing&gt;();     // RegularPricing</code></pre>
     </div>
+    <div class="codewrap">
+      <p class="cap">Что вернёт контейнер</p>
+      <pre><code class="language-text">одиночный запрос                     = VipPricing
+все реализации                       = RegularPricing, VipPricing
+OfType&lt;RegularPricing&gt;()             = RegularPricing
+GetRequiredService&lt;RegularPricing&gt;() = RegularPricing
+это ОДИН и тот же объект?            = False</code></pre>
+    </div>
+    <p>Обратите внимание на последнюю строку: <code>AddScoped&lt;RegularPricing&gt;()</code> — это
+      <em>отдельная</em> регистрация, поэтому «тот же» класс приходит двумя разными экземплярами. И ещё:
+      <code>GetServices</code> с <code>OfType</code> создаёт <strong>все</strong> реализации, чтобы потом
+      выбросить лишние, — а <code>GetRequiredService&lt;RegularPricing&gt;()</code> создаёт только один объект.
+      Если выбор зависит от запроса (VIP-клиент или обычный), правильный инструмент — ключи, вариант «а»:
+      там создаётся ровно та реализация, которую попросили.</p>
     <p>Вариант «б» — это готовый механизм для цепочки обработчиков или цепочки проверок: получили все реализации и
       прошли по ним (книга «Паттерны», глава 6).</p>
 
@@ -163,14 +246,64 @@ var repo = sp.GetRequiredService&lt;EfProductRepository&gt;();</code></pre>
     </div>
 
     <h3>Случай 4: фабричный делегат — когда нужна логика создания</h3>
+    <p>Участники примера (в жизни — отдельные файлы):</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt;
-    new CachedProductRepository(                              // 1) что создать
-        sp.GetRequiredService&lt;EfProductRepository&gt;(),         // 2) кого обернуть
-        sp.GetRequiredService&lt;IMemoryCache&gt;()));              // 3) остальные зависимости
+      <pre><code class="language-csharp">public interface IProductRepository { string Get(int id); }
 
-// когда так делают: декораторы, выбор реализации по конфигурации,
-// значения, которые нельзя получить из конструктора</code></pre>
+public sealed class EfProductRepository : IProductRepository          // «настоящий» репозиторий
+{
+    public string Get(int id) =&gt; $"db:{id}";                          // здесь был бы EF Core
+}
+
+// декоратор: добавляет кэш вокруг любого IProductRepository
+public sealed class CachedProductRepository(IProductRepository inner, IMemoryCache cache) : IProductRepository
+{
+    public string Get(int id)
+    {
+        var key = $"product:{id}";
+        if (cache.TryGetValue(key, out string? cached))
+            return $"cache:{cached}";
+
+        var value = inner.Get(id);
+        cache.Set(key, value, TimeSpan.FromMinutes(5));
+        return value;
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// конструктор декоратора: CachedProductRepository(IProductRepository inner, IMemoryCache cache)
+
+// форма 1: фабрика создаёт объект сама — передаём ВСЕ аргументы, иначе не скомпилируется
+builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt;
+    new CachedProductRepository(
+        sp.GetRequiredService&lt;EfProductRepository&gt;(),      // кого оборачиваем
+        sp.GetRequiredService&lt;IMemoryCache&gt;()));           // вторая зависимость
+
+// форма 2: ActivatorUtilities — недостающее контейнер подставит сам
+builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt;
+    ActivatorUtilities.CreateInstance&lt;CachedProductRepository&gt;(
+        sp,                                                 // 1) кто разрешает недостающие зависимости
+        sp.GetRequiredService&lt;EfProductRepository&gt;()));     // 2) что передать руками</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Что передавать руками, а что нет</span>
+      <p>Первый аргумент — это <em>провайдер</em>, а не зависимость: он и «разрешает» недостающее. Дальше идёт
+        список аргументов конструктора, которые нужно подставить вручную; <strong>порядок между ними
+        произвольный</strong> — <code>ActivatorUtilities</code> сопоставляет их по типу. Компилятор полноту
+        списка не проверяет: всё, чего не хватило, <code>ActivatorUtilities</code> возьмёт из контейнера сам.
+        Поэтому руками передают <strong>только то, что контейнер отдать не может</strong>.
+        В декораторе это «оборачиваемый» — <code>EfProductRepository</code>: попроси контейнер о
+        <code>IProductRepository</code> внутри декоратора, и он вернёт… сам декоратор, то есть бесконечную
+        рекурсию.</p>
+      <p>А <code>IMemoryCache</code> писать не нужно: он зарегистрирован (<code>AddMemoryCache()</code>) и будет
+        подставлен. Проверено на .NET 8 — оба варианта дают одинаковый результат:</p>
+      <pre><code class="language-text">1-й вызов: db:1
+2-й вызов: cache:db:1</code></pre>
+      <p>Если же зависимость не зарегистрирована, <code>ActivatorUtilities</code> честно об этом скажет:</p>
+      <pre><code class="language-text">Unable to resolve service for type 'Microsoft.Extensions.Caching.Memory.IMemoryCache' while attempting
+to activate 'CachedProductRepository'.</code></pre>
+      <p>Когда так делают: декораторы (книга «Паттерны», глава 5), выбор реализации по конфигурации, значения,
+        которые нельзя получить из конструктора.</p>
     </div>
     <p>Параметр <code>Func&lt;IServiceProvider, T&gt;</code> — это делегат, то есть метод, переданный как
       значение. Что это такое и как с ним работать (лямбды, замыкания, <code>Func</code>/<code>Action</code>) —
@@ -191,12 +324,74 @@ builder.Services.AddSingleton(settings);        // отдаём именно э�
 
     <h3>Случай 7: библиотеки и <code>TryAdd</code></h3>
     <div class="codewrap">
-      <pre><code class="language-csharp">// Add — добавит ещё одну регистрацию (последняя выиграет для одиночного запроса)
+      <pre><code class="language-csharp">// Add — добавит новую регистрацию в любом случае;
+// для одиночного запроса побеждает ПОСЛЕДНЯЯ.
 builder.Services.AddSingleton&lt;IClock, SystemClock&gt;();
 
-// TryAdd — только если такой сервис ещё НЕ зарегистрирован.
+// TryAdd — добавит, только если для IClock ещё НИЧЕГО не зарегистрировано.
 // Так делают библиотеки, чтобы не перезаписывать выбор приложения.
 builder.Services.TryAddSingleton&lt;IClock, SystemClock&gt;();</code></pre>
+    </div>
+    <p>Разница видна, если посмотреть не только на «кого вернули», но и на список регистраций:</p>
+    <div class="codewrap">
+      <p class="cap">Приложение — <code>AppClock</code>, библиотека — <code>LibClock</code></p>
+      <pre><code class="language-csharp">static void Which(string scenario, Action&lt;IServiceCollection&gt; configure)
+{
+    var services = new ServiceCollection();
+    configure(services);
+    var sp = services.BuildServiceProvider();
+
+    var all = sp.GetServices&lt;IClock&gt;().Select(x =&gt; x.GetType().Name).ToArray();
+    Console.WriteLine($"{scenario,-48} -&gt; {sp.GetRequiredService&lt;IClock&gt;().GetType().Name,-10} " +
+                      $"регистраций: {all.Length} ({string.Join(", ", all)})");
+}
+
+Which("приложение Add(AppClock), потом библиотека TryAdd", s =&gt;
+{
+    s.AddSingleton&lt;IClock, AppClock&gt;();
+    s.TryAddSingleton&lt;IClock, LibClock&gt;();
+});
+Which("библиотека TryAdd(LibClock), потом приложение Add", s =&gt;
+{
+    s.TryAddSingleton&lt;IClock, LibClock&gt;();
+    s.AddSingleton&lt;IClock, AppClock&gt;();
+});
+Which("приложение Add(AppClock), потом библиотека Add", s =&gt;
+{
+    s.AddSingleton&lt;IClock, AppClock&gt;();
+    s.AddSingleton&lt;IClock, LibClock&gt;();
+});
+Which("только библиотека TryAdd(LibClock)", s =&gt;
+{
+    s.TryAddSingleton&lt;IClock, LibClock&gt;();
+});</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">приложение Add(AppClock), потом библиотека TryAdd -&gt; AppClock   регистраций: 1 (AppClock)
+библиотека TryAdd(LibClock), потом приложение Add -&gt; AppClock   регистраций: 2 (LibClock, AppClock)
+приложение Add(AppClock), потом библиотека Add    -&gt; LibClock   регистраций: 2 (AppClock, LibClock)
+только библиотека TryAdd(LibClock)                -&gt; LibClock   регистраций: 1 (LibClock)</code></pre>
+    </div>
+    <p>Читается так:</p>
+    <ul>
+      <li><strong><code>TryAdd</code> ничего не добавил</strong> (строка 1): регистрация приложения уже была,
+        поэтому в списке остался один <code>AppClock</code>. Это и нужно библиотеке — «не мешать».</li>
+      <li><strong>Регистрация библиотеки осталась в списке</strong> (строка 2): <code>TryAdd</code> её добавил
+        (до него не было ничего), а <code>Add</code> приложения встал последним и выиграл одиночный запрос. Но
+        <code>GetServices&lt;IClock&gt;()</code> вернёт <em>обе</em> — и <code>LibClock</code>, и
+        <code>AppClock</code>.</li>
+      <li><strong><code>Add</code> перебивает</strong> (строка 3): библиотека добавила свою регистрацию последней
+        и молча отменила выбор приложения. Именно этого <code>TryAdd</code> и позволяет избежать.</li>
+      <li><strong>Приложение ничего не выбрало</strong> (строка 4): работает вариант библиотеки — приложение не
+        падает с «Unable to resolve service».</li>
+    </ul>
+    <p>Отсюда правило: <strong>библиотека — <code>TryAdd</code>, приложение — <code>Add</code></strong>. Если
+      нужно именно заменить чужую регистрацию, есть <code>Replace</code> и
+      <code>RemoveAll&lt;IClock&gt;()</code> из <code>Microsoft.Extensions.DependencyInjection.Extensions</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.RemoveAll&lt;IClock&gt;();                  // убрать все прежние регистрации
+builder.Services.AddSingleton&lt;IClock, AppClock&gt;();     // и добавить свою
+
+builder.Services.Replace(ServiceDescriptor.Singleton&lt;IClock, AppClock&gt;());   // убрать и добавить одной строкой</code></pre>
     </div>
 
     <h3>Случай 8: один класс с разным временем жизни</h3>

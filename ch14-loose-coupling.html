@@ -69,6 +69,133 @@ public class OrderService(IOrderRepository repo)
       </tbody>
     </table>
 
+    <h2>Те же четыре выгоды в коде</h2>
+    <p>Потребитель во всех сценариях один и тот же — меняется только то, что ему передали:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record Order(int Id, decimal Total);  // сущность из Domain
+
+public class OrderService(IOrderRepository repo)    // ← этот класс не меняется нигде ниже
+{
+    public Order? Get(int id) =&gt; repo.Find(id);
+}</code></pre>
+    </div>
+    <p>И три реализации контракта, которые понадобятся ниже (каждая в жизни лежит в своём файле):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class DbOrderRepository : IOrderRepository
+{
+    public int Calls { get; private set; }
+
+    public Order? Find(int id)
+    {
+        Calls++;                                  // считаем обращения, чтобы показать эффект кэша
+        return new Order(id, 100m);               // здесь был бы EF Core
+    }
+}
+
+public sealed class CachedOrderRepository(IOrderRepository inner) : IOrderRepository
+{
+    private readonly Dictionary&lt;int, Order&gt; _cache = new();
+
+    public Order? Find(int id)
+    {
+        if (_cache.TryGetValue(id, out var cached)) return cached;
+        var order = inner.Find(id);
+        if (order is not null) _cache[id] = order;
+        return order;
+    }
+}
+
+public sealed class HttpOrderRepository : IOrderRepository
+{
+    public Order? Find(int id) =&gt; new(id, 100m);  // здесь был бы HTTP-вызов
+}</code></pre>
+    </div>
+    <p>Здесь они собраны вместе только для показа; в реальном коде <code>OrderService</code> про них ничего не
+      знает.</p>
+
+    <h3>1. Тестируемость: подделка вместо базы</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// «подделка»: без базы, без сети, ещё и считает обращения
+public sealed class FakeOrderRepository(Order? preset) : IOrderRepository
+{
+    public int Calls { get; private set; }
+
+    public Order? Find(int id)
+    {
+        Calls++;
+        return preset;
+    }
+}
+
+// сам тест
+var fake = new FakeOrderRepository(new Order(42, 199.90m));
+var service = new OrderService(fake);
+
+Console.WriteLine(service.Get(42));
+Console.WriteLine($"обращений к подделке: {fake.Calls}");</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Order { Id = 42, Total = 199.90 }
+обращений к подделке: 1</code></pre>
+    </div>
+    <p>Тест проверяет логику <code>OrderService</code>, а не работу PostgreSQL: ни контейнера, ни строки
+      подключения, ни сети. Если бы сервис создавал <code>new OrderRepository()</code> сам, для теста
+      пришлось бы поднимать настоящую базу.</p>
+
+    <h3>2. Заменяемость: база → кэш → внешний API</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">IOrderRepository[] variants =
+{
+    new DbOrderRepository(),                              // читаем из базы
+    new CachedOrderRepository(new DbOrderRepository()),   // база + кэш
+    new HttpOrderRepository()                             // внешний сервис
+};
+
+foreach (var repo in variants)
+    Console.WriteLine($"{repo.GetType().Name,-22} -&gt; {new OrderService(repo).Get(5)}");</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">DbOrderRepository      -> Order { Id = 5, Total = 100 }
+CachedOrderRepository  -> Order { Id = 5, Total = 100 }
+HttpOrderRepository    -> Order { Id = 5, Total = 100 }</code></pre>
+    </div>
+    <p><code>OrderService</code> один и тот же — меняется только объект в конструкторе. В приложении с
+      DI-контейнером эту строку вообще не пишут в коде: её задаёт регистрация (глава 15).</p>
+
+    <h3>3. Изоляция изменений: правка заперта в одном классе</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var db = new DbOrderRepository();
+var repo = new CachedOrderRepository(db);          // добавили кэш...
+var service = new OrderService(repo);
+
+service.Get(5);
+service.Get(5);                                    // ...и второй раз в базу не идём
+Console.WriteLine($"в «базу» сходили {db.Calls} раз(а)");</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">в «базу» сходили 1 раз(а)</code></pre>
+    </div>
+    <p>Появился кэш — изменился один класс, <code>CachedOrderRepository</code>. <code>OrderService</code>,
+      <code>DbOrderRepository</code> и <code>HttpOrderRepository</code> остались как были: их эта правка не
+      касается.</p>
+
+    <h3>4. Параллельная работа: два класса на одном контракте</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">IOrderRepository cached = new CachedOrderRepository(new DbOrderRepository());
+IOrderRepository http   = new HttpOrderRepository();
+
+Console.WriteLine($"{cached.GetType().Name} и {http.GetType().Name}: общего только Find(int)");</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">CachedOrderRepository и HttpOrderRepository: общего только Find(int)</code></pre>
+    </div>
+    <p>Здесь «параллельная работа» — про <strong>людей</strong>, а не про потоки: два разработчика пишут два
+      класса по одному контракту, файлы не пересекаются, мержей нет. Договорились об
+      <code>Find(int) -&gt; Order?</code> — и дальше каждый свободен.</p>
+
+    <div class="box warn">
+      <span class="t">У этого есть цена</span>
+      <p>Файлов и уровней становится больше, а вызов «прыгает» через интерфейс: чтобы найти реализацию, нужно
+        перейти к ней, а не читать код построчно. Поэтому интерфейс вводят там, где есть <em>вторая</em>
+        реализация (тест, кэш, другой источник) или где граница между слоями, — а не «на каждый класс».</p>
+    </div>
+
     <div class="box note">
       <span class="t">Теперь зависимости нужно «собирать»</span>
       <p>Как только класс перестал создавать зависимости сам, кто-то должен их ему <strong>передать</strong>.
