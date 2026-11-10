@@ -292,6 +292,8 @@ finally
     <h2>Нагрузочный тест: как измерить сервис целиком</h2>
     <p>Метрики говорят, что происходит; нагрузочный тест отвечает «сколько сервис держит и что будет на пике».
       Инструменты: <strong>k6</strong>, <strong>Bombardier</strong>, <strong>wrk</strong>, JMeter.</p>
+    <p>Сценарий ниже — на JavaScript, и это не опечатка: нагрузочный генератор работает отдельным процессом и
+      только шлёт HTTP-запросы, поэтому его язык к коду сервиса отношения не имеет.</p>
     <div class="codewrap">
       <pre><code class="language-javascript">// k6 run load.js
 import http from 'k6/http';
