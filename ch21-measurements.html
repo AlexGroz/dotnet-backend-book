@@ -20,7 +20,7 @@
   <div class="chapter">
     <div class="part">.NET · Часть V · Путь запроса</div>
     <h1>Глава 21. Измерения и профилирование</h1>
-    <p class="sublead">p95/p99, dotnet-counters, BenchmarkDotNet, нагрузочные тесты</p>
+    <p class="sublead">p95/p99, dotnet-counters, dotnet-trace и gcdump, BenchmarkDotNet, нагрузочные тесты</p>
     <p><span class="tag core">основная глава</span></p>
     <h2>Зачем измерять (и почему «на глаз» не работает)</h2>
     <p>Оптимизация без цифр — это гадание: правки делаются «по ощущениям», а стало ли лучше — непонятно. Причём
@@ -67,47 +67,89 @@ dotnet-counters monitor --process-id 1234 \
     --counters System.Runtime,Microsoft.AspNetCore.Hosting</code></pre>
     </div>
     <div class="codewrap">
-      <p class="cap">Что видно на экране (пример)</p>
-      <pre><code class="language-text">[System.Runtime]
-    cpu-usage (%)                       42
-    gc-heap-size (MB)                   180
-    alloc-rate (B / 1 sec)              35 000 000     ← 35 МБ мусора в секунду
-    gen-0-gc-count / 1 sec              18
-    threadpool-queue-length             120            ← запросы ждут свободный поток
-
-[Microsoft.AspNetCore.Hosting]
-    requests-per-second                 480
-    current-requests                    95</code></pre>
+      <p class="cap">Реальный вывод на живом сервисе под нагрузкой (показаны 1-я и 5-я секунды)</p>
+      <pre><code class="language-text">[System.Runtime]                          1-я сек.      5-я сек.
+    CPU Usage (%)                             64.4          67.4
+    Allocation Rate (B / 1 sec)         11 951 032    12 300 632
+    GC Heap Size (MB)                        292.4         329.1   ← растёт монотонно</code></pre>
+    </div>
+    <p>Счётчики можно не только смотреть, но и сохранять — удобно, чтобы сравнить «до/после»:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">dotnet-counters collect -p 1234 --counters System.Runtime \
+    --format csv -o counters.csv --duration 00:00:30</code></pre>
     </div>
     <ul>
       <li><strong><code>alloc-rate</code></strong> высокий, а heap не растёт — много короткоживущего мусора: ищите
-        лишние строки, коллекции, бокс (глава 7).</li>
+        лишние строки, коллекции, бокс (глава 7);</li>
+      <li><strong>heap растёт монотонно</strong> — мусор кто-то держит: это уже не «много аллокаций», а утечка.
+        Дальше — <code>dotnet-gcdump</code> (раздел ниже). В примере выше heap вырос с 292 до 329 МБ за пять
+        секунд именно поэтому;</li>
       <li><strong><code>threadpool-queue-length</code></strong> растёт — потоки заняты ожиданием: смотрите
-        <code>.Result</code>/<code>.Wait()</code> и синхронные вызовы БД (глава 9).</li>
-      <li><strong><code>gen-0-gc-count</code></strong> очень высокий — GC работает почти непрерывно: это тоже про
-        аллокации.</li>
-      <li><strong><code>cpu-usage</code></strong> низкий, а задержка высокая — мы <em>ждём</em>, а не считаем.</li>
+        <code>.Result</code>/<code>.Wait()</code> и синхронные вызовы БД (глава 9);</li>
+      <li><strong><code>cpu-usage</code></strong> низкий, а задержка высокая — мы <em>ждём</em>, а не считаем;</li>
+      <li><code>Gen 0 GC Count</code> и «% Time in GC» показывают, сколько времени уходит на сборки, но их значения
+        зависят от бюджета поколений — смотрите их вместе с <code>alloc-rate</code>, а не по отдельности.</li>
     </ul>
 
     <h2>Профилирование: где именно «горит»</h2>
     <p>Счётчики отвечают «стало плохо», а профилировщик — «<strong>в каком методе</strong>». Для .NET есть
-      <code>dotnet-trace</code>: он снимает сэмплы стека и пишет файл, который открывают в Visual Studio или
-      Speedscope.</p>
+      <code>dotnet-trace</code>: он снимает сэмплы стека и пишет файл <code>.nettrace</code>, который открывают в
+      Visual Studio, PerfView или Speedscope.</p>
     <div class="codewrap">
       <pre><code class="language-bash">dotnet tool install -g dotnet-trace
 
-# снять профиль CPU на 30 секунд
-dotnet-trace collect --process-id 1234 --profile cpu-sampling --duration 00:00:30
+# какие профили бывают (реальный вывод)
+$ dotnet-trace list-profiles
+cpu-sampling  - Useful for tracking CPU usage and general .NET runtime information. This is the default option...
+gc-verbose    - Tracks GC collections and samples object allocations.
+gc-collect    - Tracks GC collections only at very low overhead.
+database      - Captures ADO.NET and Entity Framework database commands</code></pre>
+    </div>
+    <p>Две основные команды — CPU и GC. <code>--duration</code> принимает <code>дд:чч:мм:сс</code>, поэтому
+      <code>00:00:30</code> — это 30 секунд (проверено: с <code>00:00:10</code> сбор останавливается сам через
+      10 секунд), а <code>-o</code> задаёт имя файла:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># 1) CPU: где процессор проводит время
+dotnet-trace collect --process-id 1234 --profile cpu-sampling --duration 00:00:30 -o cpu.nettrace
 
-# посмотреть, что происходит с GC и аллокациями
-dotnet-trace collect --process-id 1234 --profile gc-verbose --duration 00:00:30</code></pre>
+# 2) GC: сборки и сэмплы аллокаций (тяжелее — снимайте короткими окнами)
+dotnet-trace collect --process-id 1234 --profile gc-verbose --duration 00:00:30 -o gc.nettrace
+
+# 3) только события GC, минимальный оверхед — для длинных окон
+dotnet-trace collect --process-id 1234 --profile gc-collect --duration 00:05:00 -o gc-low.nettrace</code></pre>
+    </div>
+    <p>CPU-профиль разбирается отчётом <code>topN</code>. Ниже — реальный вывод для сервиса под нагрузкой:</p>
+    <div class="codewrap">
+      <p class="cap">dotnet-trace report cpu.nettrace topN -n 8</p>
+      <pre><code class="language-text">Top 8 Functions (Exclusive)                                     Inclusive   Exclusive
+1. ch21app!Program+&lt;&gt;c__DisplayClass0_0.&lt;&lt;Main&gt;$&gt;b__0(int32)        48.48%      48.44%
+2. LowLevelLifoSemaphore.WaitNative(...)                             19.14%      19.14%
+3. WaitHandle.WaitOneNoCheck(int32)                                      8%          8%
+4. ManualResetEventSlim.Wait(int32, ...)                                 8%          4%
+5. Monitor.Wait(class System.Object,int32)                               4%          4%
+6. Missing Symbol                                                     3.96%       3.96%
+7. Watcher!Interop+Sys.Read(...)                                      3.94%       3.94%
+8. LowLevelSpinWaiter.Wait(int32,int32,int32)                         2.34%       2.34%</code></pre>
+    </div>
+    <p>Как читать: <code>ch21app!...</code> — наш собственный обработчик <code>/orders/{id}</code>
+      (<code>b__0</code> — лямбда из <code>MapGet</code>), в нём 48 % сэмплов. Остальные строки — <em>ожидание</em>
+      (<code>WaitNative</code>, <code>WaitOne</code>, <code>Monitor.Wait</code>): поток стоит, а не считает. Разница
+      важная: «CPU занят» и «CPU ждёт» лечатся по-разному (глава 9).</p>
+    <div class="box note">
+      <span class="t">Inclusive и Exclusive</span>
+      <p><strong>Exclusive</strong> — время в самом методе, <strong>Inclusive</strong> — включая вызванные из него.
+        Узкое место ищут по exclusive: если 40 % exclusive в одном методе, оптимизировать надо его, а не его
+        вызывающих.</p>
     </div>
     <ul>
-      <li><strong>CPU-профиль</strong> показывает «горячие» методы: где процессор проводит время.</li>
-      <li><strong>GC-профиль</strong> — паузы, частоту сборок и кто создаёт больше всего мусора (глава 7).</li>
-      <li><strong><code>dotnet-gcdump</code></strong> — снимок кучи: помогает искать утечки (объекты, которые не
-        должны жить).</li>
-      <li>В IDE то же самое: Performance Profiler в Visual Studio, dotTrace в Rider, PerfView для глубокого разбора.</li>
+      <li><strong>CPU-профиль</strong> (<code>cpu-sampling</code>) показывает «горячие» методы: где процессор
+        проводит время;</li>
+      <li><strong>GC-профиль</strong> (<code>gc-verbose</code>) — паузы, частоту сборок и <em>кто</em> создаёт больше
+        всего мусора (глава 7);</li>
+      <li><code>.nettrace</code> открывается в Visual Studio (File → Open) и PerfView, а для Speedscope
+        конвертируется: <code>dotnet-trace convert cpu.nettrace --format Speedscope</code> — проверено, появляется
+        <code>cpu.speedscope.json</code>;</li>
+      <li>В IDE то же самое: Performance Profiler в Visual Studio, dotTrace в Rider.</li>
     </ul>
     <div class="box warn">
       <span class="t">Порядок важен</span>
@@ -115,6 +157,53 @@ dotnet-trace collect --process-id 1234 --profile gc-verbose --duration 00:00:30<
         эндпоинт, при какой нагрузке), и только потом профиль показывает <em>метод</em>. Иначе вы будете
         оптимизировать код, который в проде не греется.</p>
     </div>
+
+    <h3>Утечки: <code>dotnet-gcdump</code></h3>
+    <p>Снимок кучи нужен, когда heap растёт, а <code>alloc-rate</code> этого не объясняет: значит кто-то держит
+      ссылки. Снимают два снимка — до и после сценария — и сравнивают:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">dotnet tool install -g dotnet-gcdump
+
+# снимок №1 — до нагрузки (пока heap маленький)
+dotnet-gcdump collect --process-id 1234 -o before.gcdump
+
+# ... прогоняем сценарий, который «течёт» ...
+
+# снимок №2 — после
+dotnet-gcdump collect --process-id 1234 -o after.gcdump
+
+# отчёт в stdout: типы, количество объектов, байты
+dotnet-gcdump report after.gcdump</code></pre>
+    </div>
+    <p>Реальный опыт: сервис обработал 10 000 запросов, каждый оставляет в статическом
+      <code>List&lt;byte[]&gt;</code> массив на 4 КБ. Два снимка:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">before.gcdump          996 426 байт кучи      12 435 объектов
+after.gcdump        42 711 502 байта кучи     25 373 объекта</code></pre>
+    </div>
+    <p>Дальше ищут тип, который вырос. Верхние строки отчёта <code>after.gcdump</code> (реальный вывод,
+      сокращённо):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">   Object Bytes     Count  Type
+        131,096         1  System.Byte[][] (Bytes &gt; 100K)
+         54,720         1  System.String (Bytes &gt; 10K)
+         16,408         1  System.Byte[] (Bytes &gt; 10K)
+          4,120    10 033  System.Byte[] (Bytes &gt; 1K)        ← в before.gcdump было 3
+             32         1  System.Collections.Generic.List&lt;System.Byte[]&gt;</code></pre>
+    </div>
+    <p>10 033 объекта по ≈4 КБ — это и есть 40 МБ, и контейнер виден сразу:
+      <code>List&lt;System.Byte[]&gt;</code>.</p>
+    <div class="box warn">
+      <span class="t">Снимок показывает живые объекты, но не «кто виноват»</span>
+      <p>Объектов в дампе 25 373, хотя сервис аллоцирует ~12 МБ/с: короткоживущий мусор в снимок не попадает,
+        остаётся то, на что есть ссылки. Поэтому <code>gcdump</code> — про <em>утечки</em>, а «кто создаёт много
+        мусора» показывает <code>gc-verbose</code>.</p>
+      <p>Цифры в отчёте — <strong>собственный размер</strong> объектов, а не «сколько освободится». Строка
+        <code>List&lt;byte[]&gt;</code> весит 32 байта, хотя держит 40 МБ: по ней утечку не видно, её видно по
+        строкам <code>Byte[]</code> — потому и сравнивают два снимка.</p>
+    </div>
+    <p>Ту же пару снимков можно снять из Visual Studio (Debug → Take Heap Snapshot): она покажет ещё и diff, и путь
+      ссылок до объекта — логичный следующий шаг после <code>gcdump</code>.</p>
 
     <h2>Микробенчмарки: <code>BenchmarkDotNet</code></h2>
     <p>Для «а что быстрее — конкатенация или <code>StringBuilder</code>?» нужен не <code>Stopwatch</code> в цикле,
@@ -266,8 +355,9 @@ export default function () {
         <li>Без измерения нет оптимизации: <strong>что, где и сколько</strong> — до правок.</li>
         <li>Метрики сервиса: RPS, <strong>p95/p99</strong>, ошибки, насыщение. Средняя задержка обманчива.</li>
         <li><code>dotnet-counters</code> — быстрый взгляд: CPU, alloc-rate, GC, очередь пула потоков.</li>
-        <li><code>dotnet-trace</code>/профайлер — где именно время; <code>BenchmarkDotNet</code> — микробенчмарки
-          с прогревом и аллокациями.</li>
+        <li><code>dotnet-trace --profile cpu-sampling</code> / <code>gc-verbose</code> — где именно время
+          (отчёт <code>topN</code>); <code>dotnet-gcdump</code> — снимки кучи для утечек; <code>BenchmarkDotNet</code>
+          — микробенчмарки с прогревом и аллокациями.</li>
         <li>Гистограммы (а не средние) дают перцентили; нагрузочный тест — ответ «сколько держим».</li>
         <li>Сравнивать только в одинаковых условиях; иначе вы измеряете кэш, а не улучшение.</li>
       </ul>
