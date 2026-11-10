@@ -182,12 +182,155 @@ private static readonly Histogram&lt;double&gt; PayDuration =
 └─ (в другом сервисе) обработка события outbox   — тот же TraceId</code></pre>
     </div>
     <ul>
-      <li><strong>Как включить:</strong> <code>AddOpenTelemetry().WithTracing(...)</code> + инструментирование
-        ASP.NET Core, HttpClient, EF Core/Npgsql. Свои спаны — через <code>ActivitySource</code>.</li>
+      <li><strong>Как включить:</strong> пакеты OpenTelemetry + инструментирование ASP.NET Core, HttpClient,
+        EF Core/Npgsql. Свои спаны — через <code>ActivitySource</code>. Готовый код и реальный вывод трейса —
+        в следующем разделе.</li>
       <li><strong>Сэмплирование обязательно:</strong> хранить все трейсы дорого; обычно 1–10 % + все «медленные»
         и все с ошибкой (tail-based sampling).</li>
       <li><strong>Зачем:</strong> именно трейс отвечает «где ушло время» — и часто показывает, что виноват не
         ваш код, а внешний сервис.</li>
+    </ul>
+
+    <h2>Включаем трейсинг: пакеты и код</h2>
+    <p>Нужны пакеты OpenTelemetry: хост-интеграция, инструментирование того, что хотите видеть, и экспортёр.
+      Ставятся как обычно — <code>dotnet add package ИмяПакета</code>; версии ниже — из реальной установки на
+      .NET 8:</p>
+    <table>
+      <thead><tr><th>Пакет</th><th>Версия</th><th>Зачем</th></tr></thead>
+      <tbody>
+        <tr><td><code>OpenTelemetry.Extensions.Hosting</code></td><td>1.20.1</td><td><code>AddOpenTelemetry()</code>
+          в приложении</td></tr>
+        <tr><td><code>OpenTelemetry.Instrumentation.AspNetCore</code></td><td>1.20.2</td><td>спаны входящих
+          запросов</td></tr>
+        <tr><td><code>OpenTelemetry.Instrumentation.Http</code></td><td>1.20.2</td><td>спаны исходящих
+          HTTP-вызовов</td></tr>
+        <tr><td><code>OpenTelemetry.Exporter.Console</code></td><td>1.20.1</td><td>локально: спаны печатаются в
+          консоль</td></tr>
+        <tr><td><code>OpenTelemetry.Exporter.OpenTelemetryProtocol</code></td><td>1.20.1</td><td>в проде: OTLP в
+          коллектор</td></tr>
+      </tbody>
+    </table>
+    <p>Вся настройка — один блок в <code>Program.cs</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// using OpenTelemetry.Resources;
+// using OpenTelemetry.Trace;
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r =&gt; r.AddService("orders-api"))    // service.name попадёт в каждый спан
+    .WithTracing(t =&gt; t
+        .AddSource(OrderService.SourceName)                // свои спаны (см. ниже)
+        .AddAspNetCoreInstrumentation()                    // входящие запросы → Server-спаны
+        .AddHttpClientInstrumentation()                    // исходящие HTTP    → Client-спаны
+        .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(0.1)))  // 10 % трейсов
+        .AddConsoleExporter());                            // локально; в проде — AddOtlpExporter()
+
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton&lt;OrderService&gt;();</code></pre>
+    </div>
+    <p>Свои спаны создаёт <code>ActivitySource</code> из <code>System.Diagnostics</code> — это часть BCL: без
+      OpenTelemetry он просто ничего не делает. Источник делают <code>static readonly</code>, один на
+      библиотеку или сервис:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class OrderService
+{
+    public const string SourceName = "Shop.Orders";
+    private static readonly ActivitySource Source = new(SourceName);   // создаём один раз
+
+    public List&lt;Order&gt; Build(int count)
+    {
+        using var span = Source.StartActivity("orders.build", ActivityKind.Internal);
+        span?.SetTag("orders.count", count);                 // атрибуты спана
+
+        var orders = Enumerable.Range(1, count).Select(i =&gt; new Order(i, i * 100m)).ToList();
+        span?.SetTag("orders.total", (double)orders.Sum(o =&gt; o.Total));
+
+        return orders;
+    }   // using закроет спан и запишет длительность
+}</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Почему <code>span?</code> с вопросительным знаком</span>
+      <p>Если спан никто не слушает, <code>StartActivity</code> возвращает <code>null</code> — и это норма: при
+        выключенном трейсинге код не платит за спаны. Проверено: без слушателя — <code>null</code>, после
+        регистрации <code>ActivityListener</code> — спан. Поэтому пишут <code>span?.</code>, а не падают.</p>
+    </div>
+    <p>Запрос <code>GET /orders?count=3</code> (эндпоинт дополнительно вызывает <code>/health</code> через
+      <code>HttpClient</code>) даёт четыре спана. Дерево собрано из реального вывода
+      <code>AddConsoleExporter()</code>; вложенность задаёт <code>ParentSpanId</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">TraceId 10792c3e95b7e6f360d709b4225b987c
+└─ GET /orders          Server    Microsoft.AspNetCore   193.7 мс   span 133d79b5  parent —
+   ├─ orders.build      Internal  Shop.Orders              3.1 мс   span 81390f9a  parent 133d79b5
+   │     orders.count = 3, orders.total = 600
+   └─ GET               Client    System.Net.Http         44.1 мс   span 54638b04  parent 133d79b5
+         url.full = http://127.0.0.1:5220/health
+         └─ GET /health  Server    Microsoft.AspNetCore      6.3 мс   span d6fe294e  parent 54638b04</code></pre>
+    </div>
+    <p>Вот один из этих спанов в сыром виде — реальный вывод того же запуска (сокращённо):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Activity.TraceId:            10792c3e95b7e6f360d709b4225b987c
+Activity.SpanId:             81390f9a51a3a363
+Activity.ParentSpanId:       133d79b5ff1a99df
+Activity.DisplayName:        orders.build
+Activity.Kind:               Internal
+Activity.Duration:           00:00:00.0031257
+Activity.Tags:
+    orders.count: 3
+    orders.total: 600
+Instrumentation scope (ActivitySource):
+    Name: Shop.Orders
+Resource associated with Activity:
+    service.name: orders-api</code></pre>
+    </div>
+    <ul>
+      <li><strong>Вложенность</strong> — это <code>ParentSpanId</code>, по нему коллектор строит дерево. Ваш спан
+        вложился в текущий автоматически: <code>StartActivity</code> берёт <code>Activity.Current</code>
+        родителем;</li>
+      <li><strong>один <code>TraceId</code></strong> на весь запрос — он же уходит в <code>traceparent</code>
+        соседнему сервису, поэтому там появится тот же <code>TraceId</code>;</li>
+      <li><strong><code>service.name</code></strong> берётся из ресурса (<code>ConfigureResource</code>), а не из
+        кода спана.</li>
+    </ul>
+
+    <h3>Что добавляет какая инструментация</h3>
+    <table>
+      <thead><tr><th>Вызов / пакет</th><th>Спаны</th><th>Что внутри</th></tr></thead>
+      <tbody>
+        <tr><td><code>AddAspNetCoreInstrumentation()</code></td><td>Server на каждый входящий запрос</td>
+          <td>метод, путь и маршрут, статус, длительность</td></tr>
+        <tr><td><code>AddHttpClientInstrumentation()</code></td><td>Client на каждый исходящий HTTP-вызов</td>
+          <td>URL, статус; пробрасывает <code>traceparent</code></td></tr>
+        <tr><td><code>AddSource("Shop.Orders")</code></td><td>ваши спаны</td><td>то, что вы сами назвали и
+          разметили</td></tr>
+        <tr><td><code>AddEntityFrameworkCoreInstrumentation()</code> — пакет
+          <code>OpenTelemetry.Instrumentation.EntityFrameworkCore</code>, пока <strong>beta</strong>
+          (<code>1.20.2-beta.1</code>)</td><td>спан на каждую команду БД</td><td>команда и параметры; SQL-текст
+          сам не добавляется — если нужен, его кладут в <code>EnrichWithIDbCommand</code> (и думают про
+          ПДн)</td></tr>
+        <tr><td><code>AddSource("Npgsql")</code></td><td>спаны самого драйвера</td><td>команда и открытие
+          соединения; источник действительно называется <code>Npgsql</code> (проверено)</td></tr>
+      </tbody>
+    </table>
+    <p>Ещё две настройки, о которых стоит знать:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// EF Core: текст SQL попадёт в спан как тег (осторожно с ПДн в параметрах)
+.AddEntityFrameworkCoreInstrumentation(o =&gt;
+    o.EnrichWithIDbCommand = (activity, command) =&gt; activity.SetTag("db.statement", command.CommandText));
+
+// ошибка в трейсе: статус Error + описание (проверено — сохраняется)
+span?.SetStatus(ActivityStatusCode.Error, ex.Message);</code></pre>
+    </div>
+    <ul>
+      <li><strong>Локально</strong> — <code>AddConsoleExporter()</code>: спаны печатаются в консоль, как выше.
+        Быстрая проверка, что инструментирование вообще работает.</li>
+      <li><strong>В проде</strong> — <code>AddOtlpExporter(o =&gt; o.Endpoint = new Uri("http://collector:4317"))</code>:
+        один протокол на логи, метрики и трейсы; принимают Jaeger, Tempo, Seq, облачные сервисы.</li>
+      <li><strong>Сэмплер</strong> — <code>TraceIdRatioBasedSampler(0.1)</code> берёт 10 % трейсов, а
+        <code>ParentBasedSampler</code> уважает решение родителя, поэтому трейс не рвётся на полпути между
+        сервисами.</li>
+      <li><strong>HttpClient-спаны</strong> появляются у любых <code>HttpClient</code> (инструментация слушает
+        <code>System.Net.Http</code>): проверено — Client-спан есть и у <code>new HttpClient()</code>.
+        <code>AddHttpClient()</code> нужен по другой причине — пулы и настройка клиентов.</li>
     </ul>
 
     <h2>Частые ошибки</h2>

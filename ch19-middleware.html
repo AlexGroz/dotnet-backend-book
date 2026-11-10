@@ -113,7 +113,8 @@ app.MapGet("/orders/{id:int}", async (int id, OrdersDb db, CancellationToken ct)
 app.Run();</code></pre>
     </div>
     <p>Зависимости (<code>OrdersDb</code>, <code>CancellationToken</code>) подставляются в параметры
-      автоматически — контейнер и привязка модели работают и здесь.</p>
+      автоматически — контейнер и привязка модели работают и здесь. <code>OrdersDb</code> — контекст EF Core
+      (глава 24); для валидации ниже он не нужен.</p>
 
     <h2>Контроллеры (MVC): что дают</h2>
     <p>В MVC эндпоинты описываются классами-контроллерами. У них есть атрибуты и соглашения, которые берут часть
@@ -153,23 +154,128 @@ public sealed class OrdersController : ControllerBase
     <p>Автоматическая валидация — это поведение атрибута <code>[ApiController]</code>: он проверяет
       <code>ModelState</code> до вызова действия и возвращает <code>400</code>, если данные не прошли проверки.
       В Minimal API такого атрибута и такого «действия» нет — обработчик просто вызывается. Значит, проверять
-      нужно <strong>явно</strong>:</p>
+      нужно <strong>явно</strong>. Два рабочих способа — оба с полным кодом.</p>
+
+    <h3>Способ 1: ручная проверка</h3>
+    <p>Правила вешаются атрибутами <code>System.ComponentModel.DataAnnotations</code> — теми же, что понимает
+      <code>[ApiController]</code> в MVC:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// ✔ 1) ручная проверка — минимум
-app.MapPost("/orders", async (CreateOrderDto dto, OrdersDb db, CancellationToken ct) =&gt;
+      <pre><code class="language-csharp">public sealed record CreateOrderDto(
+    [property: Range(1, int.MaxValue, ErrorMessage = "CustomerId должен быть больше 0")]
+    int CustomerId,
+
+    [property: Range(0.01, 1_000_000, ErrorMessage = "Total должен быть положительным")]
+    decimal Total,
+
+    [property: Required, MinLength(3, ErrorMessage = "Комментарий не короче 3 символов")]
+    string? Comment);</code></pre>
+    </div>
+    <p>Сам <code>Validate</code> — обычный метод на десять строк: прогоняет атрибуты и складывает ошибки в словарь
+      «поле → сообщения». Формат словаря не случаен: ровно его принимает
+      <code>Results.ValidationProblem</code>. Метод можно держать локальной функцией в <code>Program.cs</code>
+      (как ниже) или в отдельном статическом классе — магии в нём нет.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// using System.ComponentModel.DataAnnotations;
+
+static Dictionary&lt;string, string[]&gt; Validate(object dto)
+{
+    var results = new List&lt;ValidationResult&gt;();
+
+    // validateAllProperties: true — иначе проверятся только [Required]
+    if (Validator.TryValidateObject(dto, new ValidationContext(dto), results, validateAllProperties: true))
+        return new Dictionary&lt;string, string[]&gt;();
+
+    return results
+        .SelectMany(r =&gt; (r.MemberNames.Any() ? r.MemberNames : new[] { "" })
+            .Select(member =&gt; (Member: member, Message: r.ErrorMessage ?? "неверное значение")))
+        .GroupBy(x =&gt; x.Member)
+        .ToDictionary(g =&gt; g.Key, g =&gt; g.Select(x =&gt; x.Message).ToArray());
+}</code></pre>
+    </div>
+    <p>Эндпоинт: проверили — вернули <code>400</code>; ошибок нет — идём дальше.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.MapPost("/orders", (CreateOrderDto dto) =&gt;
 {
     var errors = Validate(dto);
     if (errors.Count &gt; 0)
-        return Results.ValidationProblem(errors);      // 400 + описание
+        return Results.ValidationProblem(errors);        // 400 + ошибки по каждому полю
 
-    …
-});
-
-// ✔ 2) FluentValidation + эндпоинт-фильтр — для сложных правил
-builder.Services.AddValidatorsFromAssemblyContaining&lt;CreateOrderValidator&gt;();
-app.MapPost("/orders", (CreateOrderDto dto) =&gt; …)
-   .AddEndpointFilter&lt;ValidationFilter&lt;CreateOrderDto&gt;&gt;();</code></pre>
+    return Results.Created($"/orders/{dto.CustomerId}", dto);
+});</code></pre>
     </div>
+    <p>Реальный запрос с плохими данными и реальный ответ:</p>
+    <div class="codewrap">
+      <p class="cap">curl -X POST /orders -d '{"customerId":0,"total":-5,"comment":"x"}'</p>
+      <pre><code class="language-text">HTTP 400
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "title": "One or more validation errors occurred.",
+  "status": 400,
+  "errors": {
+    "CustomerId": [ "CustomerId должен быть больше 0" ],
+    "Total": [ "Total должен быть положительным" ],
+    "Comment": [ "Комментарий не короче 3 символов" ]
+  }
+}</code></pre>
+    </div>
+    <p>С валидными данными тот же эндпоинт отвечает <code>201</code> и телом заказа — реальный вывод:
+      <code>{"customerId":42,"total":1500,"comment":"срочно"}</code>.</p>
+    <div class="box note">
+      <span class="t">Ограничение DataAnnotations</span>
+      <p><code>TryValidateObject</code> проверяет только свойства верхнего уровня: вложенный объект с пустым
+        обязательным полем ошибки не даст (проверено: 0 ошибок). Для вложенных данных либо проверяйте детей
+        отдельно, либо берите FluentValidation — у него есть правила для вложенных объектов
+        (<code>ChildRules</code>).</p>
+    </div>
+
+    <h3>Способ 2: FluentValidation + эндпоинт-фильтр</h3>
+    <p>Когда правил много и они повторяются на десятке эндпоинтов, валидатор выносят в отдельный класс, а проверку
+      — в фильтр. Нужны пакеты <code>FluentValidation</code> и
+      <code>FluentValidation.DependencyInjectionExtensions</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// using FluentValidation;
+
+public sealed class CreateOrderValidator : AbstractValidator&lt;CreateOrderDto&gt;
+{
+    public CreateOrderValidator()
+    {
+        RuleFor(x =&gt; x.CustomerId).GreaterThan(0).WithMessage("CustomerId должен быть больше 0");
+        RuleFor(x =&gt; x.Total).GreaterThan(0).WithMessage("Total должен быть положительным");
+    }
+}
+
+// один фильтр на все DTO: IValidator&lt;T&gt; приходит из контейнера
+public sealed class ValidationFilter&lt;T&gt;(IValidator&lt;T&gt; validator) : IEndpointFilter where T : class
+{
+    public async ValueTask&lt;object?&gt; InvokeAsync(EndpointFilterInvocationContext ctx,
+                                              EndpointFilterDelegate next)
+    {
+        var dto = ctx.Arguments.OfType&lt;T&gt;().FirstOrDefault();
+        if (dto is null) return await next(ctx);
+
+        var result = await validator.ValidateAsync(dto);
+        return result.IsValid ? await next(ctx) : Results.ValidationProblem(result.ToDictionary());
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddValidatorsFromAssemblyContaining&lt;CreateOrderValidator&gt;();
+builder.Services.AddScoped(typeof(ValidationFilter&lt;&gt;));       // открытый generic — под любой T
+
+app.MapPost("/orders", (CreateOrderDto dto) =&gt; Results.Ok(dto))
+   .AddEndpointFilter&lt;ValidationFilter&lt;CreateOrderDto&gt;&gt;();   // ← вся проверка здесь</code></pre>
+    </div>
+    <p>Обработчик остаётся в одну строку: невалидный запрос до него не доходит. Ответ тот же по форме — на том
+      же плохом запросе реальный вывод: <code>HTTP 400</code> и
+      <code>"errors": { "CustomerId": [ … ], "Total": [ … ] }</code>.</p>
+    <p>Что выбрать:</p>
+    <ul>
+      <li><strong>1–2 правила в одном эндпоинте</strong> — ручная проверка: правила рядом с обработчиком, ничего
+        не надо регистрировать;</li>
+      <li><strong>много правил или одни и те же правила на многих эндпоинтах</strong> — фильтр: код валидации
+        один, обработчики короткие, валидатор тестируется отдельно.</li>
+    </ul>
+
     <div class="box warn">
       <span class="t">«Почему нельзя как в контроллерах»</span>
       <p>Можно — но это придётся <strong>сделать явно</strong>. Автоматизм — не свойство Minimal API, а
