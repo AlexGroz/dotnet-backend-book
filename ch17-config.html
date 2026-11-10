@@ -19,171 +19,278 @@
   <div class="chapter">
     <div class="part">.NET · Часть IV · Сборка приложения</div>
     <h1>Глава 17. Конфигурация и опции</h1>
-    <p class="sublead">Настройки приложения: откуда они берутся, как их читать и почему у «опций» тоже есть
-      жизненные циклы.</p>
+    <p class="sublead">Что такое настройки, где они физически лежат, почему одно и то же значение задают в
+      нескольких местах — и как прочитать его в коде одним классом.</p>
 
-    <h2>Откуда берётся конфигурация</h2>
-    <p>Хост собирает <code>IConfiguration</code> из нескольких <strong>источников</strong> (провайдеров).
-      Источники применяются по порядку, и <strong>последний перекрывает предыдущие</strong>:</p>
-    <ol>
-      <li><code>appsettings.json</code> — базовые значения;</li>
-      <li><code>appsettings.{Environment}.json</code> — переопределения для окружения (глава 16);</li>
-      <li>секреты разработчика (<code>dotnet user-secrets</code>) — только в Development;</li>
-      <li><strong>переменные окружения</strong> — то, что задаётся в контейнере/на сервере;</li>
-      <li><strong>аргументы командной строки</strong>.</li>
-    </ol>
-    <p>Это не схема из документации: источники можно перечислить в отладочном выводе. Для обычного
-      веб-приложения их список такой (реальный запуск, у JSON-провайдеров видно, какой файл подключён):</p>
+    <h2>Зачем нужны настройки</h2>
+    <p>Настройка — это значение, которое <strong>отличается от запуска к запуску</strong>, но не должно быть
+      зашито в код:</p>
+    <ul>
+      <li>адрес базы данных: локально <code>localhost</code>, в проде — отдельный сервер;</li>
+      <li>сколько заказов показывать на одной странице списка;</li>
+      <li>логин и адрес SMTP для писем;</li>
+      <li>подробный лог включать или нет.</li>
+    </ul>
+    <p>Код у приложения один, а запусков много: ваш ноутбук, машина коллеги, тестовый стенд, прод. Если адрес
+      базы написать прямо в коде, под каждый стенд придётся собирать отдельную сборку. Поэтому значения выносят
+      наружу — в файлы и переменные окружения, — а приложение читает их при старте.</p>
+    <p>Всю главу будем смотреть на одном значении — <code>Orders:PageSize</code>, «сколько заказов отдавать на
+      одной странице списка». Клиент дёргает <code>GET /orders?page=2</code>, сервер смотрит в настройки и
+      возвращает столько заказов. На работу приложения это влияет напрямую (реальный запуск, в базе 120
+      заказов):</p>
     <div class="codewrap">
-      <pre><code class="language-text">1) MemoryConfigurationProvider                     ← то, что хост положил в память
-2) EnvironmentVariablesConfigurationProvider        служебные источники хоста
-3) MemoryConfigurationProvider
-4) EnvironmentVariablesConfigurationProvider
-5) JsonConfigurationProvider  &lt;- appsettings.json
-6) JsonConfigurationProvider  &lt;- appsettings.Development.json
-7) EnvironmentVariablesConfigurationProvider        ← все переменные окружения
-8) ChainedConfigurationProvider</code></pre>
+      <pre><code class="language-text">всего заказов 120, на страницу 20 → страниц 6
+всего заказов 120, на страницу 50 → страниц 3</code></pre>
     </div>
-    <p>Читать этот список нужно снизу вверх: если ключ есть в нескольких источниках, побеждает
-      <strong>последний</strong>. Проверяется это одним и тем же приложением — меняется только способ задать
-      <code>Orders:PageSize</code>:</p>
-    <table>
-      <thead><tr><th>Что задали</th><th>Как</th><th>Итоговый <code>PageSize</code></th></tr></thead>
-      <tbody>
-        <tr><td>только базовый файл</td><td><code>appsettings.json</code></td><td>50</td></tr>
-        <tr><td>файл окружения</td><td><code>appsettings.Development.json</code> — обычный
-          <code>dotnet run</code></td><td>20 (файл окружения перекрыл базовый)</td></tr>
-        <tr><td>переменная окружения</td><td><code>Orders__PageSize=100 dotnet run</code></td><td>100
-          (перекрыла оба файла)</td></tr>
-        <tr><td>аргумент командной строки</td><td><code>dotnet run -- --Orders:PageSize=7</code></td>
-          <td>7 (перекрыл всё)</td></tr>
-        <tr><td>окружение Production</td><td><code>ASPNETCORE_ENVIRONMENT=Production</code>, запуск
-          <code>app.dll</code></td><td>50 — файл окружения не подключён</td></tr>
-      </tbody>
-    </table>
-    <p>Отсюда рабочее правило: <strong>файл — значения по умолчанию, окружение — то, что меняется при
-      деплое</strong>. Поэтому <code>Orders:PageSize</code> в контейнере задают переменной
-      <code>Orders__PageSize</code> (двойное подчёркивание — это <code>:</code>), а не правкой файла в образе.</p>
-    <p>Последняя строка про окружение — про <code>ASPNETCORE_ENVIRONMENT</code> /
-      <code>DOTNET_ENVIRONMENT</code>: от него зависит, какой файл <code>appsettings.{Environment}.json</code>
-      будет подключён. При запуске через <code>dotnet run</code> переменную перебивает профиль из
-      <code>Properties/launchSettings.json</code> — поэтому в примере запускается собранный <code>app.dll</code>.</p>
+    <p>Локально удобно 20: страница меньше, тесты быстрее. В проде удобно 50: меньше запросов к базе. Приложение
+      одно и то же — значение разное. Дальше вся глава про то, <strong>как задать это значение снаружи</strong> и
+      <strong>как приложение выбирает, какое из заданных взять</strong>.</p>
+    <div class="box note">
+      <span class="t">Настройка и секрет — не одно и то же</span>
+      <p><code>PageSize</code> спокойно лежит в git: это не тайна. А строку подключения с паролем или ключ
+        платёжного API в репозиторий класть нельзя — про них отдельный раздел в конце главы.</p>
+    </div>
+
+    <h2>Ключ, значение и стопка источников</h2>
+    <p>Любая настройка — это пара «ключ → значение». Ключ — обычная строка, а двоеточие в ней означает
+      вложенность: запись в JSON <code>"Orders": { "PageSize": 50 }</code> — это ключ
+      <code>Orders:PageSize</code> со значением <code>50</code>.</p>
+    <p>Один и тот же ключ можно задать в нескольких местах. Приложение складывает их <strong>стопкой</strong>,
+      снизу вверх:</p>
+    <ol>
+      <li><code>appsettings.json</code> — базовые значения, одинаковые для всех;</li>
+      <li><code>appsettings.{Окружение}.json</code> — то, что отличается на конкретном стенде;</li>
+      <li>секреты разработчика (<code>dotnet user-secrets</code>) — только на локальной машине;</li>
+      <li><strong>переменные окружения</strong> — ими настройки задают в контейнере и на сервере;</li>
+      <li><strong>аргументы командной строки</strong> — то, что передали в момент запуска.</li>
+    </ol>
+    <p>Если ключ есть в нескольких слоях, <strong>побеждает последний</strong> — самый «близкий» к запуску.
+      Верхний слой перекрывает нижние, как правки поверх черновика: читается не всё сразу, а верхняя запись.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">appsettings.json              Orders:PageSize = 50    ← база
+appsettings.Development.json  Orders:PageSize = 20    ← перекрыл базу
+переменные окружения          Orders:PageSize = 100   ← перекрыли файлы
+аргументы командной строки    Orders:PageSize = 7     ← перекрыл всё
+
+итог: приложение видит 7, остальные значения «не существуют»</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Это один ключ, а не разные настройки</span>
+      <p>Самая частая путаница: кажется, что <code>Orders:PageSize</code> в файле и <code>Orders__PageSize</code>
+        в переменной окружения — <em>два разных</em> значения, между которыми надо выбирать. Нет: это
+        <strong>один ключ</strong>, заданный в двух местах. Приложение видит ровно одно значение — из
+        победившего слоя.</p>
+      <p>И само слово <code>PageSize</code> к порядку источников отношения не имеет: это просто число, на
+        котором удобно показывать, чьё значение победило. Дальше мы будем менять одно и то же число из разных
+        мест и смотреть, какое останется.</p>
+    </div>
+
+    <div class="box note">
+      <span class="t">Почему не взять значение просто из <code>appsettings.json</code></span>
+      <p>Взять можно — приложение так и делает: базовый файл читают всегда. Мешает другое: базовое значение
+        одно на все стенды. Локально нужна своя база и маленькая страница, в проде — своя база и большая.
+        Поэтому в базовом файле держат общее, а отличия кладут слоями выше. Источников несколько не для того,
+        чтобы «выбрать один правильный», а чтобы <strong>наложить отличия на общее</strong>.</p>
+      <p><code>ASPNETCORE_ENVIRONMENT</code> — не второй источник значений, а имя набора отличий:
+        <code>Development</code> → <code>appsettings.Development.json</code>, <code>Production</code> →
+        <code>appsettings.Production.json</code>. Нет такого файла — останется только база.</p>
+    </div>
 
     <h2>Где эти настройки лежат</h2>
-    <p>Секция, о которой спрашивают «откуда он её берёт», — это кусок JSON-файла в корне проекта по имени
-      <code>appsettings.json</code>. Его подключает не «магия», а <code>WebApplication.CreateBuilder(args)</code>:
-      он добавляет <code>appsettings.json</code> и <code>appsettings.{Environment}.json</code> из каталога
-      <code>ContentRootPath</code>.</p>
+    <p>В файлах проекта. Ниже — полное содержимое демо-проекта, на котором получены все числа этой главы;
+      ничего скрытого в нём нет.</p>
+    <p><code>appsettings.json</code> — базовые значения, лежит в корне проекта:</p>
     <div class="codewrap">
-      <p class="cap">appsettings.json — корень проекта</p>
       <pre><code class="language-json">{
   "Logging": { "LogLevel": { "Default": "Warning" } },
-  "Orders": {
-    "PageSize": 50,
-    "ConnectionString": "Host=prod-db;Database=shop"
-  }
+  "ConnectionStrings": { "Default": "Host=prod-db;Database=shop" },
+  "Orders": { "PageSize": 50 }
 }</code></pre>
     </div>
+    <p><code>appsettings.Development.json</code> — только отличия локальной машины, и только те, которые
+      действительно отличаются:</p>
     <div class="codewrap">
-      <p class="cap">appsettings.Development.json — переопределяет только то, что указано</p>
       <pre><code class="language-json">{
+  "Logging": { "LogLevel": { "Default": "Information" } },
+  "ConnectionStrings": { "Default": "Host=localhost;Database=shop" },
   "Orders": { "PageSize": 20 }
 }</code></pre>
     </div>
-    <p>При сборке оба файла копируются в выходной каталог рядом с приложением, поэтому опубликованное
-      приложение находит их без настроек:</p>
+    <p><code>Properties/launchSettings.json</code> — профиль запуска (показан сокращённо, остальное — адрес и
+      флаги отладки). Создаёт его <code>dotnet new web</code>, а значения отсюда применяются только при
+      <code>dotnet run</code>:</p>
     <div class="codewrap">
-      <pre><code class="language-text">bin/Debug/net8.0/appsettings.json
-bin/Debug/net8.0/appsettings.Development.json
-bin/Debug/net8.0/shop.dll</code></pre>
+      <pre><code class="language-json">{
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "applicationUrl": "http://localhost:5104",
+      "environmentVariables": { "ASPNETCORE_ENVIRONMENT": "Development" }
+    }
+  }
+}</code></pre>
     </div>
-    <p>Но каталогов два, и путают их постоянно:</p>
+    <p>Обратите внимание: в файлах записаны только <strong>50</strong> и <strong>20</strong>. Значения
+      <strong>100</strong> и <strong>7</strong> в файлах не лежат — их задают в момент запуска. Все четыре
+      числа этой главы:</p>
     <table>
-      <thead><tr><th>Что</th><th>Где это</th><th>Из него читаются файлы настроек?</th></tr></thead>
+      <thead><tr><th>Слой</th><th>Где лежит значение</th><th><code>PageSize</code></th></tr></thead>
       <tbody>
-        <tr><td><code>builder.Environment.ContentRootPath</code></td><td>каталог проекта при
-          <code>dotnet run</code>; каталог с dll у опубликованного приложения</td><td><strong>да</strong>
-          (<code>appsettings*.json</code>, <code>wwwroot</code>)</td></tr>
-        <tr><td><code>AppContext.BaseDirectory</code></td><td><code>bin/Debug/net8.0/</code></td><td>нет — здесь
-          лежит только копия для публикации</td></tr>
+        <tr><td>базовый файл</td><td><code>appsettings.json</code></td><td>50</td></tr>
+        <tr><td>файл окружения</td><td><code>appsettings.Development.json</code></td><td>20</td></tr>
+        <tr><td>переменная окружения</td><td><code>Orders__PageSize=100</code> перед командой запуска</td>
+          <td>100</td></tr>
+        <tr><td>аргумент командной строки</td><td><code>--Orders:PageSize=7</code> после <code>--</code></td>
+          <td>7</td></tr>
       </tbody>
     </table>
-    <p>Именно поэтому при разработке правка <code>appsettings.json</code> в проекте действует без пересборки: во
-      время <code>dotnet run</code> читается файл из каталога проекта, а не копия в <code>bin</code>.</p>
-    <p>Файл подключается как <strong>необязательный</strong> (<code>optional: true</code>): если его нет,
-      приложение не упадёт. Проверено — файл убрали, приложение стартовало, и
-      <code>ConnectionString</code> остался пустым, потому что он был только в этом файле. Отсюда мораль:
-      отсутствие файла настроек — не ошибка, ошибкой его делает только валидация (см. ниже).</p>
-
-    <div class="box warn">
-      <span class="t">Секреты — не в файле в репозитории</span>
-      <p>Пароли и ключи <strong>не хранят</strong> в <code>appsettings.json</code>: файл лежит в git и уезжает в
-        образ. Локально — user-secrets, в проде — переменные окружения или менеджер секретов (последний
-        раздел главы).</p>
-    </div>
-
-    <h2>Секция — это «вид» на плоский список ключей</h2>
-    <p>Теперь главное, что объясняет вопрос «откуда он берёт именно эту секцию». Внутри
-      <code>IConfiguration</code> — <strong>плоский</strong> набор пар «ключ → строка», никакой вложенности
-      там нет. Вложенность из JSON превращается в префикс ключа, разделённый двоеточием:</p>
+    <p>Файлы читаются из <strong>ContentRootPath</strong> — каталога, из которого запущено приложение. При
+      <code>dotnet run</code> это каталог проекта, а рядом с dll лежит лишь копия (реальный вывод):</p>
     <div class="codewrap">
-      <pre><code class="language-text">"Orders": { "PageSize": 50 }        →   ключ Orders:PageSize = "50"
-"Orders": { "Items": [ {...} ] }    →   ключи Orders:Items:0:Name, Orders:Items:1:Name, ...</code></pre>
+      <pre><code class="language-text">окружение       : Development
+ContentRootPath : /tmp/shop
+BaseDirectory   : /tmp/shop/bin/Debug/net8.0/</code></pre>
     </div>
-    <p>А <code>GetSection("Orders")</code> ничего не вырезает и не копирует: он возвращает
-      <code>IConfigurationSection</code> с <code>Path = "Orders"</code>, и любое обращение через неё — это
-      обращение к тому же плоскому списку, только с приписанным префиксом. Реальный вывод для файлов выше:</p>
+    <p>Поэтому правка <code>appsettings.json</code> в проекте действует сразу, без пересборки: читается именно
+      она, а не копия в <code>bin</code>. Но стоит запустить dll из папки сборки — и картина меняется:</p>
     <div class="codewrap">
-      <pre><code class="language-text">--- все ключи конфигурации (только Orders)
-  Orders = (null)
-  Orders:PageSize = 20
-  Orders:ConnectionString = Host=prod-db;Database=shop
-
-секция Orders: Path=Orders Value=null ключей=2
-  ребёнок: ConnectionString = Host=prod-db;Database=shop
-  ребёнок: PageSize = 20
-cfg["Orders:PageSize"] = 20
-cfg.GetSection("Orders")["PageSize"] = 20</code></pre>
+      <pre><code class="language-text">$ cd bin/Debug/net8.0 &amp;&amp; dotnet shop.dll
+окружение       : Production
+ContentRootPath : /tmp/shop/bin/Debug/net8.0
+BaseDirectory   : /tmp/shop/bin/Debug/net8.0</code></pre>
     </div>
-    <p>Что здесь важно:</p>
+    <p>Теперь читаются копии json, и правки в исходниках ни на что не влияют. Это не баг, а норма: у
+      опубликованного приложения настройки лежат рядом с dll. Но именно на этом ломаются ожидания «я поменял
+      настройку, а ничего не изменилось».</p>
+    <div class="box note">
+      <span class="t">Файла окружения может не быть</span>
+      <p>Хост подключает <code>appsettings.{Окружение}.json</code> с <code>optional: true</code>. Файла
+        <code>appsettings.Production.json</code> в проекте нет — приложение всё равно стартует и берёт значения
+        из базового файла (<code>PageSize = 50</code>). Заводить отдельный файл под каждое окружение не
+        обязательно.</p>
+    </div>
+
+    <h2>Пять запусков: кто побеждает</h2>
+    <p>Один проект, один и тот же код — меняется только способ задать значение. Вот что получилось на самом
+      деле:</p>
+    <table>
+      <thead><tr><th>Что запустили</th><th>Окружение</th><th><code>PageSize</code></th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td><code>dotnet run</code></td><td>Development</td><td>20</td><td>файл окружения перекрыл
+          базовый</td></tr>
+        <tr><td><code>dotnet run --no-launch-profile</code></td><td>Production</td><td>50</td><td>файла
+          Production нет, остался базовый</td></tr>
+        <tr><td><code>Orders__PageSize=100 dotnet run</code></td><td>Development</td><td>100</td>
+          <td>переменная окружения перекрыла файлы</td></tr>
+        <tr><td><code>dotnet run -- --Orders:PageSize=7</code></td><td>Development</td><td>7</td>
+          <td>аргумент перекрыл всё</td></tr>
+        <tr><td><code>cd bin/Debug/net8.0 &amp;&amp; dotnet shop.dll</code></td><td>Production</td><td>50</td>
+          <td>читается копия json из папки сборки</td></tr>
+      </tbody>
+    </table>
+    <p>Две строки в таблице выглядят непривычно, разберём их синтаксис:</p>
     <ul>
-      <li><strong>файл — не секция.</strong> Секция — это префикс в общем списке, поэтому её значения могут
-        прийти из разных источников: <code>PageSize</code> из файла, <code>ConnectionString</code> — из
-        переменной окружения. Для кода это одна и та же секция <code>Orders</code>;</li>
-      <li>у самой секции <code>Value</code> равно <code>null</code>, потому что у неё есть дети — типичная
-        причина «настройка приходит пустая», когда её читают как
-        <code>cfg.GetSection("Orders").Value</code>;</li>
-      <li><strong>имя секции — просто строка</strong>, которую вы сами написали в <code>GetSection("Orders")</code>
-        и <code>Bind(...)</code>. Опечатка не падает: <code>GetSection("Orderss").Exists()</code> вернёт
-        <code>false</code>, детей будет 0, класс останется с дефолтами из инициализаторов. Проверено:
-        приложение стартовало без ошибок, <code>PageSize = 50</code>, <code>ConnectionString</code> пустой.</li>
+      <li><code>Orders__PageSize=100 dotnet run</code> — в bash переменная окружения задаётся <em>перед</em>
+        командой и действует только для неё;</li>
+      <li><code>dotnet run -- --Orders:PageSize=7</code> — всё, что после <code>--</code>, уходит не в
+        <code>dotnet run</code>, а в само приложение (те самые аргументы <code>args</code> из
+        <code>Program.cs</code>).</li>
     </ul>
-    <p>Один и тот же ключ в разных источниках записывается по-разному, но это <strong>один ключ</strong>:</p>
+    <p>Почему побеждает именно этот слой — видно в самом объекте конфигурации: он хранит список своих
+      источников. Реальный вывод для обычного <code>dotnet run</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">источники (в порядке применения, побеждает последний):
+  1) MemoryConfigurationSource
+  2) EnvironmentVariablesConfigurationSource  только с префиксом ASPNETCORE_
+  3) MemoryConfigurationSource
+  4) EnvironmentVariablesConfigurationSource  только с префиксом DOTNET_
+  5) JsonConfigurationSource                  appsettings.json
+  6) JsonConfigurationSource                  appsettings.Development.json
+  7) JsonConfigurationSource                  secrets.json
+  8) EnvironmentVariablesConfigurationSource  все переменные окружения
+  9) ChainedConfigurationSource</code></pre>
+    </div>
+    <p>Список читается снизу вверх: побеждает последний. И тут же ответ на вопрос «откуда приложение знает,
+      какой файл окружения брать»:</p>
+    <ul>
+      <li>№2 читает переменные с префиксом <code>ASPNETCORE_</code>, №4 — с префиксом <code>DOTNET_</code>. Это
+        происходит <strong>до</strong> чтения файлов: к моменту №6 хост уже знает имя окружения, поэтому
+        подключает именно <code>appsettings.Development.json</code>;</li>
+      <li>№5–7 — файлы: базовый, файл окружения и <code>secrets.json</code> из user-secrets (он лежит не в
+        проекте, а в профиле пользователя);</li>
+      <li>№8 — все переменные окружения: самый сильный из обычных слоёв;</li>
+      <li>в запуске с аргументами появляются ещё два источника <code>CommandLineConfigurationSource</code> —
+        поэтому аргумент перекрывает вообще всё.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t"><code>ASPNETCORE_ENVIRONMENT</code> — не источник настроек</span>
+      <p>Это <strong>имя окружения</strong>, то есть переключатель, какой файл читать:
+        <code>Development</code> → <code>appsettings.Development.json</code>, <code>Production</code> →
+        <code>appsettings.Production.json</code>. Никаких значений настроек в ней нет — только выбор файла.</p>
+      <p>Проверено: команда <code>ASPNETCORE_ENVIRONMENT=Production dotnet run</code> всё равно даёт
+        <code>Development</code> и <code>PageSize = 20</code>. Причина — профиль в
+        <code>launchSettings.json</code>: он задаёт свою переменную окружения, и его значение побеждает. Чтобы
+        переключить окружение при <code>dotnet run</code>, нужен <code>--no-launch-profile</code> (или правка
+        профиля). У опубликованного приложения профилей нет — там переменная работает напрямую.</p>
+    </div>
+
+    <h2>Как записать один и тот же ключ</h2>
+    <p>Ключ один, а синтаксис у источников разный:</p>
     <table>
       <thead><tr><th>Источник</th><th>Как задать <code>Orders:PageSize</code></th></tr></thead>
       <tbody>
         <tr><td><code>appsettings.json</code></td><td><code>"Orders": { "PageSize": 50 }</code></td></tr>
-        <tr><td>переменные окружения</td><td><code>Orders__PageSize=50</code> — двойное подчёркивание вместо
-          <code>:</code></td></tr>
-        <tr><td>аргументы командной строки</td><td><code>--Orders:PageSize=50</code> (годится и
-          <code>--Orders:PageSize 50</code>)</td></tr>
+        <tr><td><code>appsettings.Development.json</code></td><td>то же самое; перекрывает базовый файл</td></tr>
+        <tr><td>переменные окружения</td><td><code>Orders__PageSize=100</code> — двойное подчёркивание вместо
+          двоеточия</td></tr>
+        <tr><td>аргументы командной строки</td><td><code>--Orders:PageSize=7</code> (годится и
+          <code>--Orders:PageSize 7</code>)</td></tr>
+        <tr><td><code>launchSettings.json</code></td><td><code>"environmentVariables": { "Orders__PageSize":
+          "100" }</code> — проверено, даёт 100</td></tr>
         <tr><td>user-secrets</td><td><code>dotnet user-secrets set "Orders:PageSize" "50"</code></td></tr>
       </tbody>
     </table>
+    <p>Правило простое: в JSON — двоеточие, в переменных окружения — двойное подчёркивание (одинарное занято:
+      оно отделяет имя переменной от её значения), в аргументах — как в JSON.</p>
 
-    <h2>Опции: привязка конфигурации к классу</h2>
-    <p>Читать строки конфигурации по всему коду — плохо: ключ пишется руками, тип — строка, ошибка видна только
-      в рантайме. Значения <strong>привязывают к классу</strong> и инжектят его через DI:</p>
+    <h2>Внутри — плоский список ключей</h2>
+    <p>Хотя в JSON настройки выглядят деревом, внутри <code>IConfiguration</code> — <strong>плоский</strong>
+      набор пар «ключ → строка». Вложенность превращается в префикс ключа. Реальный вывод перебора всех
+      ключей (в нём есть <code>Orders:Secret</code> — его мы положили через user-secrets, раздел в конце
+      главы):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">'ConnectionStrings' = ''
+'ConnectionStrings:Default' = 'Host=localhost;Database=shop'
+'Orders' = ''
+'Orders:PageSize' = '20'
+'Orders:Secret' = 's3cr3t'</code></pre>
+    </div>
+    <p>Массивы станут ключами с индексами: <code>Orders:Items:0:Name</code>, <code>Orders:Items:1:Name</code>.
+      А <code>GetSection("Orders")</code> ничего не вырезает и не копирует: он возвращает <strong>вид</strong> на
+      этот же список с приписанным префиксом. Поэтому значения «одной секции» спокойно приходят из разных
+      слоёв: <code>PageSize</code> из файла, <code>Secret</code> из user-secrets — для кода это одна секция
+      <code>Orders</code>.</p>
+    <p>Два следствия, на которых легко попасться:</p>
+    <ul>
+      <li>у самой секции <code>Value</code> равно <code>null</code> — потому что у неё есть дети. Чтение
+        <code>cfg.GetSection("Orders").Value</code> даёт <code>null</code>, а не текст секции;</li>
+      <li><strong>имя секции — просто строка</strong> в вашем коде. Опечатка не падает:
+        <code>GetSection("Orderss").Exists()</code> возвращает <code>false</code>, детей ноль, класс
+        остаётся с дефолтными значениями. Проверено запуском: приложение стартовало, <code>PageSize = 50</code>
+        из инициализатора, строка подключения пустая.</li>
+    </ul>
+
+    <h2>Читаем настройки в коде</h2>
+    <p>Читать <code>Configuration["Orders:PageSize"]</code> по всему коду — плохо: ключ приходится писать
+      руками в каждом месте, значение всегда строка, а опечатка видна только в рантайме. Правильный способ —
+      один раз привязать секцию к классу и дальше работать с типизированным объектом:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">// using System.ComponentModel.DataAnnotations;
 
 public sealed class OrderOptions
 {
-    [Range(1, 200)]                            // правила проверки — атрибутами
+    [Range(1, 200)]                            // проверка — атрибутом
     public int PageSize { get; init; } = 50;
-
-    [Required]
-    public string ConnectionString { get; init; } = "";
 }
 
 builder.Services
@@ -194,17 +301,15 @@ builder.Services
     </div>
     <p>Что делает каждая строка:</p>
     <ul>
-      <li><code>AddOptions&lt;OrderOptions&gt;()</code> — регистрирует инфраструктуру опций (что именно —
-        в следующем разделе) и возвращает билдер, к которому цепляются остальные вызовы;</li>
-      <li><code>Bind(section)</code> — «взять секцию и разложить по свойствам»: для каждого свойства ищется
-        ключ <code>Orders:ИмяСвойства</code>. Без этой строки класс останется с дефолтами из
-        инициализаторов (проверено: <code>PageSize = 50</code>);</li>
-      <li><code>ValidateDataAnnotations()</code> — прогоняет атрибуты <code>[Required]</code>,
-        <code>[Range]</code> и остальные из <code>System.ComponentModel.DataAnnotations</code>.
-        <strong>Если атрибутов нет, проверять нечего</strong>: класс без атрибутов проходит валидацию молча,
-        даже когда секции не существует;</li>
-      <li><code>ValidateOnStart()</code> — выполняет проверку <strong>при старте</strong>, а не при первом
-        обращении к значениям.</li>
+      <li><code>AddOptions&lt;OrderOptions&gt;()</code> — включает привязку для этого класса и регистрирует в
+        контейнере <code>IOptions&lt;OrderOptions&gt;</code>, <code>IOptionsSnapshot</code>,
+        <code>IOptionsMonitor</code> и фабрику;</li>
+      <li><code>Bind(section)</code> — говорит: «заполни свойства этого класса из секции <code>Orders</code>». Это
+        единственное место, где вообще упоминается имя секции;</li>
+      <li><code>ValidateDataAnnotations()</code> — проверяет атрибуты <code>[Range]</code>,
+        <code>[Required]</code>. <strong>Если атрибутов нет, проверять нечего</strong>: класс без атрибутов
+        проходит валидацию молча, даже когда секции не существует;</li>
+      <li><code>ValidateOnStart()</code> — выполняет проверку при старте, а не при первом обращении.</li>
     </ul>
     <div class="box note">
       <span class="t"><code>init</code> и <code>Bind</code> — совместимы, а лямбда — нет</span>
@@ -217,15 +322,15 @@ initializer, or on 'this' or 'base' in an instance constructor or an 'init' acce
         <code>.Configure&lt;IConfiguration&gt;((o, cfg) =&gt; cfg.GetSection("Orders").Bind(o))</code>.</p>
     </div>
 
-    <h3>Что даёт <code>ValidateOnStart()</code></h3>
+    <h3>Зачем <code>ValidateOnStart()</code></h3>
     <p>Возьмём заведомо плохое значение: <code>Orders:PageSize = 5000</code> при <code>[Range(1, 200)]</code>.
-      С <code>ValidateOnStart()</code> приложение не стартует и показывает, что именно не так:</p>
+      С <code>ValidateOnStart()</code> приложение не стартует и прямо говорит, что не так:</p>
     <div class="codewrap">
       <pre><code class="language-text">Microsoft.Extensions.Options.OptionsValidationException: DataAnnotation validation failed for
 'OrderOptions' members: 'PageSize' with the error: 'The field PageSize must be between 1 and 200.'.</code></pre>
     </div>
     <p>Без этой строки приложение стартует нормально и падает позже — на первом обращении к
-      <code>options.Value</code>, то есть уже внутри запроса. Тот же класс, то же значение, реальный вывод:</p>
+      <code>options.Value</code>, то есть уже внутри запроса (тот же класс, то же значение):</p>
     <div class="codewrap">
       <pre><code class="language-text">Application started. Press Ctrl+C to shut down.
 --- приложение стартовало нормально
@@ -235,8 +340,8 @@ DataAnnotation validation failed for 'OrderOptions' members: 'PageSize' with the
     </div>
     <div class="box warn">
       <span class="t">Ошибка конфигурации должна валить старт, а не запрос</span>
-      <p>Разница видна в проде. С <code>ValidateOnStart()</code> контейнер не поднимется, деплой откатится,
-        и виноватой будет конфигурация. Без неё приложение «работает», а 500-е начинаются при первом заказе — и
+      <p>Разница видна в проде. С <code>ValidateOnStart()</code> контейнер не поднимется, деплой откатится, и
+        виноватой будет конфигурация. Без неё приложение «работает», а 500-е начинаются при первом заказе — и
         искать будут в сервисе заказов, а не в настройках.</p>
     </div>
     <p>Если атрибутов мало, есть <code>Validate</code> с предикатом и своим текстом ошибки (реальный вывод):</p>
@@ -247,27 +352,63 @@ DataAnnotation validation failed for 'OrderOptions' members: 'PageSize' with the
       <pre><code class="language-text">Microsoft.Extensions.Options.OptionsValidationException: PageSize должен быть больше нуля</code></pre>
     </div>
 
-    <h2>Откуда <code>IOptions&lt;T&gt;</code> берёт значения</h2>
-    <p>Второй вопрос был про сервис: «а здесь откуда взяты настройки?». Ответ: из контейнера, и за этим стоит
-      <strong>цепочка из нескольких объектов</strong>, которую видно в отладке. Вот что реально оказывается в
-      контейнере после цепочки вызовов из предыдущего раздела (вывод по <code>IServiceCollection</code>):</p>
+    <h2>Сервис, который пользуется настройками</h2>
+    <p>В коде настройки запрашивают не классом, а обёрткой <code>IOptions&lt;T&gt;</code>:</p>
     <div class="codewrap">
-      <pre><code class="language-text">IOptions`1               UnnamedOptionsManager`1                    Singleton
-IOptionsSnapshot`1       OptionsManager`1                           Scoped
-IOptionsMonitor`1        OptionsMonitor`1                           Singleton
-IOptionsFactory`1        OptionsFactory`1                           Transient
-IOptionsMonitorCache`1   OptionsCache`1                             Singleton
-
-IConfigureOptions`1      NamedConfigureFromConfigurationOptions`1  Singleton   ← добавил .Bind(...)
-IOptionsChangeTokenSource`1  ConfigurationChangeTokenSource`1       Singleton   ← добавил .Bind(...)
-IValidateOptions`1       DataAnnotationValidateOptions`1            Singleton   ← добавил .ValidateDataAnnotations()</code></pre>
+      <pre><code class="language-csharp">public sealed class OrderService(IOptions&lt;OrderOptions&gt; options)
+{
+    private readonly OrderOptions _opt = options.Value;   // ← здесь настройки «появляются»
+    public int PageSize =&gt; _opt.PageSize;
+}</code></pre>
     </div>
-    <p>То есть <code>.Bind()</code> — это не «чтение файла при старте», а регистрация <strong>действия
-      настройки</strong>: <code>IConfigureOptions&lt;OrderOptions&gt;</code>, внутри которого лежит та самая
-      секция и вызов <code>Bind</code>, плюс источник уведомлений <code>IOptionsChangeTokenSource</code> (он и
-      делает возможной перезагрузку). Регистрацию источника делает именно <code>Bind</code>: после обычного
-      <code>Configure(o =&gt; ...)</code> в контейнере таких источников <strong>0</strong>, после
-      <code>Bind(section)</code> — <strong>1</strong> (проверено).</p>
+    <p>Ни пути к файлу, ни ключей в сервисе нет — и это правильно: он просит готовый объект, а откуда тот
+      взялся, решает <code>Program.cs</code>. Пошагово при запуске происходит вот что:</p>
+    <ol>
+      <li>контейнер создаёт <code>OrderService</code> и видит в его конструкторе
+        <code>IOptions&lt;OrderOptions&gt;</code>;</li>
+      <li>для него уже есть регистрация (её сделал <code>AddOptions&lt;OrderOptions&gt;()</code>), поэтому
+        приходит объект-обёртка;</li>
+      <li>строка <code>options.Value</code> запускает сборку: действие привязки читает секцию
+        <code>Orders</code> из конфигурации, объект проверяется валидаторами и кэшируется.</li>
+    </ol>
+    <p>Две вещи, которые легко забыть:</p>
+    <ul>
+      <li><code>private readonly OrderOptions _opt = options.Value;</code> — это <strong>снимок</strong> на
+        момент создания сервиса. Для <code>IOptions</code> так и надо: значения всё равно не меняются. Но если
+        вы рассчитываете на перезагрузку, нужен <code>IOptionsMonitor</code> и чтение
+        <code>CurrentValue</code> при каждом обращении, а не поле;</li>
+      <li><code>OrderService</code> тоже надо зарегистрировать (<code>AddScoped&lt;OrderService&gt;()</code>) —
+        конструктор с <code>IOptions</code> сам его в контейнер не добавляет.</li>
+    </ul>
+    <p>Вариант с перезагрузкой выглядит так:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class OrderService(IOptionsMonitor&lt;OrderOptions&gt; options)
+{
+    public int PageSize =&gt; options.CurrentValue.PageSize;   // читается при каждом обращении
+}
+
+builder.Services.AddScoped&lt;OrderService&gt;();</code></pre>
+    </div>
+
+    <h2>Что за этим стоит: цепочка до файла</h2>
+    <p>Полезно один раз увидеть, что именно попадает в контейнер после цепочки
+      <code>AddOptions().Bind()</code> (вывод по <code>IServiceCollection</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">IOptions`1                   UnnamedOptionsManager`1                    Singleton
+IOptionsSnapshot`1           OptionsManager`1                           Scoped
+IOptionsMonitor`1            OptionsMonitor`1                           Singleton
+IOptionsFactory`1            OptionsFactory`1                           Transient
+IOptionsMonitorCache`1       OptionsCache`1                             Singleton
+IConfigureOptions`1          NamedConfigureFromConfigurationOptions`1  ← добавил .Bind(...)
+IOptionsChangeTokenSource`1  ConfigurationChangeTokenSource`1          ← добавил .Bind(...)
+IValidateOptions`1           DataAnnotationValidateOptions`1           ← добавил .ValidateDataAnnotations()</code></pre>
+    </div>
+    <p>То есть <code>.Bind()</code> — не «чтение файла при старте», а регистрация <strong>действия
+      настройки</strong>: <code>IConfigureOptions&lt;OrderOptions&gt;</code>, внутри которого лежит та самая секция
+      и вызов <code>Bind</code>, плюс источник уведомлений <code>IOptionsChangeTokenSource</code> (он и делает
+      возможной перезагрузку). Регистрирует источник именно <code>Bind</code>: после обычного
+      <code>Configure(o =&gt; ...)</code> таких источников <strong>0</strong>, после <code>Bind(section)</code> —
+      <strong>1</strong> (проверено).</p>
     <p>Дальше при первом обращении к <code>options.Value</code> происходит вот это:</p>
     <div class="codewrap">
       <pre><code class="language-text">options.Value                     IOptions&lt;OrderOptions&gt; → UnnamedOptionsManager
@@ -279,52 +420,51 @@ IValidateOptions`1       DataAnnotationValidateOptions`1            Singleton   
     <p>Отсюда три следствия, которые и спрашивают на собеседовании:</p>
     <ul>
       <li>настройки берутся <strong>из <code>IConfiguration</code></strong>, которую захватил делегат привязки
-        (<code>builder.Configuration</code> — это <code>ConfigurationManager</code>, живой объект, который сам
-        следит за файлами), а не «из класса настроек»;</li>
-      <li><code>IOptions&lt;T&gt;</code> существует для <strong>любого</strong> <code>T</code>: это открытый
-        generic, и он уже зарегистрирован хостом. Если вы забыли <code>Bind</code>, ошибки не будет — придёт
-        объект с дефолтными значениями (проверено: без <code>Bind</code> <code>PageSize = 50</code>
-        из инициализатора);</li>
+        (<code>builder.Configuration</code> — живой объект, который сам следит за файлами), а не «из класса
+        настроек»;</li>
+      <li><code>IOptions&lt;T&gt;</code> существует для <strong>любого</strong> <code>T</code>: если вы забыли
+        <code>Bind</code>, ошибки не будет — придёт объект с дефолтными значениями (проверено:
+        <code>PageSize = 50</code> из инициализатора);</li>
       <li>объект собирается <strong>один раз</strong> и кэшируется: <code>ReferenceEquals(opt.Value, opt.Value)</code>
-        даёт <code>True</code> (проверено). Поэтому «прочитать значение заново» через <code>IOptions</code>
-        не получится — нужен другой интерфейс (следующий раздел).</li>
+        даёт <code>True</code> (проверено). Поэтому «прочитать значение заново» через <code>IOptions</code> не
+        получится — нужен другой интерфейс.</li>
     </ul>
     <div class="box note">
       <span class="t">Почему так, а не «прочитать в конструкторе»</span>
       <p>Сервис не знает ни про файлы, ни про переменные окружения. Он просит
-        <code>IOptions&lt;OrderOptions&gt;</code> — и получает объект, собранный из конфигурации по правилам,
-        которые описаны в одном месте, в <code>Program.cs</code>. Добавился источник, поменялась секция, пришла
-        переменная окружения — сервис не меняется вообще.</p>
+        <code>IOptions&lt;OrderOptions&gt;</code> — и получает объект, собранный по правилам, которые описаны в
+        одном месте, в <code>Program.cs</code>. Добавился источник, поменялась секция, пришла переменная
+        окружения — сервис не меняется вообще.</p>
     </div>
-    <p>И сразу про <code>IConfiguration</code> «везде»: технически читать
-      <code>IConfiguration["Orders:PageSize"]</code> можно, но тогда ключ повторяется в каждом месте, тип —
-      строка, а валидации нет. Правильный подход: привязать один раз к классу и инжектить
-      <code>IOptions&lt;T&gt;</code> — настройки типизированы, проверены и не разбросаны по коду.</p>
 
-    <h2>Три варианта чтения опций (и их lifetimes)</h2>
-    <p>Здесь мы возвращаемся к жизненным циклам из главы 15 — у опций они тоже есть:</p>
+    <h2>Три интерфейса и их lifetimes</h2>
+    <p>Опции читают одним из трёх интерфейсов. Различаются они жизненным циклом (глава 15) и тем, увидят ли
+      они изменение файла:</p>
     <table>
       <thead><tr><th>Тип</th><th>Lifetime</th><th>Когда брать</th></tr></thead>
       <tbody>
-        <tr><td><code>IOptions&lt;T&gt;</code></td><td>Singleton</td><td>Значения не меняются на ходу (обычный случай)</td></tr>
-        <tr><td><code>IOptionsSnapshot&lt;T&gt;</code></td><td><strong>Scoped</strong></td><td>Нужно перечитывать значения на каждый запрос</td></tr>
-        <tr><td><code>IOptionsMonitor&lt;T&gt;</code></td><td>Singleton</td><td>Нужны уведомления об изменении настроек</td></tr>
+        <tr><td><code>IOptions&lt;T&gt;</code></td><td>Singleton</td><td>Значения не меняются на ходу — обычный
+          случай</td></tr>
+        <tr><td><code>IOptionsSnapshot&lt;T&gt;</code></td><td><strong>Scoped</strong></td><td>Перечитывать
+          значения на каждый запрос</td></tr>
+        <tr><td><code>IOptionsMonitor&lt;T&gt;</code></td><td>Singleton</td><td>Нужны уведомления об изменении
+          настроек</td></tr>
       </tbody>
     </table>
-    <p>Разница не теоретическая. Ниже — один запуск, в котором файл настроек меняют на ходу
-      (<code>PageSize: 10 → 99</code>, файл подключён с <code>reloadOnChange: true</code>), а читают все три
+    <p>Разница не теоретическая. Один запуск, в котором файл настроек меняют на ходу
+      (<code>PageSize: 20 → 99</code>, файл подключён с <code>reloadOnChange: true</code>), а читают все три
       варианта. Реальный вывод:</p>
     <div class="codewrap">
-      <pre><code class="language-text">до правки файла:  IOptions 10 | Snapshot 10 | Monitor 10
+      <pre><code class="language-text">до правки файла:  IOptions 20 | Snapshot 20 | Monitor 20
   [OnChange] новые настройки: 99
-тот же scope:     IOptions 10 | Snapshot 10 | Monitor 99
-новый scope:      IOptions 10 | Snapshot 99 | Monitor 99</code></pre>
+тот же scope:     IOptions 20 | Snapshot 20 | Monitor 99
+новый scope:      IOptions 20 | Snapshot 99 | Monitor 99</code></pre>
     </div>
     <ul>
-      <li><strong><code>IOptions</code></strong> — 10 навсегда: значение собрано при первом обращении и лежит в
+      <li><strong><code>IOptions</code></strong> — 20 навсегда: значение собрано при первом обращении и лежит в
         кэше;</li>
       <li><strong><code>IOptionsSnapshot</code></strong> — снимок на <em>scope</em>: внутри одного scope значение
-        не меняется (10), в новом scope собирается заново (99);</li>
+        не меняется (20), в новом scope собирается заново (99);</li>
       <li><strong><code>IOptionsMonitor</code></strong> — <code>CurrentValue</code> всегда актуально, а
         <code>OnChange</code> сам сообщает об изменении.</li>
     </ul>
@@ -338,79 +478,54 @@ IValidateOptions`1       DataAnnotationValidateOptions`1            Singleton   
       (<code>AddJsonFile(..., reloadOnChange: true)</code> — в веб-хосте так по умолчанию) и если
       <code>Bind</code> был вызван, потому что источник уведомлений регистрирует именно он.</p>
 
-    <h2>Как это выглядит в сервисе</h2>
-    <p>Тот самый класс из вопроса — в нём нет ни пути к файлу, ни ключей, и это правильно:</p>
-    <div class="codewrap">
-      <pre><code class="language-csharp">public sealed class OrderService(IOptions&lt;OrderOptions&gt; options)
-{
-    private readonly OrderOptions _opt = options.Value;   // ← здесь настройки «появляются»
-    public int PageSize =&gt; _opt.PageSize;
-}</code></pre>
-    </div>
-    <p>По шагам:</p>
-    <ol>
-      <li>контейнер создаёт <code>OrderService</code> и видит в конструкторе
-        <code>IOptions&lt;OrderOptions&gt;</code>;</li>
-      <li>отдаёт <code>UnnamedOptionsManager&lt;OrderOptions&gt;</code> — обёртку, а не сами настройки;</li>
-      <li>строка <code>options.Value</code> запускает цепочку из предыдущего раздела: <code>Bind</code> читает
-        секцию <code>Orders</code> из <code>IConfiguration</code>, объект собирается, валидируется и
-        кэшируется.</li>
-    </ol>
-    <p>Два замечания к этому коду, которые стоит держать в голове:</p>
-    <ul>
-      <li><code>private readonly OrderOptions _opt = options.Value;</code> — это <strong>снимок</strong> на
-        момент создания сервиса. Для <code>IOptions</code> так и надо: значения всё равно не меняются. Но если
-        вы рассчитываете на перезагрузку, нужен <code>IOptionsMonitor</code> и чтение <code>CurrentValue</code>
-        при каждом обращении, а не поле;</li>
-      <li><code>OrderService</code> тоже надо зарегистрировать (<code>AddScoped&lt;OrderService&gt;()</code>) —
-        наличие конструктора с <code>IOptions</code> само его в контейнер не добавляет.</li>
-    </ul>
-    <p>Вариант с перезагрузкой выглядит так:</p>
-    <div class="codewrap">
-      <pre><code class="language-csharp">public sealed class OrderService(IOptionsMonitor&lt;OrderOptions&gt; options)
-{
-    public int PageSize =&gt; options.CurrentValue.PageSize;   // читается при каждом обращении
-}
-
-builder.Services.AddScoped&lt;OrderService&gt;();</code></pre>
-    </div>
-
     <h2>Строки подключения и секреты</h2>
-    <p>Строка подключения — такой же ключ конфигурации, только с префиксом <code>ConnectionStrings:</code>, и
-      для неё есть метод-сокращение:</p>
+    <p>Строка подключения — такой же ключ, только с префиксом <code>ConnectionStrings:</code>, и для неё есть
+      метод-сокращение:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// appsettings.json: "ConnectionStrings": { "Default": "Host=db;Database=shop" }
-var cs = builder.Configuration.GetConnectionString("Default");
-// cs = "Host=db;Database=shop" — проверено</code></pre>
+      <pre><code class="language-csharp">var cs = builder.Configuration.GetConnectionString("Default");
+// то же, что Configuration["ConnectionStrings:Default"]</code></pre>
+    </div>
+    <p>В демо-проекте этот ключ задан дважды: в базовом файле стоит прод-база, а файл окружения перекрывает её
+      локальной. Поэтому обычный <code>dotnet run</code> печатает (реальный вывод):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">GetConnectionString(Default) = Host=localhost;Database=shop</code></pre>
     </div>
     <p>В проде ту же строку задают переменной окружения <code>ConnectionStrings__Default</code>, и код не
-      меняется.</p>
+      меняется (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">$ ConnectionStrings__Default='Host=localhost;Database=shop_local' dotnet run
+GetConnectionString(Default) = Host=localhost;Database=shop_local</code></pre>
+    </div>
     <div class="box warn">
       <span class="t">Секреты — вне репозитория</span>
       <p>Пароли и ключи <strong>не хранят</strong> в <code>appsettings.json</code>: файл лежит в git и уезжает в
-        образ. Локально — <code>dotnet user-secrets</code> (значения хранятся в профиле пользователя и
-        подключаются только в Development), в проде — переменные окружения или менеджер секретов.</p>
+        образ. Локально — <code>dotnet user-secrets</code>, в проде — переменные окружения или менеджер
+        секретов.</p>
       <div class="codewrap">
         <pre><code class="language-text">dotnet user-secrets init
-dotnet user-secrets set "Orders:ConnectionString" "Host=localhost;Database=shop"</code></pre>
+dotnet user-secrets set "Orders:Secret" "s3cr3t"</code></pre>
       </div>
-      <p>Ключи в user-secrets — те же, что в JSON: <code>Orders:ConnectionString</code>. Меняется только
-        источник, код остаётся прежним.</p>
+      <p>Ключи в user-secrets — те же, что в JSON. Значения хранятся не в проекте, а в профиле пользователя
+        (<code>~/.microsoft/usersecrets/&lt;id&gt;/secrets.json</code>), поэтому в git они не попадают. Проверено:
+        <code>Orders:Secret = 's3cr3t'</code> в Development и <code>''</code> в Production — user-secrets
+        подключаются только в Development, и в списке источников Production их нет.</p>
     </div>
 
     <div class="box gold">
       <span class="t">★ Что запомнить</span>
       <ul>
-        <li>Конфигурация — плоский список ключей из нескольких источников; побеждает последний: файл окружения
-          перекрывает базовый файл, переменные окружения — файлы, аргументы — всё.</li>
-        <li>Вложенность JSON — это префикс ключа (<code>Orders:PageSize</code>); в переменных окружения —
-          <code>Orders__PageSize</code>.</li>
-        <li><code>GetSection("Orders")</code> возвращает «вид» на этот список по префиксу, а не копию файла
-          секции; опечатка в имени не падает, а даёт дефолты.</li>
-        <li>Опции привязываются к классу в одном месте (<code>Bind</code>), проверяются атрибутами и
-          <code>ValidateOnStart</code>, читаются через <code>IOptions</code> /
-          <code>IOptionsSnapshot</code> / <code>IOptionsMonitor</code> — с их lifetimes.</li>
-        <li><code>options.Value</code> собирается один раз и кэшируется; для перезагрузки — только
+        <li>Настройка — пара «ключ → значение»; вложенность в JSON — это префикс ключа
+          (<code>Orders:PageSize</code>), в переменных окружения — <code>Orders__PageSize</code>.</li>
+        <li>Источники складываются стопкой; ключ задан в нескольких — побеждает последний: файл окружения
+          перекрывает базовый файл, user-secrets и переменные окружения — файлы, аргументы — всё.</li>
+        <li><code>ASPNETCORE_ENVIRONMENT</code> — не настройка, а переключатель, какой файл окружения читать.
+          При <code>dotnet run</code> её перекрывает профиль из <code>launchSettings.json</code>.</li>
+        <li>Файлы читаются из <code>ContentRootPath</code>: при <code>dotnet run</code> — из проекта, у
+          опубликованного приложения — из папки рядом с dll.</li>
+        <li>В коде секцию один раз привязывают к классу (<code>Bind</code>), проверяют атрибутами и
+          <code>ValidateOnStart</code>, а читают через <code>IOptions</code> / <code>IOptionsSnapshot</code> /
+          <code>IOptionsMonitor</code>.</li>
+        <li><code>options.Value</code> собирается один раз и кэшируется; перезагрузка — только через
           <code>IOptionsMonitor</code> (или snapshot на scope).</li>
       </ul>
     </div>
