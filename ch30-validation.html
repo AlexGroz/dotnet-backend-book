@@ -52,7 +52,9 @@
       <p class="cap">Модель запроса с правилами (файл Contracts/CreateOrderRequest.cs)</p>
       <pre><code class="language-csharp">public sealed class CreateOrderRequest
 {
-    [Required]                                  // поле обязательно
+    // [Required] на int не нужен: у значимого типа не бывает null, поэтому атрибут
+    // не сработает никогда, а 0 для него — валидное значение; ноль отсекает [Range].
+    [Required]
     [Range(1, int.MaxValue)]                    // должно быть больше нуля
     public int CustomerId { get; init; }
 
