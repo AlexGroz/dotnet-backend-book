@@ -112,21 +112,102 @@ public class OrdersController : ControllerBase
       подключить <strong>FluentValidation</strong> (см. ниже).</p>
 
     <h2>Уровень 3: бизнес-правила (FluentValidation)</h2>
-    <p>Атрибуты неудобны, когда правил много или они зависят друг от друга. Тогда используют отдельный
-      класс-валидатор:</p>
+    <p>Атрибуты неудобны, когда правил много или они зависят друг от друга. Тогда правила описывают в
+      отдельном классе-валидаторе, а на самой модели не ставят ничего. Библиотека —
+      <strong>FluentValidation</strong>, ставится обычным пакетом:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">public sealed class CreateOrderValidator : AbstractValidator&lt;CreateOrderRequest&gt;
+      <pre><code class="language-bash">dotnet add package FluentValidation</code></pre>
+    </div>
+    <p>Правила пишутся в конструкторе валидатора, «цепочкой» вызовов. Модель — та же,
+      <code>CreateOrderRequest</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using FluentValidation;   // без него не видно ни AbstractValidator, ни RuleFor
+
+public sealed class CreateOrderValidator : AbstractValidator&lt;CreateOrderRequest&gt;
 {
     public CreateOrderValidator()
     {
-        RuleFor(x =&gt; x.CustomerId).GreaterThan(0);
-        RuleFor(x =&gt; x.Title).NotEmpty().MaximumLength(200);
+        RuleFor(x =&gt; x.CustomerId).GreaterThan(0)
+            .WithMessage("CustomerId должен быть больше нуля");
 
-        // правило, связывающее два поля
+        // два правила на одно свойство: цепочка
+        RuleFor(x =&gt; x.Title).NotEmpty()
+            .WithMessage("Title обязателен")
+            .MaximumLength(200)
+            .WithMessage("Title длиннее 200 символов");
+
         RuleFor(x =&gt; x.Total).GreaterThan(0)
             .WithMessage("Сумма должна быть больше нуля");
     }
 }</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Что здесь что</span>
+      <ul>
+        <li><code>AbstractValidator&lt;CreateOrderRequest&gt;</code> — базовый класс; тип в угловых скобках
+          говорит, <em>какую модель</em> проверяет валидатор.</li>
+        <li><code>RuleFor(x =&gt; x.CustomerId)</code> — «завести правило для свойства
+          <code>CustomerId</code>». Лямбда не вычисляется: из неё библиотека берёт <strong>имя</strong>
+          свойства — оно попадёт и в текст ошибки, и в ключ JSON с ошибками
+          (<code>"errors": { "CustomerId": [ … ] }</code>).</li>
+        <li><code>GreaterThan(0)</code> — встроенный валидатор сравнения: значение должно быть
+          <strong>строго больше</strong> нуля, то есть <code>0</code> не пройдёт, а <code>1</code> пройдёт.
+          Родственные: <code>GreaterThanOrEqualTo</code>, <code>LessThan</code>,
+          <code>InclusiveBetween</code>, <code>NotEmpty</code>, <code>MaximumLength</code>.</li>
+        <li><code>.NotEmpty().MaximumLength(200)</code> — <strong>цепочка</strong>: два независимых правила на
+          одно свойство, проверяются оба.</li>
+        <li><code>.WithMessage("…")</code> — заменяет сообщение по умолчанию у <strong>предыдущего</strong>
+          валидатора в цепочке. Без него текст останется английским и с именем свойства из лямбды (проверено):
+          <code>'Customer Id' must be greater than '0'.</code> Поэтому в примере
+          <code>WithMessage</code> стоит у каждого правила.</li>
+      </ul>
+    </div>
+
+    <p>Правило, которое зависит от <strong>другого поля</strong> той же модели, задаётся не константой, а
+      выражением: порог берётся из самой модели. Пример для заказа с датами (это уже другой DTO —
+      <code>CreateBookingRequest</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class CreateBookingRequest
+{
+    public DateTime StartsAt { get; init; }
+    public DateTime EndsAt { get; init; }
+}
+
+public sealed class CreateBookingValidator : AbstractValidator&lt;CreateBookingRequest&gt;
+{
+    public CreateBookingValidator()
+    {
+        // порог — не число, а поле x.StartsAt той же модели: «конец позже начала»
+        RuleFor(x =&gt; x.EndsAt).GreaterThan(x =&gt; x.StartsAt)
+            .WithMessage("Дата окончания должна быть позже даты начала");
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Реальный вывод: оба валидатора прогнаны на разных моделях</p>
+      <pre><code class="language-text">валидная модель: IsValid=True
+CustomerId=0: IsValid=False
+    [CustomerId] code=GreaterThanValidator msg="CustomerId должен быть больше нуля"
+Title пустой: IsValid=False
+    [Title] code=NotEmptyValidator msg="Title обязателен"
+Title 201 символ: IsValid=False
+    [Title] code=MaximumLengthValidator msg="Title длиннее 200 символов"
+
+два поля:
+    EndsAt раньше StartsAt: IsValid=False msg="Дата окончания должна быть позже даты начала"
+    EndsAt == StartsAt: IsValid=False msg="Дата окончания должна быть позже даты начала"
+    EndsAt позже: IsValid=True</code></pre>
+    </div>
+    <p>В выводе видно две вещи. Сообщения <strong>русские</strong>, потому что у каждого правила стоит
+      <code>WithMessage</code>. И <code>EndsAt == StartsAt</code> — <strong>тоже ошибка</strong>:
+      <code>GreaterThan</code> строгий, «позже» не включает «в тот же момент». Если равенство допустимо, нужно
+      <code>GreaterThanOrEqualTo</code>.</p>
+    <div class="box tip">
+      <span class="t">Валидатор сам по себе ничего не проверяет</span>
+      <p>Класс выше — только <em>описание</em> правил. Чтобы он срабатывал, его регистрируют в DI и вызывают
+        перед обработчиком (endpoint-фильтр) — как именно, разобрано в главе 19. Здесь важен сам способ: правила
+        — обычный C#-код, поэтому в них есть то, чего нет у атрибутов, — правила на два поля, свои сообщения и
+        класс, который тестируется без HTTP.</p>
     </div>
 
     <h2>Что возвращать при ошибке</h2>
