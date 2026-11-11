@@ -76,7 +76,11 @@
     .AddCheck("self", () =&gt; HealthCheckResult.Healthy(), tags: ["live"])
     // «готов ли обслуживать»: зависимости, которые нужны для работы
     .AddNpgSql(connectionString, name: "postgres", tags: ["ready"])   // пакет AspNetCore.HealthChecks.NpgSql
-    .AddRedis(redisConnection, name: "redis",  tags: ["ready"]);
+    .AddRedis(redisConnection, name: "redis",  tags: ["ready"])       // пакет AspNetCore.HealthChecks.Redis
+    // флаг прогрева: класс WarmupService — в разделе «Прогрев» ниже
+    .AddCheck("warmup", () =&gt; WarmupService.Ready
+            ? HealthCheckResult.Healthy()
+            : HealthCheckResult.Unhealthy("прогрев не завершён"), tags: ["ready"]);
 
 var app = builder.Build();
 
@@ -87,7 +91,7 @@ app.MapHealthChecks("/health/live",  new HealthCheckOptions
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
     Predicate = r =&gt; r.Tags.Contains("ready"),      // только зависимости
-    ResponseWriter = async (ctx, report) =&gt;      // свой JSON: имя проверки, статус, длительность
+    ResponseWriter = async (ctx, report) =&gt;      // свой JSON: имя проверки и её статус
     {
         ctx.Response.ContentType = "application/json";
         await ctx.Response.WriteAsJsonAsync(new
@@ -98,6 +102,43 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
     }
 });</code></pre>
     </div>
+    <p>Эти два пути — не для пользователя. Их опрашивает платформа, и из этого следуют два правила: пробу нельзя
+      закрывать авторизацией, и её не нужно публиковать наружу.</p>
+    <table>
+      <tr><th>Кто опрашивает</th><th>Что именно</th><th>Как часто</th></tr>
+      <tr><td>kubelet (Kubernetes)</td><td><code>livenessProbe</code>, <code>readinessProbe</code>,
+        <code>startupProbe</code> из манифеста пода</td><td>5–10 с (<code>periodSeconds</code>)</td></tr>
+      <tr><td>Docker</td><td><code>HEALTHCHECK</code> в Dockerfile или <code>--health-cmd</code></td>
+        <td>30 с по умолчанию</td></tr>
+      <tr><td>Балансировщик / ingress</td><td>health check target group (ALB), upstream check в
+        <code>nginx</code></td><td>5–30 с</td></tr>
+      <tr><td>CI/CD и мониторинг</td><td>«дождаться ready после деплоя», <code>blackbox_exporter</code></td>
+        <td>по событию / 15 с</td></tr>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-yaml"># фрагмент манифеста Deployment: пути — те же, что в MapHealthChecks
+livenessProbe:
+  httpGet: { path: /health/live, port: 8080 }
+  periodSeconds: 10
+  failureThreshold: 3          # 3 провала подряд → контейнер перезапускают
+readinessProbe:
+  httpGet: { path: /health/ready, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 2          # 2 провала → под убирают из балансировки
+startupProbe:                  # пока не прошла, liveness и readiness не считаются
+  httpGet: { path: /health/live, port: 8080 }
+  periodSeconds: 2
+  failureThreshold: 30         # до 60 с на старт: миграции, прогрев</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Почему пробы не закрывают авторизацией</span>
+      <p><code>kubelet</code> приходит без токена, без cookie и без вашего заголовка — это простой GET с
+        внутреннего адреса. Если на <code>/health/*</code> навесить <code>[Authorize]</code>, проба всегда получит
+        401: liveness начнёт перезапускать здоровый под, а readiness никогда не пустит его в балансировку.</p>
+      <p>Обратная ошибка — оставить эти пути в публичном ingress. Проба дешёвая, но не бесплатная: снаружи её
+        можно дёргать сколько угодно, а платить будет ваш CPU. Правильно — отдавать <code>/health/*</code> только
+        внутреннему трафику: отдельный порт, network policy, path-фильтр на ingress.</p>
+    </div>
     <ul>
       <li><strong>Проба должна быть дешёвой:</strong> <code>SELECT 1</code> или проверка соединения из пула, а
         не «посчитай заказы за месяц».</li>
@@ -105,6 +146,9 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
         100 репликах × 1 проба/5 с.</li>
       <li><strong>Readiness может быть false при живом процессе</strong> — это нормальный способ вывести
         реплику из трафика без убийства (используется при выкатке).</li>
+      <li><strong>Руками</strong> эти пути дёргают только при отладке:
+        <code>curl -i http://localhost:8080/health/ready</code> — если не 200, тело покажет, какая проверка
+        упала (за это отвечает <code>ResponseWriter</code> выше).</li>
     </ul>
 
     <h2>Прогрев: новая реплика не готова в первую секунду</h2>
@@ -112,18 +156,20 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
       пуст (гл. 23), EF Core строит модель и компилирует первые запросы, кэш пуст (гл. 25). Если трафик
       придёт сразу, первые сотни запросов будут в разы медленнее — и попадут в p99.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// прогреваем пул и модель до того, как readiness станет true
+      <pre><code class="language-csharp">// прогреваем пул, модель и Redis до того, как readiness станет true
 public sealed class WarmupService(
     IServiceScopeFactory scopes,
+    IDistributedCache l2,                   // тот же Redis, что в гл. 25
+    IConfiguration config,                  // список горячих ключей — из конфигурации (гл. 17)
     ILogger&lt;WarmupService&gt; log) : BackgroundService
 {
-    public static volatile bool Ready;          // health-check смотрит на этот флаг
+    public static volatile bool Ready;      // health-check «warmup» смотрит на этот флаг
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         try
         {
-            // открываем столько соединений, сколько понадобится под нагрузку
+            // 1) БД: открываем столько соединений, сколько понадобится под нагрузку
             await Parallel.ForEachAsync(
                 Enumerable.Range(0, 10),
                 ct,
@@ -133,6 +179,17 @@ public sealed class WarmupService(
                     var db = scope.ServiceProvider.GetRequiredService&lt;AppDbContext&gt;();
                     await db.Database.ExecuteSqlRawAsync("SELECT 1", token);
                 });
+
+            // 2) Redis: сначала соединение — до первого вызова его нет вообще
+            await l2.GetAsync("__warmup__", ct);
+
+            // 3) горячие ключи: убеждаемся, что они есть, и греем путь до Redis
+            foreach (var key in config.GetSection("Cache:HotKeys").Get&lt;string[]&gt;() ?? [])
+            {
+                var value = await l2.GetAsync(key, ct);
+                if (value is null)
+                    log.LogWarning("горячий ключ {Key} пуст — первый запрос пойдёт в источник", key);
+            }
 
             Ready = true;                        // теперь readiness отдаёт 200
             log.LogInformation("прогрев завершён");
@@ -144,14 +201,47 @@ public sealed class WarmupService(
     }
 }</code></pre>
     </div>
+    <p>Список горячих ключей — обычная конфигурация, её правит тот, кто знает, что понадобится сразу:</p>
+    <div class="codewrap">
+      <pre><code class="language-json">{
+  "Cache": {
+    "HotKeys": [ "tariff:v3:1", "tariff:v3:2", "tariff:v3:42" ]
+  }
+}</code></pre>
+    </div>
     <ul>
       <li><code>SELECT 1</code> через EF прогревает и пул, и модель: первый запрос строит метаданные, дальше
         они кэшируются в процессе.</li>
+      <li><strong>В Redis греть нужно соединение, а не данные.</strong> Данные и так лежат в памяти сервера.
+        Первый <code>GetAsync</code> и открывает соединение (по сети — ещё TLS-handshake и AUTH). Замерено на
+        локальном Redis без TLS: <strong>140 мс</strong> на первом вызове и <strong>0,85 мс</strong> на втором.
+        По сети с TLS разница больше — и платит её тот запрос, который придёт первым, если прогрева нет.</li>
+      <li><strong>Горячие ключи</strong> читаем до <code>Ready = true</code>: во-первых, видно в логе, что ключа
+        нет (иначе первый запрос молча пойдёт в источник), во-вторых, прогрет путь до Redis. Если у вас
+        L1 перед L2, те же значения надо положить в <code>IMemoryCache</code> — через свой сервис из гл. 25:
+        после рестарта L1 у каждой реплики пуст, и это как раз тот случай.</li>
+      <li><strong>Ключи нельзя класть «руками» через <code>redis-cli SET</code>:</strong> провайдер хранит
+        значение не строкой, а хэшем (<code>absexp</code>, <code>sldexp</code>, <code>data</code>), и после
+        <code>SET</code> чтение падает с <code>WRONGTYPE</code> («wrong kind of value»). Прогрев — только через
+        тот же <code>IDistributedCache</code>, что и запись.</li>
       <li>Health-проверка «ready» возвращает <code>Unhealthy</code>, пока <code>Ready == false</code>: трафик
         не пойдёт.</li>
       <li>В Kubernetes для этого есть <code>startupProbe</code> (даёт время, не убивая) и
         <code>readinessProbe</code> (держит вне трафика до готовности).</li>
     </ul>
+    <p>Проверено на стенде (Kestrel + EF/SQLite + настоящий Redis): до конца прогрева
+      <code>/health/ready</code> отдаёт <code>503</code> с телом
+      <code>{"status":"Unhealthy","checks":[{"key":"warmup","status":"Unhealthy"}]}</code>, после —
+      <code>200</code> и <code>{"status":"Healthy",...}</code>. <code>/health/live</code> при этом всё время
+      <code>200</code>: процесс-то жив.</p>
+    <div class="box warn">
+      <span class="t">Прогрев делает одну попытку</span>
+      <p>Если Redis не поднялся к моменту старта, <code>ExecuteAsync</code> падает (у StackExchange.Redis это
+        ~5 секунд до таймаута соединения — проверено), <code>Ready</code> остаётся <code>false</code>, и
+        реплика не получит трафик <em>до перезапуска</em>, хотя процесс полностью работоспособен. Для
+        продакшена: ретраи с backoff внутри <code>ExecuteAsync</code> либо freshness-проверки зависимостей в
+        readiness вместо статического флага.</p>
+    </div>
     <div class="box note">
       <span class="t">Прогрев нужен только при старте? Нет — но «повторный прогрев» выглядит иначе</span>
       <p>Сам прогрев JIT и модели EF — <strong>свойство процесса</strong>: один раз прогрели, и до перезапуска
@@ -291,7 +381,8 @@ app.MapGet("/export", ExportAsync).RequireRateLimiting("export");</code></pre>
     <ol>
       <li>Ничего важного не хранится в памяти процесса (сессии, кэш, счётчики, файлы).</li>
       <li>Есть <code>/health/live</code> — без зависимостей, и <code>/health/ready</code> — с ними.</li>
-      <li>Readiness возвращает false, пока идёт прогрев пула/модели.</li>
+      <li>Readiness возвращает false, пока идёт прогрев пула, модели EF и соединения с Redis.</li>
+      <li>Пробы <code>/health/*</code> не требуют авторизации и не опубликованы в публичный ingress.</li>
       <li>Graceful shutdown настроен: <code>ShutdownTimeout</code> меньше grace period платформы.</li>
       <li>Фоновые задачи идемпотентны или выполняются одним экземпляром.</li>
       <li>Миграции БД не запускаются из каждого экземпляра приложения.</li>
@@ -310,8 +401,10 @@ app.MapGet("/export", ExportAsync).RequireRateLimiting("export");</code></pre>
           БД, Redis или подписанном токене.</li>
         <li><strong>Liveness ≠ readiness:</strong> зависимости проверяем только в readiness, иначе чужая
           авария перезапустит все реплики.</li>
-        <li>Новая реплика должна <strong>прогреться</strong> (пул, модель EF, JIT), прежде чем получать
-          трафик.</li>
+        <li>Пробы <code>/health/*</code> — не для пользователя: их опрашивает <code>kubelet</code>,
+          балансировщик или CI. Поэтому без авторизации и не в публичном ingress.</li>
+        <li>Новая реплика должна <strong>прогреться</strong> (пул, модель EF, JIT, соединение с Redis), прежде
+          чем получать трафик.</li>
         <li>Корректная остановка: readiness → false, дренаж, отмена фоновых задач, dispose;
           <code>ShutdownTimeout</code> меньше, чем grace period платформы.</li>
         <li>Встроенный rate limiter считает <strong>в памяти реплики</strong>; общий лимит — на gateway или
