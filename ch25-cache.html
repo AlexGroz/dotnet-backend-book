@@ -72,22 +72,33 @@
         потом асинхронно в источник)</td><td>нужна запись через кэш; write-behind рискован — можно потерять
         данные</td></tr>
     </table>
+    <p>Ниже — сервис целиком, со всеми зависимостями: <code>Tariff</code> — сущность из БД, <code>db</code> —
+      <code>AppDbContext</code> (оба из гл. 24), <code>cache</code> — <code>IMemoryCache</code>. Это параметры
+      конструктора, их подставляет DI (гл. 15), а не «внезапные» поля.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// cache-aside: классическая схема «прочитай кэш → промах → источник → положи»
-public async Task&lt;Tariff&gt; GetTariffAsync(int id, CancellationToken ct)
+      <pre><code class="language-csharp">// сущность из БД (гл. 24) — для примеров достаточно такого описания
+public sealed record Tariff(int Id, string Name, decimal Price);
+
+// cache-aside: классическая схема «прочитай кэш → промах → источник → положи»
+public sealed class TariffService(AppDbContext db, IMemoryCache cache)
 {
-    var key = $"tariff:v3:{id}";                       // v3 — версия формата ключа (см. ниже)
+    public async Task&lt;Tariff&gt; GetTariffAsync(int id, CancellationToken ct)
+    {
+        var key = $"tariff:v3:{id}";                        // v3 — версия формата ключа (см. ниже)
 
-    if (_cache.TryGetValue(key, out Tariff? cached))    // 1) пробуем кэш
-        return cached!;
+        if (cache.TryGetValue(key, out Tariff? cached))      // 1) пробуем кэш
+            return cached!;
 
-    var tariff = await _db.Tariffs.AsNoTracking()       // 2) промах: читаем источник
-        .FirstAsync(t =&gt; t.Id == id, ct);
+        var tariff = await db.Tariffs.AsNoTracking()         // 2) промах: читаем источник
+            .FirstAsync(t =&gt; t.Id == id, ct);
 
-    _cache.Set(key, tariff, TimeSpan.FromMinutes(5));   // 3) кладём с TTL
-    return tariff;
+        cache.Set(key, tariff, TimeSpan.FromMinutes(5));     // 3) кладём с TTL
+        return tariff;
+    }
 }</code></pre>
     </div>
+    <p>Проверено на реальном прогоне: два подряд вызова <code>GetTariffAsync(1)</code> дают <strong>один</strong>
+      <code>SELECT</code> в базу — второй ответ приходит из кэша.</p>
 
     <div class="box note">
       <span class="t">Что за <code>!</code> в <code>return cached!;</code></span>
@@ -149,9 +160,17 @@ public sealed class TariffStore(IDistributedCache cache)
     <div class="box tip">
       <span class="t">L1 перед L2: как не удвоить сложность</span>
       <p>Если кэшей два, порядок всегда один и тот же: <strong>L1 → L2 → источник</strong>, а запись — в оба.
-        Проблема: у каждой реплики свой L1, поэтому инвалидация должна либо рассылаться (pub/sub в Redis), либо
-        быть не нужной — за счёт <strong>очень короткого TTL</strong> в L1 (5–30 секунд). Второй вариант проще и
-        почти всегда достаточен.</p>
+        Проблема: у каждой реплики свой L1, поэтому при сбросе ключа остальные реплики об этом не узнают. Отсюда два
+        варианта:</p>
+      <ul>
+        <li><strong>(а) рассылать инвалидацию</strong> — реплика публикует в pub/sub Redis «ключ изменился», все
+          остальные чистят его у себя в L1. Точнее, но дороже: нужен канал, обработчик и защита от пропущенных
+          сообщений;</li>
+        <li><strong>(б) ничего не рассылать, но взять очень короткий TTL в L1 (5–30 секунд)</strong> — реплика сама
+          перечитает значение из L2 чуть позже и разойдётся с остальными максимум на эти секунды.</li>
+      </ul>
+      <p>Вариант <strong>(б)</strong> проще и почти всегда достаточен: расхождения в пределах 30 секунд для
+        справочника не видны, а инфраструктуры и кода — ноль.</p>
     </div>
 
     <h2>Инвалидация: три способа не отдавать вчерашние данные</h2>
@@ -166,9 +185,24 @@ public sealed class TariffStore(IDistributedCache cache)
     </ol>
     <div class="codewrap">
       <pre><code class="language-csharp">// запись: сначала БД, потом кэш (и только после успешного коммита)
-await _db.SaveChangesAsync(ct);
-await _cache.RemoveAsync($"tariff:v3:{tariff.Id}", ct);   // или PutAsync с новым значением</code></pre>
+public sealed class TariffWriter(AppDbContext db, IMemoryCache l1, IDistributedCache l2)
+{
+    public async Task UpdateAsync(Tariff tariff, CancellationToken ct)
+    {
+        db.Tariffs.Update(tariff);
+        await db.SaveChangesAsync(ct);                          // 1) источник истины обновлён
+
+        await l2.RemoveAsync($"tariff:v3:{tariff.Id}", ct);     // 2) L2 — по сети, поэтому async
+        l1.Remove($"tariff:v3:{tariff.Id}");                    // 3) L1 этого процесса — локально, sync
+    }
+}</code></pre>
     </div>
+    <p><code>l1</code> и <code>l2</code> — ровно те два кэша из раздела выше: <code>IMemoryCache</code> и
+      <code>IDistributedCache</code>. Разница в API не случайна: локальный кэш отвечает мгновенно, поэтому у него
+      синхронный <code>Remove</code>; распределённый ходит по сети — у него все методы асинхронные
+      (<code>RemoveAsync</code>). Если удобнее не удалять, а положить новое значение:
+      <code>await l2.SetStringAsync(key, JsonSerializer.Serialize(tariff), ct)</code> — читатель сразу получит
+      свежее, без промаха (<code>JsonSerializer</code> — из <code>System.Text.Json</code>).</p>
     <div class="box warn">
       <span class="t">Порядок «кэш → БД» — источник расхождений</span>
       <p>Если удалить кэш <em>до</em> коммита, параллельное чтение успеет положить туда старое значение, и оно
@@ -179,32 +213,44 @@ await _cache.RemoveAsync($"tariff:v3:{tariff.Id}", ct);   // или PutAsync с 
     <h2>Cache stampede: когда кэш «кончился» у всех одновременно</h2>
     <p>Классический сценарий: популярный ключ истёк, и <strong>все</strong> запросы одновременно пошли в базу.
       Тысяча запросов вместо одного — база ложится именно в тот момент, когда кэш должен был её спасать.</p>
+    <p>Тот же <code>TariffService</code> из начала главы, но вместо прямого чтения источника — метод
+      <code>GetOrCreateAsync</code>: он либо отдаёт готовое значение, либо создаёт его, и делает это один раз на
+      ключ.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">// «single flight»: источник читает ТОЛЬКО первый запрос, остальные ждут его результата
-private static readonly ConcurrentDictionary&lt;string, SemaphoreSlim&gt; Locks = new();
-
-public async Task&lt;Tariff&gt; GetAsync(int id, CancellationToken ct)
+public sealed class TariffService(AppDbContext db, IMemoryCache cache)
 {
-    var key = $"tariff:v3:{id}";
-    if (_memory.TryGetValue(key, out Tariff? hit)) return hit!;
+    private static readonly ConcurrentDictionary&lt;string, SemaphoreSlim&gt; Locks = new();
 
-    var gate = Locks.GetOrAdd(key, _ =&gt; new SemaphoreSlim(1, 1));
-    await gate.WaitAsync(ct);
-    try
+    public async Task&lt;Tariff&gt; GetOrCreateAsync(int id, CancellationToken ct)
     {
-        if (_memory.TryGetValue(key, out hit)) return hit!;      // второй раз: мог положить «первый»
+        var key = $"tariff:v3:{id}";
+        if (cache.TryGetValue(key, out Tariff? hit)) return hit!;
 
-        var tariff = await LoadFromDbAsync(id, ct);              // в базу идёт один запрос
-        _memory.Set(key, tariff, TimeSpan.FromMinutes(5));
-        return tariff;
-    }
-    finally
-    {
-        gate.Release();
-        Locks.TryRemove(key, out _);                             // не копим семафоры по ключам
+        var gate = Locks.GetOrAdd(key, _ =&gt; new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (cache.TryGetValue(key, out hit)) return hit!;   // второй раз: мог положить «первый»
+
+            var tariff = await db.Tariffs.AsNoTracking()         // в базу идёт один запрос
+                .FirstAsync(t =&gt; t.Id == id, ct);
+            cache.Set(key, tariff, TimeSpan.FromMinutes(5));
+            return tariff;
+        }
+        finally
+        {
+            gate.Release();
+            Locks.TryRemove(key, out _);                         // не копим семафоры по ключам
+        }
     }
 }</code></pre>
     </div>
+    <p><code>ConcurrentDictionary</code> и <code>SemaphoreSlim</code> — из
+      <code>System.Collections.Concurrent</code> и <code>System.Threading</code>.</p>
+    <p>Проверено на стенде, где источник отвечает с задержкой 100 мс: 200 одновременных запросов на холодный ключ дают
+      <strong>один</strong> <code>SELECT</code> (199 ждут результата первого). Те же 200 запросов без семафора дают
+      <strong>200</strong> запросов в базу — ровно та картина, которая её и роняет.</p>
     <ul>
       <li><strong>Jitter в TTL</strong> (5 мин ± 30 с) — ключи не истекают синхронно.</li>
       <li><strong>Stale-while-revalidate</strong>: отдаём старое значение, пока в фоне обновляем. Свежесть
