@@ -81,11 +81,108 @@ WHERE xact_start IS NOT NULL
 ORDER BY xact_age DESC
 LIMIT 10;</code></pre>
     </div>
+    <p>Вот как это выглядит на живой базе: одна сессия сделала <code>UPDATE</code> и «забыла» закрыть
+      транзакцию, вторая выполняет долгий запрос, а третья — сам этот диагностический запрос:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">  pid |        state        |    xact_age     |                     last_query
+------+---------------------+-----------------+----------------------------------------------------
+  235 | idle in transaction | 00:00:02.984549 | UPDATE accounts SET balance = balance - 1 WHERE id
+  242 | active              | 00:00:02.006254 | SELECT pg_sleep(16);
+  249 | active              | 00:00:00        | SELECT pid,                                       +
+      |                     |                 |        state,                                     +
+      |                     |                 |        now() - xact_star
+(3 rows)</code></pre>
+    </div>
+    <p><strong>Что здесь читать:</strong></p>
+    <ul>
+      <li><strong><code>xact_age</code></strong> — сколько живёт транзакция. Первые строки списка — подозреваемые.
+        Миллисекунды и пара секунд — норма (обычный запрос), минуты — уже повод смотреть, кто это и зачем.</li>
+      <li><strong><code>state</code></strong> — самое важное поле. <code>idle in transaction</code> значит:
+        транзакция открыта, но сессия <em>ничего не делает</em>. Это почти всегда ошибка в коде
+        (<code>BEGIN</code> без <code>COMMIT</code>, забытый <code>using</code>/<code>Dispose</code>, ожидание
+        HTTP-ответа внутри транзакции), а не «тяжёлый запрос».</li>
+      <li><strong><code>last_query</code></strong> — последний запрос сессии (обрезан до 50 символов). По нему
+        видно, <em>какой именно код</em> оставил транзакцию, и дальше искать уже в приложении.</li>
+      <li><strong>Последняя строка — сам диагностический запрос.</strong> Он тоже выполняется в транзакции,
+        поэтому попадает в собственный вывод с возрастом <code>00:00:00</code>. Это нормально.</li>
+    </ul>
+    <table>
+      <thead><tr><th><code>state</code></th><th>Что означает</th><th>Опасность</th></tr></thead>
+      <tbody>
+        <tr><td><code>active</code></td><td>Выполняется запрос — или сессия ждёт блокировку (см. ниже)</td>
+          <td>Зависит от длительности: секунды — норма, минуты — проблема</td></tr>
+        <tr><td><code>idle</code></td><td>Соединение открыто, транзакции нет</td>
+          <td>Нет. Такие сессии в запрос выше <em>не попадают</em>: у них <code>xact_start</code> пустой</td></tr>
+        <tr><td><code>idle in transaction</code></td><td>Транзакция открыта, запросов нет</td>
+          <td><strong>Да</strong>: держит снимок (мешает <code>VACUUM</code>) и блокировки строк</td></tr>
+        <tr><td><code>idle in transaction (aborted)</code></td><td>Внутри транзакции была ошибка, но
+          <code>ROLLBACK</code> не сделан</td><td>Блокировки и снимок уже отпущены, но соединение и блок
+          транзакции висят</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Осторожно: <code>active</code> не всегда значит «работает».</strong> Сессия, которая просто ждёт
+      чужую блокировку, тоже в состоянии <code>active</code> — отличает её поле <code>wait_event</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT pid, state, wait_event_type, wait_event,
+       now() - query_start AS query_age, left(query, 40) AS last_query
+FROM   pg_stat_activity
+WHERE  backend_type = 'client backend'
+ORDER  BY pid;
+
+--  pid |        state        | wait_event_type |  wait_event   |  query_age   | last_query
+-- -----+---------------------+-----------------+---------------+--------------+----------------------
+--  548 | idle in transaction | Client          | ClientRead    | 00:00:03.517 | UPDATE accounts SET …
+--  556 | active              | Lock            | transactionid | 00:00:02.009 | UPDATE accounts SET …
+--  562 | active              |                 |               | 00:00:00     | SELECT pid, …</code></pre>
+    </div>
+    <p>Сессия <code>556</code> «активна» уже две секунды, но не работает: <code>wait_event = transactionid</code>
+      значит «ждёт, пока закончится транзакция, которая держит эту строку». Держит её <code>548</code> — та
+      самая, что висит в <code>idle in transaction</code>. Так выглядят блокировки, которые потом
+      превращаются в дедлоки (глава 24).</p>
+    <div class="box warn">
+      <span class="t">Чего этот запрос не покажет</span>
+      <p>Фильтр <code>WHERE xact_start IS NOT NULL</code> отсекает две категории сессий. Первая — обычные
+        <code>idle</code>-соединения (это хорошо). Вторая — <strong>прерванные незакрытые транзакции</strong>
+        (<code>idle in transaction (aborted)</code>): у них <code>xact_start</code> пустой, хотя транзакция
+        формально открыта. Проверено: такая сессия в вывод не попадает, но блокировок она уже не держит
+        (<code>pg_locks</code> для неё пуст — при ошибке PostgreSQL их освободил). Опасность в другом: она
+        занимает соединение из пула и держит блок транзакции.</p>
+      <p>Если хотите видеть и такие сессии, фильтруйте по <code>state</code>:</p>
+      <div class="codewrap">
+        <pre><code class="language-sql">SELECT pid, state, now() - xact_start AS xact_age, left(query, 50) AS last_query
+FROM   pg_stat_activity
+WHERE  state &lt;&gt; 'idle'            -- всё, что не «просто соединение»
+ORDER  BY xact_start DESC NULLS LAST
+LIMIT  10;
+
+--  pid |             state             | xact_age |     last_query
+-- -----+-------------------------------+----------+--------------------
+--  508 | active                        | 00:00:00 | SELECT pid, …
+--  498 | idle in transaction           | 00:00:02 | UPDATE accounts …
+--  496 | active                        | 00:00:02 | SELECT pg_sleep(16);
+--  495 | idle in transaction (aborted) |          | SELECT 1/0 AS boom;</code></pre>
+      </div>
+    </div>
+    <p><strong>Что делать с найденной сессией.</strong> Сначала понять, чей это код (<code>last_query</code> плюс
+      <code>application_name</code>, <code>client_addr</code>, <code>usename</code> — они есть в той же
+      <code>pg_stat_activity</code>). Если ждать нельзя — две команды, и они делают <em>разное</em>
+      (проверено):</p>
+    <table>
+      <thead><tr><th>Команда</th><th>Что делает</th><th>Что увидит сессия-жертва</th></tr></thead>
+      <tbody>
+        <tr><td><code>pg_cancel_backend(pid)</code></td><td>Отменяет <em>текущий запрос</em>; соединение и
+          транзакция остаются</td><td><code>ERROR: canceling statement due to user request</code> (код
+          <code>57014</code>)</td></tr>
+        <tr><td><code>pg_terminate_backend(pid)</code></td><td>Обрывает <em>соединение</em> целиком</td>
+          <td><code>FATAL: terminating connection due to administrator command</code></td></tr>
+      </tbody>
+    </table>
     <div class="box warn">
       <span class="t">Особый случай: <code>idle in transaction</code></span>
       <p>Транзакция открыта, но запросов нет — приложение «забыло» её закрыть (например, ждёт ответа внешнего
         сервиса или пользователя). Лечится короткими транзакциями и настройкой сервера:
-        <code>idle_in_transaction_session_timeout</code> прибьёт такую сессию.</p>
+        <code>idle_in_transaction_session_timeout</code> сама прибьёт такую сессию — она получит
+        <code>FATAL: terminating connection due to idle-in-transaction timeout</code> (проверено).</p>
     </div>
 
     <h2>Правила работы с транзакциями</h2>
@@ -107,16 +204,142 @@ SET LOCAL statement_timeout = '5s';   -- не выполнять запрос д
 
 COMMIT;</code></pre>
     </div>
+    <p><strong>Где и как долго они действуют.</strong> Разница — в слове <code>LOCAL</code>. Граница
+      проходит не по функции и не по «блоку кода», а по <em>транзакции</em>:</p>
+    <table>
+      <thead><tr><th>Как задано</th><th>До какого момента действует</th><th>Проверено</th></tr></thead>
+      <tbody>
+        <tr><td><code>SET LOCAL имя = …</code></td><td>До конца <em>транзакции</em>
+          (<code>COMMIT</code>/<code>ROLLBACK</code>); вне транзакции не работает вовсе</td>
+          <td><code>BEGIN; SET LOCAL statement_timeout = '1s'; … COMMIT;</code> → <code>SHOW
+          statement_timeout</code> снова <code>0</code></td></tr>
+        <tr><td><code>SET имя = …</code> (без <code>LOCAL</code>)</td><td>До конца <em>соединения</em>
+          (или <code>RESET</code>)</td><td>после <code>SET statement_timeout = '1s'</code> значение
+          <code>1s</code> остаётся и после запросов, и после <code>COMMIT</code></td></tr>
+        <tr><td><code>SET</code> в шапке функции</td><td>Только на время выполнения функции</td>
+          <td>после <code>SELECT f();</code> → <code>SHOW statement_timeout</code> = <code>0</code></td></tr>
+      </tbody>
+    </table>
+    <p>Мелочь, которую полезно знать: <code>SET LOCAL</code> <em>вне</em> транзакции не сработает — сервер
+      вернёт <code>WARNING: SET LOCAL can only be used in transaction blocks</code>, а значение останется
+      прежним. Поэтому <code>SET LOCAL</code> и пишут сразу после <code>BEGIN</code>.</p>
+    <p><strong>А если <code>SET LOCAL</code> стоит внутри функции?</strong> Тогда ответ зависит от того,
+      закончилась ли транзакция. Четыре случая, все проверены:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE FUNCTION f_local() RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+    SET LOCAL statement_timeout = '7s';      -- «на текущую транзакцию»
+    RETURN 'done';
+END $$;
+CREATE FUNCTION f_session() RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+    SET statement_timeout = '3s';            -- «на текущее соединение»
+    RETURN 'done';
+END $$;
+CREATE FUNCTION f_clause() RETURNS text LANGUAGE plpgsql
+SET statement_timeout = '4s' AS $$           -- «только пока выполняется функция»
+BEGIN
+    RETURN 'done';
+END $$;
+
+-- 1) f_local внутри BEGIN…COMMIT: установка ПЕРЕЖИВАЕТ выход из функции
+BEGIN;
+SELECT f_local();        -- done
+SHOW statement_timeout;  -- 7s   ← действует на всю транзакцию, а не только на функцию
+COMMIT;
+SHOW statement_timeout;  -- 0    ← транзакция кончилась, настройка ушла
+
+-- 2) f_local одним оператором (без BEGIN): «транзакция» = этот оператор
+SELECT f_local();        -- done
+SHOW statement_timeout;  -- 0    ← ушло вместе с оператором
+
+-- 3) f_session: SET без LOCAL «протекает» наружу
+SELECT f_session();      -- done
+SHOW statement_timeout;  -- 3s   ← осталось после функции, до конца соединения
+RESET statement_timeout;
+SHOW statement_timeout;  -- 0
+
+-- 4) f_clause: SET в шапке функции восстанавливается на выходе
+SELECT f_clause();       -- done
+SHOW statement_timeout;  -- 0</code></pre>
+    </div>
+    <p>Правило короткое: <strong><code>SET LOCAL</code> живёт до конца транзакции, <code>SET</code> — до конца
+      соединения.</strong> Функция тут ничего не меняет: «на одну функцию» настройку задаёт только
+      <code>SET</code> в шапке функции. И именно поэтому в пуле соединений опасен <code>SET</code> без
+      <code>LOCAL</code>: соединение вернётся в пул с чужим таймаутом, и следующий запрос другого клиента
+      неожиданно упадёт. <code>SET LOCAL</code> так не «протекает» — он исчезает вместе с
+      <code>COMMIT</code>.</p>
+    <p><strong>Что именно ограничивает каждый таймаут.</strong> <code>lock_timeout</code> — только
+      <em>ожидание блокировки</em>; <code>statement_timeout</code> — весь оператор целиком (включая это
+      ожидание). Одна и та же ситуация: вторая сессия держит строку, первая её ждёт:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- ограничили ожидание блокировки
+SET LOCAL lock_timeout = '1s';
+UPDATE accounts SET balance = balance - 1 WHERE id = 1;
+-- ERROR:  55P03: canceling statement due to lock timeout
+-- CONTEXT:  while updating tuple (0,1) in relation "accounts"
+
+-- то же место, но ограничение на весь оператор
+SET LOCAL statement_timeout = '1s';
+UPDATE accounts SET balance = balance - 1 WHERE id = 1;
+-- ERROR:  57014: canceling statement due to statement timeout
+-- CONTEXT:  while updating tuple (0,1) in relation "accounts"</code></pre>
+    </div>
+    <p>Смысл разницы: <code>lock_timeout</code> говорит «не жди чужую транзакцию дольше N» — приложение успеет
+      вернуть 503 и повторить; <code>statement_timeout</code> — «не работай дольше N вообще» (чтобы тяжёлый
+      отчёт не съел соединение на минуты). Оба кода, <code>55P03</code> и <code>57014</code>, — в таблице
+      «Ошибки, которые надо повторять» ниже.</p>
 
     <h2>Уровни изоляции</h2>
     <p>Уровень изоляции отвечает на вопрос: <strong>что транзакция видит из изменений других транзакций</strong>.
-      По умолчанию в PostgreSQL — <code>read committed</code>:</p>
+      По умолчанию в PostgreSQL — <code>read committed</code>. Задаётся он <em>до начала работы</em>, и от места
+      зависит, на что распространяется — на одну транзакцию или на все следующие:</p>
+    <table>
+      <thead><tr><th>Где задать</th><th>На что действует</th><th>Проверено</th></tr></thead>
+      <tbody>
+        <tr><td><code>BEGIN ISOLATION LEVEL REPEATABLE READ;</code></td><td>только на <em>эту</em>
+          транзакцию</td><td>внутри <code>SHOW transaction_isolation</code> → <code>repeatable read</code>;
+          после <code>COMMIT</code> → снова <code>read committed</code></td></tr>
+        <tr><td><code>BEGIN; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</code></td><td>на эту транзакцию,
+          но только <em>до первого запроса</em></td><td>после любого <code>SELECT</code>:
+          <code>ERROR: SET TRANSACTION ISOLATION LEVEL must be called before any query</code></td></tr>
+        <tr><td><code>SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;</code></td>
+          <td>на все <em>последующие</em> транзакции этого соединения</td>
+          <td><code>SHOW default_transaction_isolation</code> → <code>repeatable read</code>, и каждая новая
+          <code>BEGIN</code> начинается с него</td></tr>
+        <tr><td><code>ALTER DATABASE shop SET default_transaction_isolation = 'repeatable read';</code>
+          (или <code>ALTER ROLE …</code>)</td><td>на все <em>новые соединения</em> к базе (роли)</td>
+          <td>действует постоянно и переживает перезапуск; <code>RESET</code> в сессии его не отменяет</td></tr>
+        <tr><td>В коде приложения: уровень передают при открытии транзакции
+          (<code>BeginTransactionAsync(IsolationLevel.RepeatableRead, …)</code>)</td><td>на транзакцию,
+          которую открыл код</td><td>пример на C# — глава 23</td></tr>
+      </tbody>
+    </table>
     <div class="codewrap">
-      <pre><code class="language-sql">SHOW default_transaction_isolation;          -- read committed
+      <pre><code class="language-sql">SHOW default_transaction_isolation;      -- read committed
 
-BEGIN ISOLATION LEVEL REPEATABLE READ;       -- на одну транзакцию
--- или внутри транзакции, до первого запроса:
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</code></pre>
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SHOW transaction_isolation;              -- repeatable read   ← действует
+COMMIT;
+SHOW transaction_isolation;              -- read committed    ← и уже не действует
+
+BEGIN;
+SELECT 1;                                -- любой запрос уже начал транзакцию
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- ERROR:  SET TRANSACTION ISOLATION LEVEL must be called before any query
+
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+SHOW transaction_isolation;              -- serializable      ← успели до первого запроса
+COMMIT;
+
+-- «на всю сессию», а не на одну транзакцию:
+SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SHOW default_transaction_isolation;      -- repeatable read
+BEGIN;
+SHOW transaction_isolation;              -- repeatable read   ← каждая следующая тоже
+COMMIT;
+RESET default_transaction_isolation;     -- вернули как было</code></pre>
     </div>
     <table>
       <thead><tr><th>Уровень</th><th>Что видит транзакция</th><th>Аномалии</th></tr></thead>
@@ -127,6 +350,39 @@ SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</code></pre>
         <tr><td><strong>Serializable</strong></td><td>Как RR + отслеживание конфликтов (SSI)</td><td>Только откат с <code>40001</code> — это нормально, транзакцию повторяют</td></tr>
       </tbody>
     </table>
+    <p><strong>Зачем всё это на практике.</strong> Две сессии, одна и та же последовательность: A открывает
+      транзакцию и читает баланс, B в этот момент его меняет, A читает ещё раз.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- сессия A: READ COMMITTED (по умолчанию)
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SELECT balance FROM accounts WHERE id = 1;   -- 1000.00
+SELECT pg_sleep(4);                          -- пауза, в это время работает сессия B
+SELECT balance FROM accounts WHERE id = 1;   -- 1500.00  ← значение изменилось «под ногами»
+COMMIT;
+
+-- сессия B в паузе: UPDATE accounts SET balance = balance + 500 WHERE id = 1;</code></pre>
+    </div>
+    <p>Те же действия с <code>REPEATABLE READ</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT balance FROM accounts WHERE id = 1;   -- 1000.00
+SELECT pg_sleep(4);
+SELECT balance FROM accounts WHERE id = 1;   -- 1000.00  ← тот же снимок, данные «не поехали»
+COMMIT;</code></pre>
+    </div>
+    <p>Это и есть разница «снимок на каждый оператор» против «снимок на всю транзакцию»: в RC один и тот же
+      запрос внутри одной транзакции может вернуть разные значения, в RR — нет.</p>
+    <p><strong>Цена RR.</strong> Другая последовательность: A (в <code>REPEATABLE READ</code>) прочитала строку,
+      B эту строку изменила и зафиксировала, а затем A пытается изменить её сама:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- сессия A, та же транзакция из примера выше:
+UPDATE accounts SET balance = balance - 10 WHERE id = 1;
+-- ERROR:  40001: could not serialize access due to concurrent update
+ROLLBACK;</code></pre>
+    </div>
+    <p>PostgreSQL не может «применить изменение поверх того, чего транзакция не видела», и откатывает её. Это не
+      сбой, а сигнал «повтори транзакцию целиком»: при повторе она увидит новое состояние, и конфликта не
+      будет. Отсюда и правило выбора — уровни не «лучше/хуже», а под задачу (см. врезку ниже).</p>
     <div class="box note">
       <span class="t">«Сериализация» в «конфликте сериализации» — это не про JSON</span>
       <p><strong>Сериализация транзакций</strong> (от <em>series</em> — «ряд, последовательность») — это режим, в
@@ -155,53 +411,100 @@ SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</code></pre>
     </div>
 
     <h2><code>SAVEPOINT</code>: откатить часть транзакции</h2>
-    <p><code>SAVEPOINT имя</code> ставит «закладку» внутри транзакции, а
-      <code>ROLLBACK TO SAVEPOINT имя</code> отменяет всё, что сделано <em>после</em> неё, оставляя более ранние
-      изменения. Транзакция при этом остаётся живой — работу можно продолжать.</p>
-    <div class="box warn">
-      <span class="t">Сначала — как это НЕ работает</span>
-      <p>Соблазнительно записать команды подряд, «на всякий случай»:</p>
-      <div class="codewrap">
-        <pre><code class="language-sql">SAVEPOINT sp;
-UPDATE payments SET status = 'sent' WHERE id = 42;     -- шаг, который может упасть
-ROLLBACK TO SAVEPOINT sp;                              -- ✘ выполнится ВСЕГДА, а не «если ошибка»
-UPDATE payments SET status = 'retry' WHERE id = 42;</code></pre>
-      </div>
-      <p><code>ROLLBACK TO SAVEPOINT</code> — это обычная команда, а не конструкция «если ошибка». Поэтому в
-        такой записи итог <strong>всегда один и тот же</strong>: <code>sent</code> отменён,
-        <code>retry</code> применён. Даже если шаг прошёл успешно. Откат «по факту неудачи» так не
-        получится — нужно <em>ветвление</em>, которого в чистом SQL нет.</p>
-    </div>
-    <p><strong>Сценарий 1: шаг упал.</strong> Так это выглядит в интерактивной сессии <code>psql</code> (шаг
-      падает, потому что <code>external_ref</code> уже занят другой строкой):</p>
+    <p><strong>Зачем это нужно.</strong> Транзакция — «всё или ничего» для <em>всей</em> группы операторов. Но
+      бывает, что один шаг внутри неё рискованный, и при его неудаче терять всё остальное не хочется. Пример из
+      этой главы: деньги со счёта уже списаны, а запись платежа может упасть из-за дубликата
+      <code>external_ref</code>. Без <code>SAVEPOINT</code> такая ошибка отменяет всю транзакцию — вместе со
+      списанием.</p>
+    <p><strong>Что делает <code>SAVEPOINT</code>.</strong> Ставит внутри транзакции «закладку». После этого:</p>
+    <ul>
+      <li><code>ROLLBACK TO SAVEPOINT sp</code> — отменяет всё, что сделано <em>после</em> закладки; более
+        ранние изменения (списание) остаются;</li>
+      <li><code>RELEASE SAVEPOINT sp</code> — убирает закладку, ничего не отменяя;</li>
+      <li>транзакция остаётся живой: после отката к закладке работу можно продолжать и в конце сделать
+        <code>COMMIT</code>.</li>
+    </ul>
+    <p><strong>Шаг 1. Что происходит без закладки.</strong> Две таблицы: <code>accounts</code> (балансы) и
+      <code>payments</code> (платежи, у <code>external_ref</code> — <code>UNIQUE</code>). Списываем деньги и
+      пишем платёж с номером, который уже занят другой строкой:</p>
     <div class="codewrap">
-      <pre><code class="language-sql">BEGIN;                                                   -- BEGIN
-UPDATE accounts SET balance = balance - 100 WHERE id = 1; -- UPDATE 1  (деньги списаны)
-SAVEPOINT sp;                                            -- SAVEPOINT
-
-UPDATE payments SET external_ref = 'pay_777', status = 'sent'
-WHERE  id = 42;
+      <pre><code class="language-sql">BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;          -- UPDATE 1
+UPDATE payments SET external_ref = 'pay_999', status = 'sent' WHERE id = 42;
 -- ERROR:  duplicate key value violates unique constraint "payments_external_ref_key"
--- DETAIL:  Key (external_ref)=(pay_777) already exists.
---   ↑ транзакция помечена прерванной: любая следующая команда, КРОМЕ отката, упадёт
+-- DETAIL:  Key (external_ref)=(pay_999) already exists.
+SELECT 1;
+-- ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ROLLBACK;          -- выбора уже нет: COMMIT тоже не сработает
 
-ROLLBACK TO SAVEPOINT sp;                                -- ROLLBACK — «сняли аварию», списание цело
-UPDATE payments SET external_ref = 'pay_778', status = 'retry'
-WHERE  id = 42;                                          -- UPDATE 1  — пробуем иначе
-COMMIT;                                                  -- COMMIT — списание + retry сохранены</code></pre>
+SELECT balance FROM accounts WHERE id = 1;
+--  1000.00     ← списание отменилось вместе со всем остальным</code></pre>
     </div>
-    <p><strong>Сценарий 2: шаг прошёл.</strong> Тогда откатываться не к чему — закладку просто убирают, а
-      <code>retry</code> <strong>не выполняется</strong>:</p>
+    <p><strong>Итог: не выполнено ничего.</strong> Одна ошибка «убила» всю транзакцию — в том числе удачное
+      списание, которое к ошибке отношения не имело.</p>
+    <p><strong>Шаг 2. Тот же случай, но с закладкой.</strong> Ставим <code>SAVEPOINT</code> прямо перед
+      рискованным шагом:</p>
     <div class="codewrap">
-      <pre><code class="language-sql">BEGIN;                                                   -- BEGIN
-UPDATE accounts SET balance = balance - 100 WHERE id = 1; -- UPDATE 1
-SAVEPOINT sp;                                            -- SAVEPOINT
+      <pre><code class="language-sql">BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;   -- UPDATE 1  (списание)
+SAVEPOINT sp;                                              -- SAVEPOINT (закладка)
 
-UPDATE payments SET external_ref = 'pay_777', status = 'sent'
-WHERE  id = 42;                                          -- UPDATE 1  (ошибки нет)
+UPDATE payments SET external_ref = 'pay_999', status = 'sent' WHERE id = 42;
+-- ERROR:  duplicate key value violates unique constraint "payments_external_ref_key"
+-- DETAIL:  Key (external_ref)=(pay_999) already exists.
+SELECT 1;
+-- ERROR:  current transaction is aborted, commands ignored until end of transaction block
+--   ↑ транзакция «мёртвая»: без отката к закладке дальше ничего не выполнится
 
-RELEASE SAVEPOINT sp;                                    -- RELEASE — закладка больше не нужна
-COMMIT;                                                  -- COMMIT — сохранены sent, а не retry</code></pre>
+ROLLBACK TO SAVEPOINT sp;                                  -- ROLLBACK (отмотали только упавший шаг)
+UPDATE payments SET external_ref = 'pay_998', status = 'retry' WHERE id = 42;
+-- UPDATE 1  (вторая попытка — уже проходит)
+COMMIT;                                                    -- COMMIT
+
+SELECT id, balance FROM accounts ORDER BY id;              -- 1 → 900.00  (списание сохранилось)
+SELECT id, external_ref, status FROM payments ORDER BY id;
+--  42 | pay_998 | retry     ← упавший шаг отменён, удачная попытка сохранена
+--  43 | pay_999 | new</code></pre>
+    </div>
+    <p><strong>Итог: списание + удачная попытка</strong>, а неудачная попытка отменена. Ради этого
+      <code>SAVEPOINT</code> и нужен.</p>
+    <p><strong>Шаг 3. Если рискованный шаг прошёл.</strong> Продолжаем в той же базе: после шага 2 на счёте
+      <code>900.00</code>, у платежа <code>42</code> — <code>pay_998</code>/<code>retry</code>. Теперь номер
+      свободен, шаг проходит — и закладка не нужна, её просто убирают:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;   -- UPDATE 1  (списание)
+SAVEPOINT sp;                                              -- SAVEPOINT
+
+UPDATE payments SET external_ref = 'pay_700', status = 'sent' WHERE id = 42;
+-- UPDATE 1  (ошибки нет)
+
+RELEASE SAVEPOINT sp;                                      -- RELEASE — закладка больше не нужна
+COMMIT;                                                    -- COMMIT
+
+SELECT balance FROM accounts WHERE id = 1;                 -- 800.00
+SELECT id, external_ref, status FROM payments WHERE id = 42;
+--  42 | pay_700 | sent     ← сохранён sent, а не retry</code></pre>
+    </div>
+    <p><strong>Итог:</strong> сохранён <code>sent</code>, ветка <code>retry</code> не выполнялась — её и не должно
+      быть, ошибки ведь не было.</p>
+    <div class="box warn">
+      <span class="t">Почему нельзя «просто дописать <code>ROLLBACK TO SAVEPOINT</code>»</span>
+      <p>Соблазн: написать команды подряд, «на всякий случай» — пусть откат будет всегда, а вдруг ошибка.
+        В чистом SQL так нельзя: <code>ROLLBACK TO SAVEPOINT</code> — это <em>команда</em>, а не конструкция
+        «если ошибка». В такой записи итог одинаков при любом исходе:</p>
+      <div class="codewrap">
+        <pre><code class="language-sql">BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+SAVEPOINT sp;
+UPDATE payments SET status = 'sent' WHERE id = 42;   -- прошло успешно
+ROLLBACK TO SAVEPOINT sp;                            -- ✘ всё равно отменяет шаг выше
+UPDATE payments SET status = 'retry' WHERE id = 42;  -- и применяет «аварийную» ветку
+COMMIT;</code></pre>
+      </div>
+      <p>Результат — <code>retry</code> вместо <code>sent</code>, хотя ошибки не было. Откат «по факту неудачи»
+        требует <strong>ветвления</strong>, а ветвления в чистом SQL нет: нужен PL/pgSQL (ниже) или код
+        приложения.</p>
     </div>
     <div class="box warn">
       <span class="t">Ошибка внутри транзакции «отравляет» её</span>
@@ -210,7 +513,7 @@ COMMIT;                                                  -- COMMIT — сохр�
         <code>SAVEPOINT</code>, если он был поставлен заранее. Именно поэтому savepoint — не «удобство», а
         единственный способ продолжить работу после ошибки внутри транзакции.</p>
     </div>
-    <p><strong>Прямые ответы на два вопроса.</strong> Сравните «безусловную» запись из начала раздела и
+    <p><strong>Прямые ответы на главный вопрос.</strong> Сравните «безусловную» запись из врезки выше и
       правильную схему:</p>
     <table>
       <thead><tr><th>Что произошло с шагом <code>sent</code></th><th>Выполнится ли <code>retry</code>?</th>
@@ -229,29 +532,87 @@ COMMIT;                                                  -- COMMIT — сохр�
     <p>Короткая формула: <strong><code>retry</code> — это ветка «если упало», а не следующий шаг</strong>. Значит
       нужен код с ветвлением — PL/pgSQL или C#.</p>
     <h3>Ветвление в PL/pgSQL: блок с <code>EXCEPTION</code></h3>
+    <p>Функция — это и есть «ветвление»: обычный код в <code>BEGIN … END</code> выполняется, пока не упадёт, а
+      <code>EXCEPTION</code> — ветка «если упало».</p>
     <div class="codewrap">
       <pre><code class="language-sql">CREATE OR REPLACE FUNCTION pay(p_id bigint, p_ref text)
 RETURNS text
 LANGUAGE plpgsql AS $$
 BEGIN
-    -- шаг, который может упасть (например, дубликат external_ref)
+    -- ↓↓↓ «тело блока»: операторы между BEGIN и EXCEPTION
     UPDATE payments SET external_ref = p_ref, status = 'sent' WHERE id = p_id;
     RETURN 'sent';                                  -- ошибки не было → выходим здесь
 EXCEPTION
     WHEN unique_violation THEN                      -- сработал unique-индекс по external_ref
-        -- сюда управление приходит уже ПОСЛЕ автоматического отката этого блока:
+        -- сюда управление приходит уже ПОСЛЕ автоматического отката тела блока:
         -- для блоков с обработчиком PostgreSQL сам ставит savepoint на входе
         UPDATE payments SET status = 'retry' WHERE id = p_id;   -- ветка «если упало»
         RETURN 'retry';
 END $$;</code></pre>
     </div>
+    <p><strong>Где здесь «тело блока» и где «внешняя транзакция».</strong> Это две разные вещи, и путаница
+      обычно из-за того, что обе выглядят как «код с <code>BEGIN</code>»:</p>
     <ul>
-      <li><strong>Ключевая деталь:</strong> блок <code>BEGIN … EXCEPTION … END</code> — это <em>неявный</em>
-        <code>SAVEPOINT</code>. Поэтому после ошибки откатывается только тело блока, а внешняя транзакция
-        (со списанием денег) продолжает жить.</li>
+      <li><strong>Тело блока</strong> — операторы внутри функции, между её <code>BEGIN</code> и
+        <code>EXCEPTION</code>: тот самый <code>UPDATE … status = 'sent'</code>. Именно он откатывается при
+        ошибке.</li>
+      <li><strong>Внешняя транзакция</strong> — транзакция <em>вызывающей стороны</em>, то есть того, кто вызвал
+        функцию: <code>BEGIN; UPDATE accounts …; SELECT pay(…); COMMIT;</code>. Её изменения (списание денег)
+        к телу блока не относятся и при ошибке внутри блока остаются.</li>
+    </ul>
+    <p>Вот вызывающая сторона целиком — «внешняя транзакция» — и что получилось (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN;                                              -- ← внешняя транзакция начинается здесь
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;   -- списание, 1000.00 → 900.00
+
+SELECT pay(42, 'pay_999') AS step;
+--  step
+-- -------
+--  retry      ← внутри функции был дубликат, тело блока откатилось, сработал обработчик
+
+INSERT INTO payments (id, external_ref, status) VALUES (44, 'pay_044', 'new');
+-- INSERT 0 1  ← внешняя транзакция жива и продолжает работать
+COMMIT;
+
+SELECT id, balance FROM accounts ORDER BY id;
+--  1 |  900.00   ← списание СОХРАНИЛОСЬ, хотя внутри блока была ошибка
+--  2 | 1000.00
+
+SELECT id, external_ref, status FROM payments ORDER BY id;
+--  42 | pay_001 | retry    ← status изменён обработчиком, а external_ref остался старым:
+--                            именно это и означает «откатилось только тело блока»
+--  43 | pay_999 | new
+--  44 | pay_044 | new      ← строка из внешней транзакции тоже сохранилась</code></pre>
+    </div>
+    <p><strong>Механизм, если коротко.</strong> Блок <code>BEGIN … EXCEPTION … END</code> — это <em>неявный</em>
+      <code>SAVEPOINT</code>: PostgreSQL ставит закладку на входе в блок. Ошибка откатывает транзакцию
+      <strong>до этой закладки</strong> — то есть только то, что успел сделать блок, — а дальше управление
+      переходит в обработчик. Внешняя транзакция остаётся открытой.</p>
+    <p><strong>А если обработчика нет?</strong> Тогда и закладки нет — ошибка откатывает <em>всю</em> транзакцию
+      целиком, вместе со списанием. Проверено, та же функция без <code>EXCEPTION</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;   -- UPDATE 1
+SELECT pay_bad(42, 'pay_999');                              -- функция без EXCEPTION
+-- ERROR:  duplicate key value violates unique constraint "payments_external_ref_key"
+-- CONTEXT:  SQL statement "UPDATE payments SET external_ref = p_ref, status = 'sent' WHERE id = p_id"
+-- PL/pgSQL function pay_bad(bigint,text) line 3 at SQL statement
+INSERT INTO payments (id, external_ref, status) VALUES (45, 'pay_045', 'new');
+-- ERROR:  current transaction is aborted, commands ignored until end of transaction block
+COMMIT;                              -- psql ответит ROLLBACK: коммитить уже нечего
+
+SELECT balance FROM accounts WHERE id = 1;                  -- 900.00 — как было, списание отменено
+SELECT count(*) FROM payments WHERE id = 45;                -- 0 — строки нет</code></pre>
+    </div>
+    <p>Разница между двумя вариантами — ровно в обработчике: с ним откатывается только тело блока, без него —
+      вся транзакция вызывающей стороны.</p>
+    <ul>
       <li><strong>Ловушка:</strong> обработчик ловит <em>любую</em> ошибку указанного класса. Проверяйте
         <code>SQLSTATE</code>/условие (<code>WHEN unique_violation</code>, а не <code>WHEN others</code>),
-        иначе «проглотите» и настоящую аварию.</li>
+        иначе «проглотите» и настоящую аварию — и транзакция даже не заметит, что что-то пошло не так.</li>
+      <li><strong>Практика:</strong> обработчик ставят вокруг <em>рискованного</em> шага (внешний вызов,
+        вставка с <code>UNIQUE</code>, необязательная часть операции), а не на каждую функцию «на всякий
+        случай» — иначе настоящие ошибки перестают быть видны.</li>
       <li><strong>В C#</strong> то же самое делается явно: <code>SaveAsync("sp")</code> →
         <code>try { … } catch { await tx.RollbackAsync("sp"); … }</code> (пример — в .NET-разделе, глава про
         транзакции и HTTP-вызовы).</li>
