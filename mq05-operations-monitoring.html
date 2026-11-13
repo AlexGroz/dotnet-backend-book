@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · Эксплуатация RabbitMQ</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="rabbitmq.html">← Оглавление</a>
+  <span class="booktitle">RabbitMQ</span>
+  <a href="docker.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">RabbitMQ · Часть III · Эксплуатация</div>
+    <h1>Глава 5. Эксплуатация: мониторинг, память и кластер</h1>
+    <p class="sublead">Что смотреть, что происходит при перегрузке и почему один узел — не продакшен</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что мониторить</h2>
+    <p>Очередь — это буфер, и у него есть три состояния, которые надо видеть раздельно:</p>
+    <table>
+      <thead><tr><th>Метрика</th><th>Что означает</th><th>На что указывает</th></tr></thead>
+      <tbody>
+        <tr><td><code>messages_ready</code></td><td>Сколько лежит и ждёт потребителя</td><td>Растёт — потребители
+          не успевают или лежат</td></tr>
+        <tr><td><code>messages_unacknowledged</code></td><td>Сколько выдано, но не подтверждено</td><td>Растёт —
+          обработка «зависла» или prefetch слишком большой</td></tr>
+        <tr><td><code>consumers</code></td><td>Сколько подписок на очередь</td><td>Ноль при растущей очереди —
+          потребитель упал</td></tr>
+        <tr><td><code>message_stats.publish</code> / <code>deliver</code></td><td>Скорости публикации и
+          доставки</td><td>Публикация больше доставки — очередь неизбежно растёт</td></tr>
+      </tbody>
+    </table>
+    <p>Первые три видны и в CLI, и в панели. Проверено:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec rmq3 rabbitmqctl list_queues name type durable messages
+# name            type     durable  messages
+# q.durable       classic  true     0
+# q.alarm         classic  false    4
+# orders.new      classic  true     0</code></pre>
+    </div>
+    <p>Колонка <code>type</code> показывает, что все очереди — <code>classic</code>. Это важно для разговора о
+      репликации (ниже).</p>
+
+    <h2>Панель и HTTP API</h2>
+    <p>Плагин <code>rabbitmq_management</code> даёт не только веб-интерфейс на <code>:15672</code>, но и JSON
+      API — удобно для дашбордов и алертов. Например, состояние одной очереди:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">curl -s -u guest:guest 'http://localhost:15672/api/queues/%2F/q.dlq'
+
+# {'name': 'q.dlq', 'messages': 1, 'consumers': 0, 'durable': False, 'auto_delete': False, ...}</code></pre>
+    </div>
+    <p>Список очередей — <code>/api/queues</code>, конкретная — <code>/api/queues/{vhost}/{name}</code>
+      (vhost по умолчанию в URL кодируется как <code>%2F</code>). Для алертов достаточно двух правил:
+      «<code>messages_ready</code> растёт N минут» и «<code>consumers = 0</code> при непустой очереди».</p>
+
+    <h2>Alarms: что происходит при перегрузке</h2>
+    <p>RabbitMQ следит за памятью и местом на диске. Когда порог превышен, включается <strong>alarm</strong>, и
+      брокер перестаёт читать данные от публикующих соединений — это защита, чтобы не упасть целиком.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># порог по умолчанию — 0.4 доступной памяти; поставим заведомо низкий
+docker exec rmq3 rabbitmqctl set_vm_memory_high_watermark 0.000001
+
+docker exec rmq3 rabbitmqctl status | grep -A2 '^Alarms'
+# Alarms
+#
+# Memory alarm on node rabbit@6a1d93a32e2d
+
+# вернуть как было
+docker exec rmq3 rabbitmqctl set_vm_memory_high_watermark 0.4</code></pre>
+    </div>
+    <p>Самое интересное — как это выглядит <em>из приложения</em>. Проверено дважды, на одном и том же
+      publish:</p>
+    <div class="codewrap">
+      <pre><code class="language-text"># канал БЕЗ подтверждений
+publish: ok
+channel.IsOpen: True
+
+# канал С подтверждениями, таймаут 3 секунды
+confirm: NOT received -&gt; TaskCanceledException</code></pre>
+    </div>
+    <ul>
+      <li><strong>Без confirm</strong> публикация «успешна»: клиент записал байты в сокет и пошёл дальше. Ни
+        ошибки, ни задержки — просто сообщения никуда не делись.</li>
+      <li><strong>С confirm</strong> вызов ждёт подтверждения, не получает его и падает по таймауту. Только так
+        перегрузка брокера становится видимой.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Что делать при alarm</span>
+      <ul>
+        <li><strong>Разбирать очередь</strong>, а не «поднимать порог»: alarm — симптом, что потребители не
+          успевают.</li>
+        <li><strong>Проверить <code>messages_unacknowledged</code>:</strong> если оно большое, а
+          <code>messages_ready</code> маленькое — сообщения «зависли» в обработчиках (prefetch слишком
+          большой).</li>
+        <li><strong>Ограничить очереди:</strong> <code>x-max-length</code> и TTL не дают одному потоку данных
+          занять всю память.</li>
+        <li><strong>Не публиковать «в никуда»:</strong> без confirms приложение не узнает, что брокер перестал
+          принимать сообщения.</li>
+      </ul>
+    </div>
+    <h2>Кластер и репликация</h2>
+    <p>Один узел RabbitMQ — одна точка отказа: он упал, и публикация (а с ней и приложение) встала. В
+      продакшене ставят кластер из трёх узлов. Что при этом важно понимать:</p>
+    <ul>
+      <li><strong>Кластер RabbitMQ — это не шардирование.</strong> Очередь живёт на одном узле, остальные знают
+        о ней метаданные. Клиент может подключиться к любому узлу, но сообщения одной очереди обрабатывает
+        узел-владелец.</li>
+      <li><strong>Репликация очередей — через <code>quorum</code>-очереди.</strong> В примерах этой книги все
+        очереди типа <code>classic</code>; такие очереди не реплицируются. Для «пережить потерю узла»
+        объявляют очередь <code>x-queue-type: quorum</code> — она хранится на нескольких узлах и переживает
+        потерю одного.</li>
+      <li><strong>Клиент должен уметь переподключиться.</strong> <code>RabbitMQ.Client</code> поддерживает
+        список хостов в <code>ConnectionFactory</code>; после падения узла соединение пересоздаётся, а
+        неподтверждённые сообщения возвращаются в очередь.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Что реплицируется, а что нет</span>
+      <p>Реплика очереди защищает <em>сообщения</em>, но не избавляет от простоя: пока идёт выбор нового
+        лидера, публикация может быть недоступна. Поэтому у приложения всё равно должны быть повторные попытки
+        и подтверждения — «кластер есть» не значит «сбой незаметен».</p>
+    </div>
+
+    <h2>Чек-лист перед продакшеном</h2>
+    <ul>
+      <li><strong>Отдельный пользователь и vhost</strong>, <code>guest</code> отключён или ограничен localhost.</li>
+      <li><strong>Очереди durable, сообщения persistent</strong>, публикация — с подтверждениями
+        (<code>CreateChannelOptions</code>).</li>
+      <li><strong><code>mandatory: true</code> + обработчик <code>BasicReturnAsync</code></strong> — чтобы
+        «некуда положить» не терялось молча.</li>
+      <li><strong><code>autoAck: false</code></strong> и обязательный <code>ack</code>/<code>nack</code> в
+        каждом исходе обработки.</li>
+      <li><strong>DLX и DLQ</strong> у каждой рабочей очереди; алерт на рост DLQ.</li>
+      <li><strong>Prefetch</strong> выставлен осознанно (не «по умолчанию без лимита»).</li>
+      <li><strong>Метрики:</strong> длина очередей, <code>messages_unacknowledged</code>, число потребителей,
+        alarms.</li>
+      <li><strong>Лимиты:</strong> <code>x-max-length</code>, TTL, а также лимит памяти брокера — чтобы одна
+        очередь не съела узел.</li>
+      <li><strong>Кластер из трёх узлов</strong> и <code>quorum</code>-очереди для критичных потоков.</li>
+    </ul>
+
+    <div class="box warn">
+      <span class="t">Типичные ошибки</span>
+      <ul>
+        <li><strong><code>autoAck: true</code></strong> — падение потребителя теряет сообщения, и никто об этом
+          не узнает.</li>
+        <li><strong>Публикация без confirm</strong> — перегрузка брокера выглядит как нормальная работа
+          (проверено выше).</li>
+        <li><strong>Одна очередь на несколько сервисов</strong> — сообщения делятся вместо копирования.</li>
+        <li><strong>Без DLQ</strong> — «отравленное» сообщение крутится вечно и блокирует обработку.</li>
+        <li><strong>Наблюдение только за «жив ли процесс»</strong> — рост очереди и DLQ видно лишь по метрикам.</li>
+        <li><strong>Один узел в продакшене</strong> — перезапуск брокера останавливает публикацию во всех
+          сервисах.</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Три метрики очереди:</strong> <code>messages_ready</code>,
+          <code>messages_unacknowledged</code>, <code>consumers</code> — по ним видно, где застряло.</li>
+        <li><strong>Alarm памяти или диска блокирует публикацию</strong>; без confirms приложение этого не
+          замечает.</li>
+        <li><strong>HTTP API</strong> (<code>/api/queues</code>) — источник данных для дашбордов и алертов.</li>
+        <li><strong>Кластер ≠ шардирование:</strong> очередь живёт на узле; репликация — <code>quorum</code>-очереди.</li>
+        <li><strong>Надёжность собирается из мелочей:</strong> durable + persistent + confirm + mandatory + ack +
+          DLQ + prefetch + метрики.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="mq04-queues-ttl-dlx.html">← <span class="sp">Глава 4. Очереди, TTL, dead-letter и повторная обработка</span></a>
+      <a href="docker.html"><span class="sp">Следующая книга: Docker и контейнеры →</span></a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

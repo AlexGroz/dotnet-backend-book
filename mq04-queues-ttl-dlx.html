@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · Очереди, TTL и dead-letter</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="rabbitmq.html">← Оглавление</a>
+  <span class="booktitle">RabbitMQ</span>
+  <a href="mq05-operations-monitoring.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">RabbitMQ · Часть II · Надёжность</div>
+    <h1>Глава 4. Очереди, TTL, dead-letter и повторная обработка</h1>
+    <p class="sublead">Что переживает перезапуск, как отложить сообщение и куда девать то, что не обработалось</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Параметры очереди: durable, exclusive, autoDelete</h2>
+    <p>Имя очереди — не единственное, что её определяет. Три флага решают её судьбу:</p>
+    <table>
+      <thead><tr><th>Флаг</th><th>Что означает</th><th>Типичное применение</th></tr></thead>
+      <tbody>
+        <tr><td><code>durable: true</code></td><td>Очередь переживает перезапуск брокера</td><td>Рабочие
+          очереди, события</td></tr>
+        <tr><td><code>durable: false</code></td><td>После перезапуска исчезает вместе с сообщениями</td>
+          <td>Временные, тестовые очереди</td></tr>
+        <tr><td><code>exclusive: true</code></td><td>Доступна только создавшему соединению и удаляется при его
+          закрытии</td><td>Ответная очередь для RPC одного клиента</td></tr>
+        <tr><td><code>autoDelete: true</code></td><td>Удаляется, когда от неё отписался последний потребитель</td>
+          <td>Временные подписки, reply-очереди</td></tr>
+      </tbody>
+    </table>
+    <p>Проверено на перезапуске брокера. До рестарта было семь очередей, после — две:</p>
+    <div class="codewrap">
+      <pre><code class="language-text"># до:  rabbitmqctl list_queues name durable messages
+q.durable       true    2
+q.transient     false   2
+orders.new      true    0
+q.dlq           false   1
+q.ttl           false   0
+q.payments      false   0
+q.requeue       false   0
+
+# после рестарта:
+q.durable       true    0      &lt;- очередь выжила, сообщения — нет
+orders.new      true    0</code></pre>
+    </div>
+    <p>Два вывода, и второй важнее первого:</p>
+    <ul>
+      <li><strong>Не-durable очереди исчезли</strong> вместе с сообщениями: <code>q.transient</code>,
+        <code>q.ttl</code>, <code>q.dlq</code>, <code>q.payments</code>, <code>q.requeue</code>.</li>
+      <li><strong>У <code>q.durable</code> пропали сообщения</strong>, хотя очередь выжила. Причина: они были
+        отправлены <em>без</em> <code>Persistent = true</code>. Очередь durable и сообщение persistent — это два
+        разных флага, и нужны оба.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Минимальный набор для «переживает перезапуск»</span>
+      <p><code>durable: true</code> у очереди + <code>Persistent = true</code> у сообщения + публикация с
+        подтверждением (глава 2). Если убрать любой из трёх — сообщение можно потерять, и вы об этом не узнаете.</p>
+    </div>
+
+    <h2>TTL: когда сообщение устаревает</h2>
+    <p>Время жизни задаётся у самого сообщения свойством <code>Expiration</code> (в миллисекундах, строкой) или у
+      очереди аргументом <code>x-message-ttl</code>. Проверено: сообщение с <code>Expiration = "1000"</code> в
+      очереди без потребителей через две секунды исчезло:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await ch.QueueDeclareAsync("q.ttl", durable: false, exclusive: false, autoDelete: false);
+
+var props = new BasicProperties { Expiration = "1000", ContentType = "application/json" };
+await ch.BasicPublishAsync("", "q.ttl", mandatory: false, basicProperties: props,
+                           body: Encoding.UTF8.GetBytes("{\"id\":8}"));
+
+await Task.Delay(2000);
+
+var passive = await ch.QueueDeclarePassiveAsync("q.ttl");
+var got     = await ch.BasicGetAsync("q.ttl", autoAck: true);
+Console.WriteLine($"messages={passive.MessageCount} get={(got is null ? "null" : "…")}");
+
+// messages=0 get=null</code></pre>
+    </div>
+    <p>Зачем это нужно: сообщение, которое пролежало в очереди час, обычно уже бессмысленно — заказ отменён,
+      цена изменилась. TTL превращает «вечно растущую очередь» в «очередь с осмысленным горизонтом».</p>
+    <h2>Dead-letter: куда девать неудачное</h2>
+    <p><strong>Dead-letter exchange (DLX)</strong> — это «перенаправление на отказ». Очереди указывают, куда
+      отправлять сообщение, если:</p>
+    <ul>
+      <li>потребитель ответил <code>BasicNack(requeue: false)</code> или <code>BasicReject(requeue: false)</code>;</li>
+      <li>истёк TTL сообщения или очереди;</li>
+      <li>сообщение не поместилось в очередь из-за лимита длины.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1) обменник для «отказных» сообщений и очередь для них
+await ch.ExchangeDeclareAsync("ex.dlx", ExchangeType.Fanout, durable: false, autoDelete: false);
+await ch.QueueDeclareAsync("q.dlq", durable: false, exclusive: false, autoDelete: false);
+await ch.QueueBindAsync("q.dlq", "ex.dlx", routingKey: "");
+
+// 2) рабочая очередь знает, куда отправлять отказы
+var queueArgs = new Dictionary&lt;string, object?&gt; { ["x-dead-letter-exchange"] = "ex.dlx" };
+await ch.QueueDeclareAsync("q.payments", durable: false, exclusive: false, autoDelete: false,
+                           arguments: queueArgs);
+
+// 3) сообщение и отказ без возврата в очередь
+await ch.BasicPublishAsync("", "q.payments", Encoding.UTF8.GetBytes("{\"id\":7}"));
+
+consumer.ReceivedAsync += async (_, ea) =&gt;
+{
+    await ch.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
+};</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">payments got {"id":7}, nack(requeue: false)
+after nack: payments=0 dlq=1</code></pre>
+    </div>
+    <p>Сообщение ушло из рабочей очереди и появилось в <code>q.dlq</code>. Дальше с ним можно делать что угодно:
+      разбирать вручную, отправлять в архив или возвращать в работу по расписанию.</p>
+    <div class="box note">
+      <span class="t">DLX не «копирует», а переносит</span>
+      <p>После срабатывания DLX сообщение существует только в очереди-приёмнике: в исходной очереди его больше
+        нет. Поэтому dead-letter очередь — это <em>место разбора</em>, а не дубликат.</p>
+    </div>
+
+    <h2>Retry: отложить и попробовать снова</h2>
+    <p>Классическая схема повторной обработки в RabbitMQ строится на двух вещах: <strong>DLX</strong> и
+      <strong>TTL</strong>. Рабочая очередь отправляет отказы не сразу в DLQ, а в «очередь задержки», у которой
+      нет потребителей и стоит <code>x-message-ttl</code>; когда TTL истекает, сообщение по DLX возвращается в
+      рабочую очередь.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">q.orders ──nack──▶ ex.retry ──▶ q.orders.retry (x-message-ttl = 5s, без потребителей)
+                                   │  истёк TTL
+                                   ▼
+                                ex.dlx ──▶ q.orders   (снова в работу)
+
+после N попыток: q.orders ──nack──▶ ex.failed ──▶ q.orders.failed (DLQ для разбора)</code></pre>
+    </div>
+    <ul>
+      <li><strong>Номер попытки</strong> хранят в заголовке (<code>x-attempts</code>) или в теле; по нему решают,
+        вернуть сообщение в рабочую очередь или отправить в DLQ.</li>
+      <li><strong>Задержка — это и есть TTL:</strong> 5 секунд, 30 секунд, 5 минут — на каждую ступень своя
+        очередь с <code>x-message-ttl</code>. Так проще, чем хранить срок в каждом сообщении: TTL очереди
+        действует на всё, что в неё попало.</li>
+      <li><strong>Без DLQ цикл не заканчивается:</strong> «отравленное» сообщение будет возвращаться вечно
+        (глава 3).</li>
+    </ul>
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Durable-очередь и persistent-сообщение — разные флаги.</strong> Проверено: очередь пережила
+          перезапуск, а её сообщения без <code>Persistent = true</code> — нет.</li>
+        <li><strong>TTL</strong> ограничивает возраст сообщения: свойство <code>Expiration</code> или
+          <code>x-message-ttl</code> у очереди.</li>
+        <li><strong>DLX переносит</strong> сообщение в другую очередь при <code>nack(requeue: false)</code>,
+          истечении TTL или переполнении; это место разбора, а не копия.</li>
+        <li><strong>Retry = DLX + TTL:</strong> очередь задержки без потребителей возвращает сообщение в работу;
+          после N попыток — в DLQ.</li>
+        <li><strong>Без DLQ</strong> «отравленное» сообщение крутится вечно и занимает потребителей.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="mq03-consuming-prefetch-ack.html">← <span class="sp">Глава 3. Потребление: prefetch, ack и конкуренция</span></a>
+      <a href="mq05-operations-monitoring.html"><span class="sp">Глава 5. Эксплуатация: мониторинг, память и кластер</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

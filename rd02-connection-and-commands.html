@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 2 · Подключение из .NET</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="redis.html">← Оглавление</a>
+  <span class="booktitle">Redis</span>
+  <a href="rd03-data-structures.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Redis · Часть I · Основы</div>
+    <h1>Глава 2. Подключение из .NET: ConnectionMultiplexer и первые команды</h1>
+    <p class="sublead">Одно соединение на процесс, TTL, атомарные операции и что означают ошибки подключения</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>ConnectionMultiplexer: одно соединение на процесс</h2>
+    <p>Клиент <code>StackExchange.Redis</code> устроен вокруг <strong><code>ConnectionMultiplexer</code></strong>:
+      это одно физическое соединение с Redis, которое <em>мультиплексирует</em> все запросы приложения —
+      параллельные команды уходят в один сокет, ответы разбираются по порядку и раскладываются по ожидающим
+      задачам. Отсюда правила:</p>
+    <ul>
+      <li><strong>Один мультиплексор на процесс.</strong> Создавать его на каждый запрос — значит открывать
+        соединение на каждый запрос: это дороже, чем сама команда.</li>
+      <li><strong>Он потокобезопасен.</strong> <code>IDatabase</code>, полученный из мультиплексора, можно
+        использовать из разных потоков.</li>
+      <li><strong>Он сам переподключается.</strong> Пока соединение восстанавливается, команды либо ждут, либо
+        падают по таймауту — в зависимости от настроек (ниже).</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Program.cs — регистрация в DI: один экземпляр на всё приложение
+var cs = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379";
+
+builder.Services.AddSingleton&lt;IConnectionMultiplexer&gt;(_ =&gt;
+    ConnectionMultiplexer.Connect(cs));
+
+// в сервисе — только IDatabase, никаких новых соединений
+public sealed class CatalogCache(IConnectionMultiplexer mux)
+{
+    private readonly IDatabase _db = mux.GetDatabase();
+}</code></pre>
+    </div>
+    <p>Строка подключения — не только адрес: в ней задают пароль, номер базы, таймауты и поведение при
+      недоступном сервере, например
+      <code>redis:6379,password=…,connectTimeout=1000,abortConnect=false</code>. Разбор
+      <code>abortConnect</code> — ниже, потому что это самая частая причина «странных» падений на старте.</p>
+    <h2>Первые команды: SET, GET, TTL, INCR, SET NX</h2>
+    <p>Ниже — программа и её реальный вывод (Redis 7.4.12, клиент <code>StackExchange.Redis</code> 2.8.58).
+      Она проверяет всё, на чём держится дальнейшее: время жизни ключа, атомарный счётчик и «поставить, только
+      если нет».</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var mux = await ConnectionMultiplexer.ConnectAsync("localhost:6379");
+var db  = mux.GetDatabase();
+var srv = mux.GetServer("localhost:6379");
+
+Console.WriteLine($"ping:       {await db.PingAsync()}");
+Console.WriteLine($"server:     {srv.Version}");
+
+// строка с TTL: 2 секунды
+await db.StringSetAsync("user:1:name", "Алексей", TimeSpan.FromSeconds(2));
+Console.WriteLine($"get:        {await db.StringGetAsync("user:1:name")}");
+Console.WriteLine($"ttl:        {await db.KeyTimeToLiveAsync("user:1:name")}");
+
+await Task.Delay(2200);
+Console.WriteLine($"after 2.2s: exists={await db.KeyExistsAsync("user:1:name")} " +
+                  $"get=[{await db.StringGetAsync("user:1:name")}]");
+
+// атомарный счётчик
+await db.KeyDeleteAsync("hits");
+await db.StringIncrementAsync("hits");        // 1
+await db.StringIncrementAsync("hits", 5);     // 6
+Console.WriteLine($"incr:       {await db.StringGetAsync("hits")}");
+
+// «поставить, только если ключа нет» + TTL — основа локов и лимитов
+var nx1 = await db.StringSetAsync("lock:job", "w1", TimeSpan.FromSeconds(10), When.NotExists);
+var nx2 = await db.StringSetAsync("lock:job", "w2", TimeSpan.FromSeconds(10), When.NotExists);
+Console.WriteLine($"set nx:     first={nx1} second={nx2}");</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">ping:       00:00:00.0009830
+server:     7.4.12
+get:        Алексей
+ttl:        00:00:01.9910000
+after 2.2s: exists=False get=[]
+incr:       6
+set nx:     first=True second=False</code></pre>
+    </div>
+    <p>Что здесь важно:</p>
+    <ul>
+      <li><strong><code>PingAsync</code> возвращает <code>TimeSpan</code></strong>, а не строку: это время
+        round-trip, около 1 мс на локальном сервере.</li>
+      <li><strong>TTL уже меньше двух секунд</strong> (<code>00:00:01.99…</code>): время жизни отсчитывается
+        с момента записи на сервере, а не с момента вашего вызова.</li>
+      <li><strong>Пропавший ключ — не ошибка.</strong> После истечения <code>StringGetAsync</code> возвращает
+        «пустое» значение (<code>get=[]</code>), а <code>KeyExistsAsync</code> — <code>false</code>. В коде это
+        проверяют через <code>.HasValue</code>, а не сравнением с <code>null</code>.</li>
+      <li><strong><code>StringIncrementAsync</code> — атомарная операция на сервере:</strong> второй воркер не
+        «потеряет» обновление, потому что команда выполняется целиком.</li>
+      <li><strong><code>When.NotExists</code> — это <code>SET … NX</code>:</strong> первый вызов вернул
+        <code>True</code>, второй — <code>False</code>. На этом строится и распределённый лок (глава 4), и
+        защита от параллельного прогрева кэша.</li>
+    </ul>
+    <h2>Что означают ошибки подключения</h2>
+    <p>Поведение при недоступном сервере зависит от одного флага в строке подключения, и разница
+      принципиальная. Проверено на закрытом порту:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">-- abortConnect по умолчанию (true) --
+connect -&gt; RedisConnectionException: It was not possible to connect to the redis server(s).
+Error connecting right now. To allow this multiplexer to continue retrying until it's able to
+connect, use abortConnect=false in your connection string or AbortOnConnectFail=false; in your code.
+
+-- abortConnect=false --
+connect: ok (мультиплексор создан)
+ping -&gt; RedisConnectionException: The message timed out in the backlog attempting to send because
+no connection became available (5000ms) - Last Connection Exception: UnableToConnect on
+localhost:6399/Interactive, …</code></pre>
+    </div>
+    <ul>
+      <li><strong>По умолчанию <code>ConnectAsync</code> падает</strong>, если сервер недоступен. Для
+        приложения, которое должно пережить перезапуск Redis, это означает падение на старте.</li>
+      <li><strong><code>abortConnect=false</code> не «подключает любой ценой»</strong>, а разрешает создать
+        мультиплексор, который продолжит пытаться в фоне. Обратная сторона — <code>Connect</code> «успешен»
+        даже когда сервера нет, а первая же команда падает по таймауту (в примере — через 5000 мс).</li>
+      <li><strong>Практический вывод:</strong> в приложении ставят <code>abortConnect=false</code> и короткий
+        <code>connectTimeout</code>, а здоровье Redis проверяют отдельно (health check), чтобы не узнавать о
+        проблеме из таймаутов пользовательских запросов.</li>
+    </ul>
+
+    <h2>Ключи: префиксы и перебор</h2>
+    <p>Ключи в Redis — плоское пространство имён, поэтому префикс (<code>shop:</code>, <code>user:42:</code>)
+      несёт смысл: по нему видно, чей это ключ, и по нему же потом делают инвалидацию. Перебирать ключи
+      командой <code>KEYS</code> нельзя: она просматривает <em>всё</em> и блокирует сервер. Для перебора
+      используют <code>SCAN</code> — он идёт порциями, через курсор:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var keys = new List&lt;string&gt;();
+await foreach (var k in srv.KeysAsync(pattern: "user:*"))
+    keys.Add(k.ToString());
+
+Console.WriteLine($"scan:       {string.Join(",", keys)}");
+// scan:       user:1</code></pre>
+    </div>
+    <p>Пример вернул один ключ — остальные уже истекли по TTL. <code>KeysAsync</code> — обёртка над
+      <code>SCAN</code>; в <code>redis-cli</code> то же делает <code>redis-cli --scan --pattern</code>.</p>
+
+    <h2>Значения: что именно кладут в Redis</h2>
+    <p>По проводу ходят <strong>байты</strong>. <code>RedisValue</code> неявно превращается в строку, число и
+      <code>byte[]</code>, но <em>ваш</em> объект он не сериализует: это делает приложение. Практические
+      правила:</p>
+    <ul>
+      <li><strong>JSON через <code>System.Text.Json</code></strong> — если значение читают люди и другие сервисы;
+        <code>JsonSerializer.SerializeToUtf8Bytes</code> сразу даёт байты без промежуточной строки.</li>
+      <li><strong>Никаких «бинарных сериализаторов»</strong> вроде <code>BinaryFormatter</code>: формат привязан к
+        типам и версиям сборки, и после рефакторинга кэш перестаёт читаться.</li>
+      <li><strong>Версия в ключе</strong> (<code>catalog:v2:42</code>) — дешёвый способ «сбросить» весь кэш при
+        смене формата: старые ключи перестают читаться и истекают по TTL.</li>
+      <li><strong>Не кладите всё в один ключ.</strong> Большой <code>hash</code> или список на тысячи элементов
+        обрабатывается одной командой — и на это время сервер занят.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Один <code>ConnectionMultiplexer</code> на процесс</strong>, из него —
+          <code>IDatabase</code>; он потокобезопасен и сам переподключается.</li>
+        <li><strong>TTL ставится при записи</strong> (<code>TimeSpan</code> в <code>StringSetAsync</code>), а
+          пропавший ключ возвращает пустое значение, а не ошибку.</li>
+        <li><strong>Атомарность — на стороне сервера:</strong> <code>INCR</code>, <code>SET … NX</code>,
+          <code>HSET</code> выполняются целиком.</li>
+        <li><strong><code>abortConnect=false</code></strong> позволяет приложению пережить недоступный Redis, но
+          не делает команды успешными: они падают по таймауту.</li>
+        <li><strong>Перебор — только <code>SCAN</code></strong>; <code>KEYS</code> в проде запрещён.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="rd01-why-redis.html">← <span class="sp">Глава 1. Зачем нужен Redis и где он встаёт в .NET-сервисе</span></a>
+      <a href="rd03-data-structures.html"><span class="sp">Глава 3. Структуры данных: строки, хеши, списки, множества, sorted sets</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

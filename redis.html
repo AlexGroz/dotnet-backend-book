@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Redis: от кэша до эксплуатации</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="container">
+  <div class="topbar"><div class="in">
+    <a href="index.html">← Все разделы</a>
+    <span class="booktitle">Redis</span>
+    <a href="rabbitmq.html">RabbitMQ →</a>
+  </div></div>
+
+  <div class="cover">
+    <div class="kicker">Учебник · Redis</div>
+    <h1>Redis:<br>от кэша до эксплуатации</h1>
+    <p>От «что это за хранилище» до памяти, вытеснения и отказоустойчивости. Все примеры — на C# с
+      <code>StackExchange.Redis</code>, каждый вывод получен прогоном на Redis 7.4.</p>
+    <p style="margin-top:14px;font-size:14px;opacity:.92">
+      <span class="tag lead">подводящая</span> готовит почву &nbsp;
+      <span class="tag core">основная</span> раскрывает тему</p>
+  </div>
+
+  <h2 style="border:none;padding:0;margin:26px 0 4px">Содержание</h2>
+
+  <div class="toc-part">Redis · Часть I. Основы</div>
+  <div class="toc">
+    <a href="rd01-why-redis.html"><span class="n">Глава 1</span><span class="t">Зачем нужен Redis и где он встаёт в .NET-сервисе</span><span class="d"><span class="tag lead">подводящая</span>Структуры данных в памяти, границы применимости и первая проверка</span></a>
+    <a href="rd02-connection-and-commands.html"><span class="n">Глава 2</span><span class="t">Подключение из .NET: ConnectionMultiplexer и первые команды</span><span class="d"><span class="tag core">основная</span>Одно соединение на процесс, TTL, INCR, SET NX и ошибки подключения</span></a>
+  </div>
+
+  <div class="toc-part">Redis · Часть II. Структуры и кэш</div>
+  <div class="toc">
+    <a href="rd03-data-structures.html"><span class="n">Глава 3</span><span class="t">Структуры данных: строки, хеши, списки, множества, sorted sets</span><span class="d"><span class="tag core">основная</span>Что выбрать под задачу, сложность команд и антипаттерны</span></a>
+    <a href="rd04-caching-patterns.html"><span class="n">Глава 4</span><span class="t">Кэширование: cache-aside, TTL, инвалидация и stampede</span><span class="d"><span class="tag core">основная</span>IDistributedCache, инвалидация после коммита и защита от промах-шторма</span></a>
+  </div>
+
+  <div class="toc-part">Redis · Часть III. Эксплуатация</div>
+  <div class="toc">
+    <a href="rd05-operations-memory.html"><span class="n">Глава 5</span><span class="t">Эксплуатация: память, eviction, персистентность и отказоустойчивость</span><span class="d"><span class="tag core">основная</span>maxmemory и политики, RDB и AOF, Sentinel и Cluster</span></a>
+  </div>
+
+  <p style="color:var(--muted);font-size:14px;margin-top:34px">
+    Все примеры проверены на Redis 7.4.12 и клиенте StackExchange.Redis 2.8.58.
+  </p>
+</div>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 1 · Зачем брокер и как устроен AMQP</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="rabbitmq.html">← Оглавление</a>
+  <span class="booktitle">RabbitMQ</span>
+  <a href="mq02-publishing-confirms.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">RabbitMQ · Часть I · Основы</div>
+    <h1>Глава 1. Зачем брокер сообщений и как устроен AMQP</h1>
+    <p class="sublead">Очередь, обменник и маршрутизация: модель, в которой сообщение находит потребителя</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Зачем вообще брокер</h2>
+    <p>Интеграция «сервис А вызывает сервис Б по HTTP» проста, пока Б доступен. Как только он недоступен,
+      перегружен или обрабатывает операцию десять минут, вызывающий начинает страдать: он ждёт, падает по
+      таймауту или теряет операцию. Брокер сообщений убирает эту связь по времени:</p>
+    <ul>
+      <li><strong>Буфер.</strong> Сообщения лежат в очереди, пока потребитель не заберёт их — даже если он
+        перезапускается.</li>
+      <li><strong>Развязка по темпу.</strong> Producer отдаёт 10 000 сообщений в секунду, consumer обрабатывает
+        100 — очередь сглаживает разницу.</li>
+      <li><strong>Несколько потребителей.</strong> Одно сообщение может уйти в несколько очередей (например, на
+        биллинг и на аналитику) — producer об этом не знает.</li>
+      <li><strong>Повторная обработка.</strong> Сообщение можно вернуть в очередь, отложить или отправить в
+        dead-letter очередь, а не «потерять при ошибке».</li>
+    </ul>
+    <p>Цена — новая инфраструктура: брокер надо поднять, мониторить, и он сам становится частью контура
+      надёжности. Поэтому брокер берут там, где нужна именно асинхронность, а не «потому что модно».</p>
+
+    <h2>Модель AMQP 0-9-1: обменник, привязка, очередь</h2>
+    <p>RabbitMQ работает по протоколу <strong>AMQP 0-9-1</strong>. В нём producer <em>не пишет в очередь
+      напрямую</em>: он публикует сообщение в <strong>exchange</strong> (обменник), а тот по
+      <strong>binding</strong> (привязке) решает, в какие очереди его положить.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">producer ──publish(routing key)──▶ exchange ──binding──▶ queue ──consume──▶ consumer
+                                      │
+                                      └─ тип решает, кому достанется сообщение
+
+direct:  routing key = ключ привязки       (order.new → order.new)
+topic:   шаблон с * и #                    (order.* → order.new, order.paid)
+fanout:  всем привязанным очередям          (игнорирует routing key)
+headers: по значениям заголовков</code></pre>
+    </div>
+    <ul>
+      <li><strong>Очередь — это буфер</strong>, у неё есть имя, durability и аргументы (TTL, dead-letter,
+        лимит длины). Сообщения хранятся в ней, пока их не подтвердят.</li>
+      <li><strong>Обменник — это правило маршрутизации.</strong> Если ни одна привязка не подошла, сообщение
+        <em>отбрасывается</em> (об этом ниже — флаг <code>mandatory</code>).</li>
+      <li><strong>Default exchange</strong> — пустая строка <code>""</code>: у него автоматически есть привязки
+        ко всем очередям по их именам. Поэтому <code>publish(exchange: "", routingKey: "payments")</code>
+        кладёт сообщение прямо в очередь <code>payments</code>.</li>
+      <li><strong>Consumer</strong> подписывается на очередь и получает сообщения по мере готовности; сколько
+        он держит «в работе» одновременно — регулирует <code>prefetch</code> (глава 3).</li>
+    </ul>
+    <h2>Запуск и первая проверка</h2>
+    <p>Для локальной работы — официальный образ с панелью управления (проверено на 3.13.7, Erlang/OTP 26):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker run --rm -d --name rmq3 -p 5672:5672 -p 15672:15672 rabbitmq:3-management-alpine
+
+# 5672  — AMQP (сюда подключается приложение)
+# 15672 — веб-панель: http://localhost:15672 (guest / guest, только с localhost)
+
+docker exec rmq3 rabbitmq-diagnostics -q ping
+# Ping succeeded
+
+docker exec rmq3 rabbitmqctl version
+# 3.13.7</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t"><code>guest/guest</code> — только для локальной машины</span>
+      <p>Учётная запись <code>guest</code> по умолчанию может подключаться только с самого узла RabbitMQ.
+        В контейнере это значит «из другого контейнера — уже нет». Для приложения создают отдельного
+        пользователя и отдельный vhost, а <code>guest</code> оставляют для отладки.</p>
+    </div>
+
+    <h2>Первое сообщение из .NET</h2>
+    <p>Клиент <code>RabbitMQ.Client</code> начиная с 7.x — полностью асинхронный: соединение и канал создаются
+      через <code>await</code>, публикация и подтверждения тоже. Ниже — полный цикл: объявить обменник,
+      очередь и привязку, отправить сообщение и принять его с подтверждением.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using System.Text;
+using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
+
+var factory = new ConnectionFactory
+{
+    HostName = "localhost", Port = 5672, UserName = "guest", Password = "guest",
+};
+
+await using var conn = await factory.CreateConnectionAsync();
+await using var ch   = await conn.CreateChannelAsync();
+
+Console.WriteLine($"connected: {conn.IsOpen}, channel: {ch.IsOpen}");
+
+// обменник topic + очередь + привязка по шаблону
+await ch.ExchangeDeclareAsync("orders", ExchangeType.Topic, durable: true);
+await ch.QueueDeclareAsync("orders.new", durable: true, exclusive: false, autoDelete: false);
+await ch.QueueBindAsync("orders.new", "orders", "order.created");
+
+// публикация: exchange, routing key, тело
+var body = Encoding.UTF8.GetBytes("{\"id\":42}");
+await ch.BasicPublishAsync("orders", "order.created", body);
+
+// подписка: подтверждаем вручную, после обработки
+var consumer = new AsyncEventingBasicConsumer(ch);
+consumer.ReceivedAsync += async (_, ea) =&gt;
+{
+    Console.WriteLine($"received: {Encoding.UTF8.GetString(ea.Body.Span)} tag={ea.DeliveryTag}");
+    await ch.BasicAckAsync(ea.DeliveryTag, false);
+};
+
+await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer);
+await Task.Delay(1500);
+
+var q = await ch.QueueDeclarePassiveAsync("orders.new");
+Console.WriteLine($"messages in queue: {q.MessageCount}");</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">connected: True, channel: True
+published 9 bytes
+received: {"id":42} tag=1
+messages in queue: 0</code></pre>
+    </div>
+    <p>Разбор вывода:</p>
+    <ul>
+      <li><strong><code>BasicAckAsync</code> убрал сообщение из очереди</strong> — поэтому
+        <code>MessageCount</code> равен нулю. Если не подтверждать, сообщение останется в очереди и будет
+        доставлено снова (глава 3).</li>
+      <li><strong><code>tag=1</code> — delivery tag</strong>, номер доставки в рамках канала; по нему и
+        подтверждают, и отклоняют.</li>
+      <li><strong><code>QueueDeclarePassiveAsync</code> не создаёт очередь, а спрашивает</strong> её состояние
+        (в том числе число сообщений) и падает, если очереди нет — удобно для проверок в тестах.</li>
+    </ul>
+
+    <h2>RabbitMQ, Kafka и список Redis: что выбрать</h2>
+    <table>
+      <thead><tr><th></th><th>RabbitMQ</th><th>Kafka</th><th>Redis list/stream</th></tr></thead>
+      <tbody>
+        <tr><td>Модель</td><td>Очередь: сообщение достаётся одному потребителю (или копии — каждой очереди)</td>
+          <td>Журнал: сообщения читают со своего места, хранятся заданное время</td><td>Список: простой буфер
+          без гарантий</td></tr>
+        <tr><td>Маршрутизация</td><td>Богатая: direct/topic/fanout/headers, DLX</td><td>Топики и партиции</td>
+          <td>Нет: забрал — и всё</td></tr>
+        <tr><td>Повторное чтение</td><td>Нет: подтверждённое сообщение удаляется</td><td>Есть: сдвиг offset</td>
+          <td>Нет</td></tr>
+        <tr><td>Когда</td><td>Задачи, команды, RPC, сложная маршрутизация</td><td>Потоки событий, аналитика,
+          воспроизведение</td><td>Лёгкая очередь внутри одного приложения</td></tr>
+      </tbody>
+    </table>
+    <p>Правило простое: если сообщение — <em>команда сделать работу</em> и после выполнения оно больше не нужно,
+      берите RabbitMQ. Если это <em>событие</em>, которое многие будут перечитывать и анализировать, — Kafka.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Producer публикует в exchange, а не в очередь</strong>; exchange по binding решает, куда
+          положить сообщение.</li>
+        <li><strong>Типы exchange:</strong> <code>direct</code> (точный ключ), <code>topic</code> (шаблон),
+          <code>fanout</code> (всем), <code>headers</code> (по заголовкам); пустой <code>""</code> — default
+          exchange по имени очереди.</li>
+        <li><strong>Сообщение без подходящей привязки исчезает</strong>, если не выставлен
+          <code>mandatory</code> (глава 2).</li>
+        <li><strong>Подтверждение (<code>BasicAck</code>) удаляет сообщение</strong>; без него оно вернётся
+          другому потребителю.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="rabbitmq.html">← <span class="sp">Оглавление</span></a>
+      <a href="mq02-publishing-confirms.html"><span class="sp">Глава 2. Публикация из .NET: каналы, свойства и подтверждения</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

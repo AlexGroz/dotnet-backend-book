@@ -11,10 +11,11 @@
 
   <div class="cover">
     <div class="kicker">Конспекты · Backend</div>
-    <h1>Backend-инженер:<br>.NET и PostgreSQL</h1>
-    <p>Пять связанных разделов в одном месте: <strong>язык C#</strong> (основа — типы, коллекции,
+    <h1>Backend-инженер:<br>.NET, PostgreSQL, Redis и RabbitMQ</h1>
+    <p>Семь связанных разделов в одном месте: <strong>язык C#</strong> (основа — типы, коллекции,
       перечисления), как устроен высоконагруженный сервис <strong>на .NET</strong>, как работать с данными
-      <strong>в PostgreSQL</strong> — от простого запроса до чтения планов и миграции из Oracle, как
+      <strong>в PostgreSQL</strong> — от простого запроса до чтения планов и миграции из Oracle, как ускорить
+      сервис <strong>кэшем в Redis</strong>, как развязать его <strong>очередями RabbitMQ</strong>, как
       приложение <strong>упаковывается в контейнер</strong> и доезжает до прода, и <strong>паттерны</strong>,
       которые встречаются каждый день.</p>
     <p style="margin-top:14px;font-size:14px;opacity:.92">
@@ -42,14 +43,26 @@
       <span class="d">9 частей, 34 главы — хранение и индексы, планировщик и планы, оптимизация запросов,
         транзакции и MVCC, миграция из Oracle</span>
     </a>
+    <a href="redis.html">
+      <span class="n">Раздел 4 · Redis</span>
+      <span class="t">Redis: от кэша до эксплуатации</span>
+      <span class="d">3 части, 5 глав — подключение из .NET, структуры данных и TTL, cache-aside и
+        инвалидация, память, eviction и персистентность</span>
+    </a>
+    <a href="rabbitmq.html">
+      <span class="n">Раздел 5 · RabbitMQ</span>
+      <span class="t">RabbitMQ: очереди и события в .NET</span>
+      <span class="d">3 части, 5 глав — модель AMQP, публикация с подтверждениями, prefetch и ack,
+        dead-letter и retry, мониторинг и кластер</span>
+    </a>
     <a href="docker.html">
-      <span class="n">Раздел 4 · Docker</span>
+      <span class="n">Раздел 6 · Docker</span>
       <span class="t">Docker и контейнеры: от образа до прода</span>
       <span class="d">4 части, 17 глав — как устроен контейнер, команды и Dockerfile, кэш и multi-stage,
         .NET в контейнере (память, GC, SIGTERM), безопасность и поставка</span>
     </a>
     <a href="patterns.html">
-      <span class="n">Раздел 5 · Паттерны</span>
+      <span class="n">Раздел 7 · Паттерны</span>
       <span class="t">Паттерны в .NET: пять на каждый день</span>
       <span class="d">2 части, 8 глав — четыре идеи, на которых держатся паттерны, и шесть паттернов на каждый день:
         разминка, реальный код с комментариями и честная статистика</span>

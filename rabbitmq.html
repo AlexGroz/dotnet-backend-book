@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RabbitMQ: очереди и события в .NET</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="container">
+  <div class="topbar"><div class="in">
+    <a href="index.html">← Все разделы</a>
+    <span class="booktitle">RabbitMQ</span>
+    <a href="docker.html">Docker и контейнеры →</a>
+  </div></div>
+
+  <div class="cover">
+    <div class="kicker">Учебник · RabbitMQ</div>
+    <h1>RabbitMQ:<br>очереди и события в .NET</h1>
+    <p>Модель AMQP, публикация с подтверждениями, потребление с prefetch и dead-letter очереди. Примеры — на
+      C# с клиентом <code>RabbitMQ.Client</code> 7.x, каждый вывод получен прогоном на RabbitMQ 3.13.</p>
+    <p style="margin-top:14px;font-size:14px;opacity:.92">
+      <span class="tag lead">подводящая</span> готовит почву &nbsp;
+      <span class="tag core">основная</span> раскрывает тему</p>
+  </div>
+
+  <h2 style="border:none;padding:0;margin:26px 0 4px">Содержание</h2>
+
+  <div class="toc-part">RabbitMQ · Часть I. Основы</div>
+  <div class="toc">
+    <a href="mq01-why-broker-amqp.html"><span class="n">Глава 1</span><span class="t">Зачем брокер сообщений и как устроен AMQP</span><span class="d"><span class="tag lead">подводящая</span>Exchange, привязки, очереди и первое сообщение из .NET</span></a>
+    <a href="mq02-publishing-confirms.html"><span class="n">Глава 2</span><span class="t">Публикация из .NET: каналы, свойства и подтверждения</span><span class="d"><span class="tag core">основная</span>Confirm, mandatory, BasicReturn и что происходит при перегрузке</span></a>
+  </div>
+
+  <div class="toc-part">RabbitMQ · Часть II. Надёжность</div>
+  <div class="toc">
+    <a href="mq03-consuming-prefetch-ack.html"><span class="n">Глава 3</span><span class="t">Потребление: prefetch, ack и конкуренция</span><span class="d"><span class="tag core">основная</span>Подтверждения, Redelivered, prefetch и BackgroundService</span></a>
+    <a href="mq04-queues-ttl-dlx.html"><span class="n">Глава 4</span><span class="t">Очереди, TTL, dead-letter и повторная обработка</span><span class="d"><span class="tag core">основная</span>Durable и persistent, TTL, DLX и схема retry с задержкой</span></a>
+  </div>
+
+  <div class="toc-part">RabbitMQ · Часть III. Эксплуатация</div>
+  <div class="toc">
+    <a href="mq05-operations-monitoring.html"><span class="n">Глава 5</span><span class="t">Эксплуатация: мониторинг, память и кластер</span><span class="d"><span class="tag core">основная</span>Метрики очередей, HTTP API, alarms и quorum-очереди</span></a>
+  </div>
+
+  <p style="color:var(--muted);font-size:14px;margin-top:34px">
+    Все примеры проверены на RabbitMQ 3.13.7 и клиенте RabbitMQ.Client 7.2.2.
+  </p>
+</div>
+</body>
+</html>

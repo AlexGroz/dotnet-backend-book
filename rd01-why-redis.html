@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 1 · Зачем нужен Redis</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="redis.html">← Оглавление</a>
+  <span class="booktitle">Redis</span>
+  <a href="rd02-connection-and-commands.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Redis · Часть I · Основы</div>
+    <h1>Глава 1. Зачем нужен Redis и где он встаёт в .NET-сервисе</h1>
+    <p class="sublead">Хранилище структур данных в памяти: кэш, счётчики, очереди и блокировки — и границы
+      применимости</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Что такое Redis</h2>
+    <p><strong>Redis</strong> — это сервер, который хранит <em>структуры данных</em> в памяти и отдаёт их по сети.
+      Не «база данных с таблицами», а набор типизированных значений по ключу: строка, хеш, список, множество,
+      сортированное множество, поток. Клиент говорит с ним по текстовому протоколу <strong>RESP</strong>
+      (Redis Serialization Protocol): команда — строка, ответ — типизированное значение.</p>
+    <p>Три свойства, из которых следует всё остальное:</p>
+    <ul>
+      <li><strong>Данные в памяти.</strong> Чтение — обращение к RAM, а не к диску; отсюда микросекундные
+        ответы. Плата — объём: память дороже диска, и её надо явно ограничивать (глава 5).</li>
+      <li><strong>Команды выполняются по одной.</strong> Пока сервер выполняет команду, следующая ждёт. Поэтому
+        <em>одна</em> команда атомарна: <code>INCR</code> не «потеряет» обновление, а <code>SET … NX</code>
+        не выполнится дважды. Это же свойство — причина, по которой тяжёлая команда над большим ключом тормозит
+        всех клиентов.</li>
+      <li><strong>Персистентность — опция, а не основа.</strong> RDB-снимки и AOF-журнал позволяют пережить
+        перезапуск, но Redis — не журнал транзакций СУБД: свежие записи можно потерять (глава 5).</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Формулировка</span>
+      <p>Redis — это <strong>общая для всех экземпляров приложения память со структурами данных</strong>
+        и атомарными операциями над ними. Кэш — только самый частый способ её применять.</p>
+    </div>
+    <h2>Где он встаёт в .NET-сервисе</h2>
+    <p>Типовая схема: приложение (несколько реплик) → Redis → PostgreSQL. В Redis живёт то, что <em>можно
+      пересоздать</em> или что должно быть общим для реплик, но не требует транзакций СУБД.</p>
+    <table>
+      <thead><tr><th>Задача</th><th>Структура</th><th>Команды</th><th>Как из .NET</th></tr></thead>
+      <tbody>
+        <tr><td>Кэш ответа API или страницы</td><td><code>string</code> (JSON или байты)</td>
+          <td><code>SET</code> с TTL, <code>GET</code></td><td><code>IDistributedCache</code> или
+          <code>IDatabase</code></td></tr>
+        <tr><td>Профиль пользователя по частям</td><td><code>hash</code></td>
+          <td><code>HSET</code>, <code>HGETALL</code></td><td><code>HashSetAsync</code>,
+          <code>HashGetAllAsync</code></td></tr>
+        <tr><td>Лёгкая очередь задач</td><td><code>list</code></td>
+          <td><code>LPUSH</code>, <code>BRPOP</code></td><td><code>ListLeftPushAsync</code>,
+          <code>ExecuteAsync("BLPOP", …)</code></td></tr>
+        <tr><td>Уникальные значения, теги</td><td><code>set</code></td>
+          <td><code>SADD</code>, <code>SISMEMBER</code></td><td><code>SetAddAsync</code></td></tr>
+        <tr><td>Рейтинг, лимиты запросов</td><td><code>sorted set</code></td>
+          <td><code>ZADD</code>, <code>ZRANGE</code></td><td><code>SortedSetAddAsync</code>,
+          <code>SortedSetRangeByRankWithScoresAsync</code></td></tr>
+        <tr><td>Счётчик, «один воркер на задачу»</td><td><code>string</code> + TTL</td>
+          <td><code>INCR</code>, <code>SET NX EX</code></td><td><code>StringIncrementAsync</code>,
+          <code>StringSetAsync(…, When.NotExists)</code></td></tr>
+      </tbody>
+    </table>
+    <p>Redis удобен именно тем, что все эти задачи решаются <em>одним</em> хранилищем: не нужно поднимать
+      отдельный сервис под счётчики и ещё один под блокировки.</p>
+
+    <h2>Когда Redis не нужен</h2>
+    <div class="box warn">
+      <span class="t">Границы применимости</span>
+      <ul>
+        <li><strong>Источник истины для денег и заказов.</strong> Если потеря секунды записей недопустима —
+          это PostgreSQL, а Redis может быть только ускорителем перед ним.</li>
+        <li><strong>Большие значения.</strong> Объект на десятки мегабайт в Redis — это простой сервера на время
+          передачи и удар по сети. Крупные данные — в объектное хранилище или в БД.</li>
+        <li><strong>Полнотекстовый поиск и аналитика.</strong> Другой инструмент: PostgreSQL, поисковый движок,
+          колоночное хранилище.</li>
+        <li><strong>Сложные транзакции и отчёты.</strong> В Redis есть <code>MULTI/EXEC</code> и скрипты, но это
+          не замена транзакциям СУБД с изоляцией и ограничениями.</li>
+        <li><strong>Замена брокеру сообщений.</strong> Списки и потоки Redis умеют очереди, но гарантии
+          доставки, dead-letter, маршрутизация и размножение по подписчикам — это RabbitMQ или Kafka
+          (следующая книга).</li>
+      </ul>
+    </div>
+
+    <h2>Запуск и первая проверка</h2>
+    <p>Для локальной работы достаточно официального образа. Ниже — реальный вывод на Redis 7.4:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker run --rm -d --name redis7 -p 6379:6379 redis:7-alpine
+
+docker exec redis7 redis-cli ping
+# PONG
+
+docker exec redis7 redis-cli info server | grep -E 'redis_version|redis_mode'
+# redis_version:7.4.12
+# redis_mode:standalone</code></pre>
+    </div>
+    <p>Порт <code>6379</code> — стандартный; <code>PONG</code> означает, что сервер принял соединение и ответил
+      на <code>PING</code>. Дальше можно работать из <code>redis-cli</code> или из кода.</p>
+
+    <h2>Как с ним говорят из .NET</h2>
+    <p>Уровней два, и путать их не стоит:</p>
+    <ul>
+      <li><strong><code>StackExchange.Redis</code></strong> — «родной» клиент: одно соединение
+        (<code>ConnectionMultiplexer</code>) на процесс, из него берут <code>IDatabase</code> и вызывают команды
+        (<code>StringSetAsync</code>, <code>HashGetAllAsync</code> и т. д.). Даёт доступ ко всем структурам и
+        деталям: TTL, <code>NX</code>, пайплайны.</li>
+      <li><strong><code>IDistributedCache</code></strong> — абстракция .NET поверх любого распределённого кэша
+        (<code>AddStackExchangeRedisCache</code>): только «положить/взять байты по ключу с временем жизни».
+        Удобно, когда кэш нужен именно как кэш, а не как структура данных.</li>
+    </ul>
+    <p>Обе линии разбираются дальше: подключение и команды — глава 2, структуры данных — глава 3,
+      кэширование как паттерн — глава 4, память и эксплуатация — глава 5.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Redis — хранилище структур данных в памяти</strong>, а не «кэш» и не «быстрая БД»: строки,
+          хеши, списки, множества, сортированные множества, потоки.</li>
+        <li><strong>Одна команда атомарна</strong>, потому что сервер выполняет команды по одной; тяжёлая команда
+          над большим ключом тормозит всех.</li>
+        <li><strong>Жизнь без Redis должна быть возможна:</strong> всё, что в нём лежит, либо пересоздаётся, либо
+          дублирует PostgreSQL.</li>
+        <li><strong>Из .NET — два уровня:</strong> <code>StackExchange.Redis</code> для структур и
+          <code>IDistributedCache</code> для простого кэша.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="redis.html">← <span class="sp">Оглавление</span></a>
+      <a href="rd02-connection-and-commands.html"><span class="sp">Глава 2. Подключение из .NET: ConnectionMultiplexer и первые команды</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

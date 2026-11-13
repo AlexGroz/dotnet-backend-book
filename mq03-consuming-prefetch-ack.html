@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Потребление, prefetch и ack</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="rabbitmq.html">← Оглавление</a>
+  <span class="booktitle">RabbitMQ</span>
+  <a href="mq04-queues-ttl-dlx.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">RabbitMQ · Часть II · Надёжность</div>
+    <h1>Глава 3. Потребление: prefetch, ack и конкуренция</h1>
+    <p class="sublead">Сколько сообщений держать «в работе», когда подтверждать и почему одно сообщение приходит дважды</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Подписка и подтверждение</h2>
+    <p>Потребитель подписывается на очередь и получает сообщения по одному (по умолчанию). Ключевой выбор —
+      <strong><code>autoAck</code></strong>:</p>
+    <ul>
+      <li><strong><code>autoAck: true</code></strong> — брокер считает сообщение доставленным сразу, ещё до
+        обработки. Если процесс упадёт в обработчике, сообщение потеряно.</li>
+      <li><strong><code>autoAck: false</code></strong> — подтверждение отправляет приложение
+        (<code>BasicAck</code>) после успешной обработки. Это единственный вариант, при котором падение
+        потребителя не теряет работу.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ch — канал (глава 1), ct — CancellationToken приложения,
+// HandleAsync — ваш обработчик сообщения
+var consumer = new AsyncEventingBasicConsumer(ch);
+
+consumer.ReceivedAsync += async (_, ea) =&gt;
+{
+    try
+    {
+        await HandleAsync(ea.Body, ct);                 // бизнес-логика
+        await ch.BasicAckAsync(ea.DeliveryTag, false);  // успех: убрать из очереди
+    }
+    catch (Exception)
+    {
+        // вернуть в очередь (requeue) или отправить в DLQ — глава 4
+        await ch.BasicNackAsync(ea.DeliveryTag, false, requeue: false);
+    }
+};
+
+await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer);</code></pre>
+    </div>
+    <p>Обратите внимание: подтверждение относится к <strong>каналу</strong> и его <code>DeliveryTag</code>, а не
+      к сообщению «вообще». Поэтому канал, на котором потребляют, не должен использоваться для других
+      подтверждений из другого потока.</p>
+
+    <h2>Requeue и признак повторной доставки</h2>
+    <p>Если обработка не удалась, сообщение можно вернуть в очередь: <code>requeue: true</code>. Брокер доставит
+      его снова, и в этот раз <code>Redelivered</code> будет <code>true</code>. Реальный вывод:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">delivery #1: body=job-1 Redelivered=False
+delivery #2: body=job-1 Redelivered=True
+q.requeue left=0</code></pre>
+    </div>
+    <p>Код, который это даёт: первый раз обработчик делает <code>BasicNack(requeue: true)</code>, второй —
+      <code>BasicAck</code>. Отсюда два вывода:</p>
+    <ul>
+      <li><strong>Доставка — at-least-once.</strong> Одно и то же сообщение может быть обработано дважды: из-за
+        requeue, из-за падения потребителя до подтверждения, из-за переподключения. Гарантии «ровно один раз»
+        в RabbitMQ нет.</li>
+      <li><strong>Обработчик должен быть идемпотентным.</strong> Повторный <code>job-1</code> не должен списать
+        деньги второй раз: проверяйте <code>MessageId</code> или уникальный ключ в БД.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Бесконечный requeue — это «отравленное» сообщение</span>
+      <p>Если обработчик падает всегда, <code>requeue: true</code> превращает сообщение в вечный цикл: оно
+        возвращается, снова падает, снова возвращается — и занимает потребителя. Поэтому после N попыток
+        сообщение отправляют в dead-letter очередь (глава 4), а <code>requeue</code> оставляют для временных
+        сбоев.</p>
+    </div>
+    <h2>Prefetch: сколько сообщений держать в работе</h2>
+    <p><code>BasicQos</code> (QoS) ограничивает число неподтверждённых сообщений на потребителе. По умолчанию
+      ограничения нет — брокер высылает столько, сколько успеет, и быстрый потребитель забирает всё себе, пока
+      медленный разбирается с первым сообщением. Проверим на двух потребителях одной очереди: 10 сообщений,
+      потребитель A обрабатывает 100 мс, потребитель B — мгновенно.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await ch.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false);</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">prefetch=1/1, A slow:   A=1  B=9
+prefetch=10/10, A slow: A=0  B=10</code></pre>
+    </div>
+    <ul>
+      <li><strong>С <code>prefetch = 1</code></strong> каждый потребитель держит одно сообщение: пока A занят,
+        B забирает остальные. Нагрузка распределяется по скорости обработки.</li>
+      <li><strong>С <code>prefetch = 10</code></strong> тот, кто подключился первым, забирает всю пачку (в этом
+        прогоне — все 10) и обрабатывает их последовательно, а второй простаивает. Именно так «один медленный
+        потребитель съедает очередь».</li>
+    </ul>
+    <p>Правило: <strong>prefetch = столько сообщений, сколько потребитель реально обрабатывает
+      параллельно</strong>. Для последовательной обработки — 1. Для пачки из 10 параллельных задач — 10–20.
+      Слишком большой prefetch означает «захват» очереди и большой объём работы, которая при падении начнётся
+      заново.</p>
+
+    <h2>Конкуренция и масштабирование</h2>
+    <table>
+      <thead><tr><th>Что нужно</th><th>Как делается</th><th>Следствие</th></tr></thead>
+      <tbody>
+        <tr><td>Больше параллельной обработки</td><td>Несколько потребителей на одну очередь (в процессе или на
+          разных репликах)</td><td>Сообщения делятся между ними; порядок обработки не гарантируется</td></tr>
+        <tr><td>Несколько независимых обработчиков одного события</td><td>Несколько очередей, привязанных к
+          одному exchange</td><td>Каждая очередь получает свою копию сообщения</td></tr>
+        <tr><td>Порядок обработки</td><td>Один потребитель + <code>prefetch = 1</code></td><td>Медленнее, но
+          сообщения идут по порядку</td></tr>
+      </tbody>
+    </table>
+    <p>Важно: <strong>одна очередь = одна работа</strong>. Если два разных сервиса подписаны на одну очередь,
+      они будут <em>делить</em> сообщения, а не получать каждому. Для «каждому по копии» нужны разные очереди.</p>
+    <h2>Потребитель в <code>BackgroundService</code></h2>
+    <p>В ASP.NET потребитель живёт в фоновом сервисе: соединение и канал создаются один раз, подписка — на всё
+      время работы, а при остановке приложения канал закрывается, и неподтверждённые сообщения возвращаются в
+      очередь.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class OrdersConsumer(IConnection conn, IServiceScopeFactory scopes) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        await using var ch = await conn.CreateChannelAsync(cancellationToken: ct);
+        await ch.BasicQosAsync(0, prefetchCount: 10, global: false);
+
+        var consumer = new AsyncEventingBasicConsumer(ch);
+        consumer.ReceivedAsync += async (_, ea) =&gt;
+        {
+            using var scope = scopes.CreateScope();      // scoped-сервисы (DbContext) — из scope
+            try
+            {
+                await scope.ServiceProvider.GetRequiredService&lt;OrderHandler&gt;()   // ваш scoped-обработчик
+                           .HandleAsync(ea.Body, ct);
+                await ch.BasicAckAsync(ea.DeliveryTag, false);
+            }
+            catch (Exception)
+            {
+                await ch.BasicNackAsync(ea.DeliveryTag, false, requeue: false);
+            }
+        };
+
+        await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer, cancellationToken: ct);
+        await Task.Delay(Timeout.Infinite, ct);           // держим сервис живым
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong>Скоуп на сообщение.</strong> <code>DbContext</code> и другие scoped-сервисы нельзя держать в
+        singleton-потребителе: на каждое сообщение — свой <code>IServiceScope</code>.</li>
+      <li><strong>Остановка не теряет работу:</strong> канал закрывается, неподтверждённые сообщения возвращаются
+        в очередь и будут доставлены другому экземпляру.</li>
+      <li><strong>Исключение не должно «убивать» подписку.</strong> Любая ошибка внутри обработчика должна
+        заканчиваться <code>ack</code> или <code>nack</code>, иначе сообщение останется неподтверждённым.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong><code>autoAck: false</code> — обязательный минимум</strong>: подтверждение после обработки,
+          иначе падение потребителя теряет сообщение.</li>
+        <li><strong>Доставка at-least-once:</strong> сообщение может прийти дважды
+          (<code>Redelivered=True</code>) — обработчик должен быть идемпотентным.</li>
+        <li><strong><code>prefetch</code> определяет справедливость:</strong> 1 — по скорости обработки,
+          большое число — «захват» очереди одним потребителем.</li>
+        <li><strong>Одна очередь — одна работа:</strong> несколько сервисов на одной очереди делят сообщения;
+          для копий нужны разные очереди.</li>
+        <li><strong>В <code>BackgroundService</code></strong> — свой scope на сообщение и обязательный
+          <code>ack</code>/<code>nack</code> в каждом исходе.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="mq02-publishing-confirms.html">← <span class="sp">Глава 2. Публикация из .NET: каналы, свойства и подтверждения</span></a>
+      <a href="mq04-queues-ttl-dlx.html"><span class="sp">Глава 4. Очереди, TTL, dead-letter и повторная обработка</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

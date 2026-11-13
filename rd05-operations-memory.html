@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · Эксплуатация Redis</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="redis.html">← Оглавление</a>
+  <span class="booktitle">Redis</span>
+  <a href="rabbitmq.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Redis · Часть III · Эксплуатация</div>
+    <h1>Глава 5. Эксплуатация: память, eviction, персистентность и отказоустойчивость</h1>
+    <p class="sublead">Что произойдёт, когда память кончится, что теряется при перезапуске и как не превратить кэш в единую точку отказа</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Память: <code>maxmemory</code> и политики вытеснения</h2>
+    <p>Redis не «сам понимает», сколько памяти ему можно. Пока <code>maxmemory</code> равен нулю, он растёт до
+      исчерпания памяти машины — и тогда его убьёт OOM-killer контейнера или ОС. Поэтому лимит задают явно, а
+      вместе с ним — <strong>политику</strong>: что делать, когда лимит достигнут.</p>
+    <table>
+      <thead><tr><th>Политика</th><th>Что вытесняет</th><th>Когда подходит</th></tr></thead>
+      <tbody>
+        <tr><td><code>noeviction</code></td><td>Ничего: записи начинают падать с ошибкой</td><td>Redis хранит
+          данные, которые нельзя терять (локи, счётчики, очереди)</td></tr>
+        <tr><td><code>allkeys-lru</code></td><td>Любой ключ, реже всех использованный</td><td>Чистый кэш: всё
+          содержимое восстановимо</td></tr>
+        <tr><td><code>allkeys-random</code></td><td>Случайный ключ</td><td>Кэш с равномерным доступом</td></tr>
+        <tr><td><code>volatile-lru</code> / <code>volatile-ttl</code></td><td>Только ключи <em>с TTL</em> —
+          по давности или по остатку времени</td><td>Смешанный Redis: кэш с TTL и вечные данные рядом</td></tr>
+      </tbody>
+    </table>
+    <p>Значения по умолчанию (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">redis-cli config get maxmemory          # maxmemory  0
+redis-cli config get maxmemory-policy   # maxmemory-policy  noeviction</code></pre>
+    </div>
+    <p>То есть «из коробки» Redis не вытесняет ничего: он просто отказывается писать, когда память кончилась.
+      Для кэша это почти всегда неправильная настройка.</p>
+
+    <h2>Как выглядит вытеснение на практике</h2>
+    <p>Ограничим память 4 МБ и включим <code>allkeys-lru</code>, затем запишем 20 000 ключей по 200 байт
+      (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">redis-cli config set maxmemory 4mb
+redis-cli config set maxmemory-policy allkeys-lru
+
+# 20 000 команд SET через pipe
+redis-cli --pipe &lt; sets.txt
+# All data transferred. Waiting for the last reply...
+# Last reply received from server.
+# errors: 0, replies: 20000
+
+redis-cli info memory | grep -E 'used_memory_human|maxmemory_policy'
+# used_memory_human:4.00M
+# maxmemory_policy:allkeys-lru
+
+redis-cli info stats | grep evicted_keys
+# evicted_keys:12796
+
+redis-cli dbsize
+# 7208</code></pre>
+    </div>
+    <p>Из 20 000 записанных ключей в памяти осталось 7 208, а 12 796 были вытеснены — и ни одна команда не
+      вернула ошибку. Именно этого и ждут от кэша: память ограничена, старые ключи уходят, приложение работает.</p>
+    <div class="box warn">
+      <span class="t">Обратная сторона: <code>noeviction</code> поверх лимита</span>
+      <p>С той же памятью, но с политикой <code>noeviction</code>, запись падает:</p>
+      <div class="codewrap">
+        <pre><code class="language-text">redis-cli set probe:key value
+(error) OOM command not allowed when used memory &gt; 'maxmemory'.</code></pre>
+      </div>
+      <p>Чтение при этом продолжает работать. Для кэша это означает, что приложение обязано переживать ошибки
+        записи в Redis: не падать, а просто идти в базу.</p>
+    </div>
+    <h2>Мониторинг: на что смотреть</h2>
+    <p>Три блока <code>INFO</code> закрывают почти все вопросы:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">redis-cli info memory    # used_memory_human, maxmemory_human, maxmemory_policy,
+                         # mem_fragmentation_ratio
+redis-cli info stats     # keyspace_hits, keyspace_misses, evicted_keys, expired_keys,
+                         # rejected_connections, total_commands_processed
+redis-cli info keyspace  # db0:keys=...,expires=...,avg_ttl=...
+redis-cli info clients   # connected_clients, blocked_clients</code></pre>
+    </div>
+    <ul>
+      <li><strong>Доля попаданий</strong> = <code>keyspace_hits / (keyspace_hits + keyspace_misses)</code>.
+        Если она падает — кэш перестал помогать: мало памяти, слишком короткий TTL или ключи не те, что
+        читаются.</li>
+      <li><strong><code>evicted_keys</code> растёт</strong> — память закончилась и кэш вытесняет данные быстрее,
+        чем они успевают пригодиться. Либо увеличивать память, либо уменьшать TTL и объём значений.</li>
+      <li><strong><code>blocked_clients</code></strong> — сколько клиентов висит на <code>BLPOP</code> и
+        подобных командах; резкий рост означает, что потребители ждут, а producer не успевает.</li>
+      <li><strong><code>mem_fragmentation_ratio</code></strong> заметно больше единицы — память фрагментирована;
+        помогает перезапуск или включение <code>activedefrag</code> (настройка сервера).</li>
+      <li><strong><code>rejected_connections</code></strong> — упёрлись в <code>maxclients</code>: обычно это
+        утечка соединений (например, мультиплексор создаётся на каждый запрос).</li>
+    </ul>
+    <p>В примере с вытеснением счётчики выглядели так: <code>keyspace_hits:14</code>,
+      <code>keyspace_misses:7</code> — доля попаданий 67 % на кэше, куда всё только что записали.</p>
+
+    <h2>Персистентность: что теряется при перезапуске</h2>
+    <p>У Redis два механизма, и по умолчанию включён только первый:</p>
+    <table>
+      <thead><tr><th>Механизм</th><th>Что делает</th><th>По умолчанию</th></tr></thead>
+      <tbody>
+        <tr><td><strong>RDB</strong></td><td>Периодический снимок всей базы в файл <code>dump.rdb</code></td>
+          <td>Включён: <code>save "3600 1 300 100 60 10000"</code> — снимок, если за 3600 с изменился хотя бы
+          1 ключ, за 300 с — 100, за 60 с — 10 000</td></tr>
+        <tr><td><strong>AOF</strong></td><td>Журнал команд, дописываемый на диск</td>
+          <td>Выключен: <code>appendonly no</code></td></tr>
+      </tbody>
+    </table>
+    <p>Отсюда практическое следствие: при аварийном завершении процесса Redis теряет всё, что изменилось после
+      последнего снимка или не успело попасть в AOF. Для кэша это нормально; для данных, которые «нельзя
+      терять», — нет.</p>
+    <div class="box note">
+      <span class="t">Как выбрать</span>
+      <p><strong>Чистый кэш:</strong> персистентность можно вообще отключить — после перезапуска кэш прогреется
+        сам. <strong>Очереди, локи, счётчики:</strong> включайте AOF (<code>appendonly yes</code>), иначе после
+        рестарта они исчезнут вместе с данными. И в любом случае реплика — не бэкап.</p>
+    </div>
+    <h2>Отказоустойчивость: Sentinel и Cluster</h2>
+    <p>Один Redis — это одна точка отказа: упал процесс или машина, и кэш исчез (а вместе с ним, возможно,
+      локи и счётчики). Два способа это пережить:</p>
+    <ul>
+      <li><strong>Репликация + Sentinel.</strong> Есть мастер и реплики; Sentinel следит за мастером и при
+        падении повышает одну из реплик, а клиент получает новый адрес мастера. Данные при этом могут
+        потеряться: репликация асинхронная.</li>
+      <li><strong>Redis Cluster.</strong> Данные шардируются между мастерами (у каждого свои реплики), клиент
+        сам находит узел по ключу. Это про <em>горизонтальный масштаб</em>, а не только про отказ: один узел
+        больше не обязан держать весь объём.</li>
+    </ul>
+    <p>Для приложения главное правило не меняется: <strong>потеря Redis не должна быть потерей данных</strong>.
+      Если после падения кэша сервис не поднимается — значит, в Redis лежит то, что там лежать не должно.</p>
+
+    <div class="box warn">
+      <span class="t">Типичные ошибки эксплуатации</span>
+      <ul>
+        <li><strong><code>maxmemory = 0</code> в контейнере с лимитом памяти.</strong> Redis считает, что памяти
+          сколько угодно, и его убивает OOM-killer — без предупреждения и без вытеснения.</li>
+        <li><strong>Политика <code>noeviction</code> для кэша.</strong> Вместо вытеснения старых ключей записи
+          начинают падать с <code>OOM command not allowed…</code>.</li>
+        <li><strong><code>KEYS *</code> в проде.</strong> Одна такая команда блокирует сервер на всё время
+          перебора.</li>
+        <li><strong>Один Redis на кэш, локи, счётчики и очереди.</strong> Вытеснение из-под кэша начнёт выбрасывать
+          локи и счётчики. Разные задачи — разные базы или разные инстансы.</li>
+        <li><strong>Нет таймаутов.</strong> Клиент без <code>connectTimeout</code>/<code>syncTimeout</code> при
+          проблеме с сетью вешает запросы приложения.</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Всегда задавайте <code>maxmemory</code> и политику:</strong> по умолчанию Redis ничего не
+          вытесняет и падает на записи.</li>
+        <li><strong>Для кэша — <code>allkeys-lru</code></strong> (или <code>volatile-*</code>, если рядом лежат
+          вечные ключи); для данных «нельзя терять» — <code>noeviction</code> плюс персистентность.</li>
+        <li><strong>RDB включён, AOF выключен</strong> — значит, свежие записи теряются при аварии; для очередей и
+          счётчиков включайте AOF.</li>
+        <li><strong>Смотрите <code>keyspace_hits/misses</code> и <code>evicted_keys</code></strong>, а не только
+          «жив ли процесс».</li>
+        <li><strong>Репликация и Cluster — про доступность и объём,</strong> а не про сохранность данных: истина
+          должна оставаться в PostgreSQL.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="rd04-caching-patterns.html">← <span class="sp">Глава 4. Кэширование: cache-aside, TTL, инвалидация и stampede</span></a>
+      <a href="rabbitmq.html"><span class="sp">Следующая книга: RabbitMQ →</span></a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

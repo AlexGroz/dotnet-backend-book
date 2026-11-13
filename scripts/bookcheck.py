@@ -5,7 +5,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VOID = {'br', 'img', 'hr', 'meta', 'link', 'input', 'source'}
 
 def num(p):
-    m = re.match(r'(?:ch|sql|cs|pt|dk)(\d{2})-', os.path.basename(p))
+    m = re.match(r'(?:ch|sql|cs|pt|dk|rd|mq)(\d{2})-', os.path.basename(p))
     return int(m.group(1)) if m else None
 
 class P(HTMLParser):
@@ -57,9 +57,10 @@ for f in pages:
         bad.append((f, 'backtick-in-text'))
 
 # оглавления: номер и заголовок должны совпадать с <h1> главы
-toc_files = ['csharp.html', 'net.html', 'sql.html', 'docker.html', 'patterns.html']
+toc_files = ['csharp.html', 'net.html', 'sql.html', 'redis.html', 'rabbitmq.html',
+             'docker.html', 'patterns.html']
 entry = re.compile(
-    r'<a href="((?:ch|sql|cs|pt|dk)\d{2}-[^"]+\.html)">\s*'
+    r'<a href="((?:ch|sql|cs|pt|dk|rd|mq)\d{2}-[^"]+\.html)">\s*'
     r'<span class="n">(.*?)</span>\s*<span class="t">(.*?)</span>', re.S)
 for toc in toc_files:
     s = open(toc, encoding='utf-8').read()
@@ -92,6 +93,7 @@ for f in pages:
 
 # порядок глав в оглавлении = порядок листания: соседи в пейджере и верхней панели
 PREFIX = {'csharp.html': 'cs', 'net.html': 'ch', 'sql.html': 'sql',
+          'redis.html': 'rd', 'rabbitmq.html': 'mq',
           'docker.html': 'dk', 'patterns.html': 'pt'}
 for toc, pref in PREFIX.items():
     tocs = open(toc, encoding='utf-8').read()

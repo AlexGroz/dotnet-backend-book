@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Структуры данных</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="redis.html">← Оглавление</a>
+  <span class="booktitle">Redis</span>
+  <a href="rd04-caching-patterns.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Redis · Часть II · Структуры и кэш</div>
+    <h1>Глава 3. Структуры данных: строки, хеши, списки, множества, sorted sets</h1>
+    <p class="sublead">Что выбрать под задачу и как это выглядит в StackExchange.Redis</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>Смысл Redis в том, что структура данных живёт <em>на сервере</em>. Вместо «взять JSON, распарсить,
+      изменить, положить обратно» приложение говорит «добавь элемент в множество» — и сервер делает это
+      атомарно, не пересылая весь объект. Ниже — пять базовых типов, каждый с реальным выводом. Во всех примерах
+      главы <code>db</code> — это <code>IDatabase</code> из мультиплексора (глава 2), а <code>Stopwatch</code> —
+      из <code>System.Diagnostics</code>.</p>
+
+    <h2>Строка: <code>string</code></h2>
+    <p>Универсальное значение: JSON, число, флаг, сериализованный объект. Отдельно ценны атомарные операции
+      над числами — <code>INCR</code>/<code>INCRBY</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await db.StringSetAsync("hits", 0);
+await db.StringIncrementAsync("hits");        // 1
+await db.StringIncrementAsync("hits", 5);     // 6
+Console.WriteLine(await db.StringGetAsync("hits"));   // 6</code></pre>
+    </div>
+    <ul>
+      <li><strong>Когда:</strong> кэш ответа, счётчик, distributed-флаг, «ключ-значение с TTL».</li>
+      <li><strong>Не когда:</strong> нужно менять одно поле большого объекта — это <code>hash</code>, иначе
+        каждый раз пересылается весь JSON.</li>
+      <li><strong>Сложность:</strong> <code>GET</code>/<code>SET</code>/<code>INCR</code> — O(1).</li>
+    </ul>
+
+    <h2>Хеш: <code>hash</code></h2>
+    <p>Объект, разложенный по полям: <code>HSET user:1 name … plan …</code>. Читать можно как весь объект, так и
+      одно поле, и менять одно поле, не пересылая остальные.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await db.HashSetAsync("user:1", new[]
+{
+    new HashEntry("name", "Алексей"),
+    new HashEntry("plan", "pro"),
+});
+
+var all = await db.HashGetAllAsync("user:1");
+Console.WriteLine(string.Join(", ", all.Select(e =&gt; $"{e.Name}={e.Value}")));
+// name=Алексей, plan=pro
+
+await db.HashSetAsync("user:1", "visits", 10);
+var visits = await db.HashIncrementAsync("user:1", "visits", 5);
+Console.WriteLine($"hincrby visits={visits}");          // hincrby visits=15</code></pre>
+    </div>
+    <ul>
+      <li><strong>Когда:</strong> сущность с небольшим числом полей, которую читают частично (профиль, настройки,
+        счётчики по дням).</li>
+      <li><strong>Плюс:</strong> TTL ставится на весь хеш целиком (у полей своего TTL нет — это важно помнить).</li>
+      <li><strong>Сложность:</strong> <code>HSET</code>/<code>HGET</code>/<code>HINCRBY</code> — O(1),
+        <code>HGETALL</code> — O(N) по числу полей.</li>
+    </ul>
+    <h2>Список: <code>list</code></h2>
+    <p>Двусторонняя очередь: <code>LPUSH</code>/<code>RPUSH</code> с одного конца, <code>LPOP</code>/<code>RPOP</code>
+      с другого. Из неё получается и стек, и очередь. Главное — <strong>блокирующее чтение</strong>: клиент ждёт
+      на сервере, пока элемент появится, вместо опроса в цикле.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await db.KeyDeleteAsync("q");
+
+// producer: кладём в правый конец
+await db.ListRightPushAsync("q", new RedisValue[] { "task-1", "task-2" });
+
+// consumer: забираем с левого — FIFO
+Console.WriteLine(await db.ListLeftPopAsync("q"));     // task-1
+Console.WriteLine(await db.ListLengthAsync("q"));      // 1</code></pre>
+    </div>
+    <p>Блокирующий вариант в Redis — команда <code>BLPOP</code>. Тонкость, которая ломает половину примеров из
+      интернета: <strong>в <code>StackExchange.Redis</code> 2.8 у <code>IDatabase</code> нет типизированного
+      <code>ListLeftPop(key, timeout)</code></strong> — есть только неблокирующий вариант и вариант с
+      количеством. Поэтому <code>BLPOP</code> вызывают как обычную команду:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var sw = Stopwatch.StartNew();
+var blpop = await db.ExecuteAsync("BLPOP", "empty:list", 2);   // ждать 2 секунды
+Console.WriteLine($"[{blpop}] after {sw.ElapsedMilliseconds} ms");
+// [(nil)] after 2108 ms</code></pre>
+    </div>
+    <p>Через 2 секунды сервер вернул «nil», а клиент — примерно 2100 мс ожидания. Это дешевле, чем опрос
+      <code>LPOP</code> раз в 100 мс: один «спящий» запрос вместо сотни пустых.</p>
+    <ul>
+      <li><strong>Когда:</strong> лёгкая очередь задач без сложной маршрутизации, стек «последние N»,
+        <code>LRANGE</code> для ленты.</li>
+      <li><strong>Осторожно:</strong> это <em>не</em> брокер. Нет подтверждений, dead-letter и повторной
+        доставки при падении потребителя — для надёжной очереди нужен RabbitMQ (следующая книга).</li>
+      <li><strong>Сложность:</strong> <code>LPUSH</code>/<code>RPOP</code> — O(1), <code>LRANGE</code> —
+        O(S+N) (сколько записей пролистали плюс сколько вернули).</li>
+    </ul>
+
+    <h2>Множество: <code>set</code></h2>
+    <p>Неупорядоченный набор уникальных значений. Проверка вхождения — O(1); пересечения и объединения считает
+      сервер.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await db.KeyDeleteAsync("tags:post:1");
+await db.SetAddAsync("tags:post:1", new RedisValue[] { "redis", "cache", "dotnet" });
+
+Console.WriteLine(await db.SetContainsAsync("tags:post:1", "redis"));  // True
+Console.WriteLine(await db.SetContainsAsync("tags:post:1", "cobol"));  // False
+Console.WriteLine(await db.SetLengthAsync("tags:post:1"));              // 3
+
+// sismember redis=True cobol=False
+// scard=3 smembers=redis,cache,dotnet</code></pre>
+    </div>
+    <ul>
+      <li><strong>Когда:</strong> теги, «кто уже видел», дедупликация, пересечение аудиторий
+        (<code>SINTER</code>), чёрные списки.</li>
+      <li><strong>Плюс:</strong> вставка дубликата ничего не меняет — идемпотентность бесплатно.</li>
+      <li><strong>Сложность:</strong> <code>SADD</code>/<code>SISMEMBER</code>/<code>SREM</code> — O(1),
+        <code>SMEMBERS</code> — O(N), <code>SINTER</code> — O(N×M) в худшем случае.</li>
+    </ul>
+    <h2>Сортированное множество: <code>sorted set</code></h2>
+    <p>Множество, где у каждого элемента есть <em>вес</em> (score), и сервер держит элементы отсортированными по
+      нему. Это «рейтинг» и «окно времени» одновременно.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await db.KeyDeleteAsync("board");
+await db.SortedSetAddAsync("board", "alice", 10);
+await db.SortedSetAddAsync("board", new[]
+{
+    new SortedSetEntry("bob", 30),
+    new SortedSetEntry("carol", 20),
+});
+
+var top2 = await db.SortedSetRangeByRankWithScoresAsync("board", 0, 1, Order.Descending);
+Console.WriteLine(string.Join(", ", top2.Select(t =&gt; $"{t.Element}={t.Score}")));
+// bob=30, carol=20
+
+// прибавить к весу атомарно
+var score = await db.SortedSetIncrementAsync("board", "alice", 15);
+Console.WriteLine(score);                                  // 25
+Console.WriteLine(await db.SortedSetLengthAsync("board")); // 3</code></pre>
+    </div>
+    <p>Второе применение — <strong>лимит запросов</strong> («не больше N за минуту»): элементы — запросы,
+      вес — метка времени, а количество считается по диапазону:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await db.KeyDeleteAsync("rate:user:1");
+for (var i = 0; i &lt; 3; i++)
+    await db.SortedSetAddAsync("rate:user:1", $"req:{i}", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+
+var from = DateTimeOffset.UtcNow.AddSeconds(-60).ToUnixTimeMilliseconds();
+var count = await db.SortedSetLengthAsync("rate:user:1", from, double.PositiveInfinity);
+Console.WriteLine($"rate last 60s={count}");     // rate last 60s=3</code></pre>
+    </div>
+    <ul>
+      <li><strong>Когда:</strong> рейтинги и лидерборды, отложенные задачи (вес = время выполнения), лимиты,
+        «последние N по времени».</li>
+      <li><strong>Сложность:</strong> <code>ZADD</code>/<code>ZINCRBY</code> — O(log N),
+        <code>ZRANGE</code> — O(log N + M) по числу возвращаемых элементов.</li>
+    </ul>
+
+    <h2>Что выбрать: таблица решений</h2>
+    <table>
+      <thead><tr><th>Нужно</th><th>Структура</th><th>Ключевые команды</th></tr></thead>
+      <tbody>
+        <tr><td>Положить объект/JSON с TTL</td><td><code>string</code></td><td><code>SET … EX</code>,
+          <code>GET</code></td></tr>
+        <tr><td>Счётчик без гонок</td><td><code>string</code> (число)</td><td><code>INCR</code>,
+          <code>INCRBY</code></td></tr>
+        <tr><td>Менять отдельные поля объекта</td><td><code>hash</code></td><td><code>HSET</code>,
+          <code>HGET</code>, <code>HINCRBY</code></td></tr>
+        <tr><td>Очередь/стек с ожиданием</td><td><code>list</code></td><td><code>LPUSH</code>,
+          <code>BRPOP</code></td></tr>
+        <tr><td>Уникальность и пересечения</td><td><code>set</code></td><td><code>SADD</code>,
+          <code>SINTER</code></td></tr>
+        <tr><td>Рейтинг, отложенные задачи, лимиты</td><td><code>sorted set</code></td><td><code>ZADD</code>,
+          <code>ZRANGEBYSCORE</code></td></tr>
+      </tbody>
+    </table>
+
+    <div class="box warn">
+      <span class="t">Антипаттерны структур</span>
+      <ul>
+        <li><strong>Гонять весь объект ради одного поля.</strong> JSON в <code>string</code>, где меняется один
+          флаг, — это чтение и запись всего объекта; <code>hash</code> дешевле.</li>
+        <li><strong>Хранить счётчик в JSON.</strong> «Прочитать, прибавить, записать» теряет обновления;
+          <code>INCR</code>/<code>HINCRBY</code> — нет.</li>
+        <li><strong>Один ключ на миллион элементов.</strong> Любая команда над ним блокирует сервер на всё время
+          работы: делите на части (<code>tags:post:1</code>, <code>tags:post:2</code>, …).</li>
+        <li><strong>Строить надёжную очередь на <code>list</code>.</strong> Без подтверждений и dead-letter
+          сообщения теряются при падении потребителя.</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Структура выбирается по операции,</strong> а не по привычке: поля — <code>hash</code>,
+          уникальность — <code>set</code>, порядок — <code>sorted set</code>, очередь — <code>list</code>.</li>
+        <li><strong>Атомарные команды сервера</strong> (<code>INCR</code>, <code>SADD</code>, <code>ZINCRBY</code>)
+          заменяют «прочитать-изменить-записать».</li>
+        <li><strong>Блокирующее чтение</strong> (<code>BLPOP</code>) вызывается через
+          <code>ExecuteAsync</code>; в 2.8 типизированного метода с таймаутом нет.</li>
+        <li><strong>TTL — на весь ключ.</strong> У полей хеша и элементов списка своего времени жизни нет.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="rd02-connection-and-commands.html">← <span class="sp">Глава 2. Подключение из .NET: ConnectionMultiplexer и первые команды</span></a>
+      <a href="rd04-caching-patterns.html"><span class="sp">Глава 4. Кэширование: cache-aside, TTL, инвалидация и stampede</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

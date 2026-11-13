@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 2 · Публикация и подтверждения</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="rabbitmq.html">← Оглавление</a>
+  <span class="booktitle">RabbitMQ</span>
+  <a href="mq03-consuming-prefetch-ack.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">RabbitMQ · Часть I · Основы</div>
+    <h1>Глава 2. Публикация из .NET: каналы, свойства и подтверждения</h1>
+    <p class="sublead">Почему «отправил» не значит «брокер принял», и как это проверить</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Канал: что это и сколько их нужно</h2>
+    <p><strong>Соединение</strong> (<code>IConnection</code>) — это TCP-сессия с брокером, её на процесс обычно
+      одно. <strong>Канал</strong> (<code>IChannel</code>) — «сессия внутри сессии»: в нём своя нумерация
+      delivery tag, свои подтверждения и свои ошибки.</p>
+    <ul>
+      <li><strong>Канал дешёвый.</strong> Его открывают под задачу: один на публикацию, один на потребление,
+        а не «один на всё».</li>
+      <li><strong>Канал не потокобезопасен.</strong> Нельзя использовать один канал из нескольких потоков
+        одновременно — это самая частая причина «перемешанных» подтверждений.</li>
+      <li><strong>Ошибка уровня протокола закрывает канал</strong>, а не соединение. Пример: публикация в
+        несуществующий обменник — канал закрывается с кодом 404, и дальнейшие вызовы на нём падают. Правильно —
+        создать новый канал.</li>
+    </ul>
+
+    <h2>Свойства сообщения</h2>
+    <p>Тело — это байты. Всё остальное (нужно ли сохранять на диск, кто автор, как связать ответ с запросом)
+      передаётся в <code>BasicProperties</code>:</p>
+    <table>
+      <thead><tr><th>Свойство</th><th>Зачем</th></tr></thead>
+      <tbody>
+        <tr><td><code>Persistent = true</code></td><td>Просит брокера записать сообщение на диск (вместе с
+          <code>durable</code>-очередью это переживает перезапуск)</td></tr>
+        <tr><td><code>ContentType</code></td><td>Чтобы потребитель знал, чем разбирать тело
+          (<code>application/json</code>)</td></tr>
+        <tr><td><code>MessageId</code></td><td>Идентификатор для дедупликации и трассировки</td></tr>
+        <tr><td><code>CorrelationId</code></td><td>Связь ответа с исходным запросом (RPC-паттерн)</td></tr>
+        <tr><td><code>Headers</code></td><td>Произвольные пары «ключ — значение»: версия схемы, попытка, источник</td></tr>
+      </tbody>
+    </table>
+    <p>Тонкость API, на которой легко споткнуться: в <code>RabbitMQ.Client</code> 7.x у
+      <code>BasicPublishAsync</code> свойства идут <strong>после</strong> флага <code>mandatory</code>.
+      Считаем, что <code>ch</code> — канал из главы 1. Вызов либо без свойств вообще, либо так:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var props = new BasicProperties
+{
+    Persistent  = true,
+    ContentType = "application/json",
+    MessageId   = Guid.NewGuid().ToString("N"),
+    Headers     = new Dictionary&lt;string, object?&gt; { ["schema"] = 2 },
+};
+
+await ch.BasicPublishAsync(
+    exchange: "orders",
+    routingKey: "order.created",
+    mandatory: true,                  // обязательно явно, если передаёте свойства
+    basicProperties: props,
+    body: Encoding.UTF8.GetBytes("{\"id\":42}"));</code></pre>
+    </div>
+    <h2>Publisher confirms: «брокер принял»</h2>
+    <p>Публикация по AMQP асинхронная: <code>BasicPublishAsync</code> без подтверждений возвращается сразу после
+      записи в сокет. Брокер при этом мог не принять сообщение — например, не найти обменник. Включается
+      подтверждение на уровне канала:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var opts = new CreateChannelOptions(
+    publisherConfirmationsEnabled: true,
+    publisherConfirmationTrackingEnabled: true);
+
+await using var ch = await conn.CreateChannelAsync(opts);</code></pre>
+    </div>
+    <p>Теперь <code>await BasicPublishAsync(...)</code> ждёт подтверждения от брокера. Проверено на двух
+      сценариях:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">confirm channel: True
+published to existing exchange: ok
+
+missing exchange -&gt; AlreadyClosedException: Already closed: The AMQP operation was interrupted:
+AMQP close-reason, initiated by Peer, code=404, text='NOT_FOUND - no exchange
+'no.such.exchange' in vhost '/''</code></pre>
+    </div>
+    <ul>
+      <li><strong>Существующий обменник</strong> — подтверждение пришло, вызов завершился успешно.</li>
+      <li><strong>Несуществующий</strong> — ошибка <code>404 NOT_FOUND</code>, причём <em>канал закрыт</em>:
+        это не «одна неудачная публикация», а выход из строя канала. В приложении такой канал пересоздают, а
+        не переиспользуют.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Что говорят документы</span>
+      <p>«In order to guarantee persistence, a client should use confirms» — без подтверждений брокер может
+        потерять даже persistent-сообщение, если упадёт до записи на диск. И там же: для persistent-сообщений
+        подтверждение может занимать «a few hundred milliseconds», потому что брокер пишет пакет на диск; поэтому
+        подтверждения обрабатывают асинхронно, а не по одному в цикле
+        (RabbitMQ, «Consumer Acknowledgements and Publisher Confirms»).</p>
+    </div>
+
+    <h2><code>mandatory</code> и возврат неотправленного</h2>
+    <p>Сообщение может быть «подтверждено», но никуда не положено: обменник есть, а привязки с таким routing key
+      нет. По умолчанию такое сообщение <strong>молча выбрасывается</strong>. Флаг <code>mandatory: true</code>
+      заставляет брокера вернуть его событием <code>BasicReturnAsync</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// props — объект BasicProperties из предыдущего примера
+await ch.ExchangeDeclareAsync("ex.noroute", ExchangeType.Direct, durable: false, autoDelete: false);
+
+ch.BasicReturnAsync += (_, ea) =&gt;
+{
+    Console.WriteLine($"returned: reply={ea.ReplyText} exchange={ea.Exchange} rk={ea.RoutingKey}");
+    return Task.CompletedTask;
+};
+
+await ch.BasicPublishAsync("ex.noroute", "no.binding", mandatory: true,
+    basicProperties: props, body: Encoding.UTF8.GetBytes("{\"id\":9}"));
+
+// returned: reply=NO_ROUTE exchange=ex.noroute rk=no.binding</code></pre>
+    </div>
+    <p><code>NO_ROUTE</code> — это и есть «сообщение не попало ни в одну очередь». Без <code>mandatory</code>
+      вы об этом не узнаете: ни ошибки, ни возврата, сообщение просто исчезло.</p>
+    <div class="box warn">
+      <span class="t">Подтверждение не спасает от потери адресата</span>
+      <p>Confirm отвечает на вопрос «брокер принял сообщение?», а не «сообщение дошло до очереди?». Поэтому
+        надёжная публикация — это <strong>confirm + <code>mandatory</code> + обработчик возврата</strong>:</p>
+      <ul>
+        <li>confirm получен, return не пришёл → сообщение легло в очередь;</li>
+        <li>confirm получен, пришёл <code>NO_ROUTE</code> → адресата нет, это ошибка конфигурации;</li>
+        <li>confirm не пришёл (таймаут) → брокер не принял; сообщение надо отправить снова.</li>
+      </ul>
+    </div>
+    <h2>Надёжная публикация: confirm не заменяет outbox</h2>
+    <p>Даже с подтверждениями есть окно: приложение сделало запись в БД, отправило сообщение — и упало до того,
+      как запомнило результат. Или наоборот: сообщение ушло, а транзакция в БД откатилась. Классическое решение —
+      <strong>Transactional Outbox</strong>: сообщение пишется в таблицу <em>в той же транзакции</em>, что и
+      бизнес-данные, а отдельный воркер публикует его с подтверждениями и помечает отправленным
+      (подробно — в .NET-разделе, глава про Outbox и идемпотентность).</p>
+    <div class="codewrap">
+      <pre><code class="language-text">BEGIN;
+  INSERT INTO orders …;
+  INSERT INTO outbox (type, payload) VALUES ('order.created', …);
+COMMIT;                          -- бизнес-данные и намерение отправить — атомарно
+
+-- отдельно, воркер:
+--   SELECT … FROM outbox WHERE status = 'new' FOR UPDATE SKIP LOCKED
+--   → publish с confirm
+--   → UPDATE outbox SET status = 'sent'</code></pre>
+    </div>
+    <p>Confirm здесь нужен, чтобы понять, когда можно ставить <code>sent</code>: без него воркер не знает,
+      принял ли брокер сообщение, и вынужден либо дублировать, либо помечать отправленным «на веру».</p>
+
+    <h2>Что происходит при перегрузке</h2>
+    <p>Если брокер упёрся в лимит памяти или диска, он включает alarm и <strong>перестаёт читать данные от
+      публикующих соединений</strong>. Проверено: с включённым memory alarm публикация <em>без</em> подтверждений
+      завершается «успешно» — сообщение просто остаётся в буфере клиента:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">publish: ok                 &lt;- без confirm: вызов вернулся, брокер не принял
+channel.IsOpen: True
+
+confirm: NOT received -&gt; TaskCanceledException   &lt;- с confirm: ждём и не дожидаемся</code></pre>
+    </div>
+    <p>Второй случай — тот же publish, но на канале с подтверждениями и таймаутом 3 секунды. Это лучший аргумент
+      за confirms: без них перегрузка брокера выглядит как нормальная работа, пока очередь не начнёт «непонятно
+      почему» пустеть.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Канал дешёвый, но не потокобезопасный</strong>; после ошибки протокола (404) его пересоздают.</li>
+        <li><strong>Свойства передаются после <code>mandatory</code></strong>:
+          <code>BasicPublishAsync(exchange, routingKey, mandatory, basicProperties, body)</code>.</li>
+        <li><strong>Confirm = «брокер принял»</strong>, а не «сообщение в очереди»; для адресата нужен
+          <code>mandatory</code> + обработчик <code>BasicReturnAsync</code>.</li>
+        <li><strong>При alarm публикация без confirm «успешна»</strong> — перегрузка видна только по таймауту
+          подтверждения.</li>
+        <li><strong>Persistent + durable + confirm</strong> — минимальный набор, чтобы сообщение переживало
+          перезапуск; атомарность с БД даёт outbox.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="mq01-why-broker-amqp.html">← <span class="sp">Глава 1. Зачем брокер сообщений и как устроен AMQP</span></a>
+      <a href="mq03-consuming-prefetch-ack.html"><span class="sp">Глава 3. Потребление: prefetch, ack и конкуренция</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+

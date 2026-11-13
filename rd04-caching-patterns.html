@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · Кэширование</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="redis.html">← Оглавление</a>
+  <span class="booktitle">Redis</span>
+  <a href="rd05-operations-memory.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Redis · Часть II · Структуры и кэш</div>
+    <h1>Глава 4. Кэширование: cache-aside, TTL, инвалидация и stampede</h1>
+    <p class="sublead">Как кэш ускоряет сервис и как он же ломает данные, если ошибиться с временем жизни</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Cache-aside: самый частый паттерн</h2>
+    <p>Приложение само решает, что и когда кэшировать: сначала спрашивает Redis, при промахе идёт в
+      PostgreSQL и кладёт результат в Redis. Кэш ничего не знает про базу — он просто хранилище по ключу.
+      <code>CatalogRepository</code> ниже — обычный репозиторий поверх <code>DbContext</code>;
+      <code>IDatabase</code> приходит из DI (глава 2).</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record CatalogItem(int Id, string Title);
+
+public sealed class CatalogCache(IDatabase db, CatalogRepository repo)
+{
+    public async Task&lt;CatalogItem?&gt; GetAsync(int id)
+    {
+        var key = $"catalog:v1:{id}";
+
+        var cached = await db.StringGetAsync(key);
+        if (cached.HasValue)
+            return JsonSerializer.Deserialize&lt;CatalogItem&gt;(cached.ToString());
+
+        var item = await repo.FindAsync(id);              // PostgreSQL
+        if (item is null) return null;
+
+        await db.StringSetAsync(key, JsonSerializer.Serialize(item),
+            TimeSpan.FromMinutes(5));                     // TTL обязателен
+        return item;
+    }
+}</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Шаг</th><th>Что происходит</th><th>Если Redis недоступен</th></tr></thead>
+      <tbody>
+        <tr><td>1. Чтение из кэша</td><td><code>GET catalog:v1:42</code></td><td>Идём в БД (кэш — ускоритель,
+          не источник истины)</td></tr>
+        <tr><td>2. Промах</td><td>Запрос в PostgreSQL</td><td>Работает как обычно</td></tr>
+        <tr><td>3. Запись в кэш</td><td><code>SET</code> с TTL</td><td>Пропускаем; следующий запрос снова
+          попробует</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">TTL — не «на всякий случай», а часть контракта</span>
+      <p>Ключ без времени жизни остаётся в Redis навсегда: данные устаревают, память заканчивается. TTL —
+        единственная гарантия, что кэш сам себя починит, даже если инвалидация где-то не сработала.</p>
+    </div>
+
+    <h2>Тот же паттерн через <code>IDistributedCache</code></h2>
+    <p>Если нужен только кэш «байты по ключу», брать <code>StackExchange.Redis</code> не обязательно: в ASP.NET
+      есть абстракция <code>IDistributedCache</code>, а пакет
+      <code>Microsoft.Extensions.Caching.StackExchangeRedis</code> подключает её к Redis. Реальный вывод:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">services.AddStackExchangeRedisCache(o =&gt;
+{
+    o.Configuration = "localhost:6379";
+    o.InstanceName  = "shop:";                  // префикс всех ключей
+});
+
+await cache.SetStringAsync("catalog:42", "{\"id\":42}",
+    new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(5) });
+
+Console.WriteLine(await cache.GetStringAsync("catalog:42"));   // {"id":42}
+Console.WriteLine((await cache.GetAsync("catalog:42"))?.Length); // 9
+await Task.Delay(5500);
+Console.WriteLine($"[{await cache.GetStringAsync("catalog:42")}]"); // []</code></pre>
+    </div>
+    <p>Две детали, которые видно только в самом Redis:</p>
+    <ul>
+      <li><strong><code>InstanceName</code> — это префикс.</strong> В Redis ключ называется
+        <code>shop:catalog:42</code>, а не <code>catalog:42</code>: абстракция добавляет префикс сама, чтобы
+        несколько приложений могли делить один Redis.</li>
+      <li><strong>Промах и истечение — это <code>null</code></strong>, а не исключение; после 5,5 секунд
+        вернулось пустое значение.</li>
+    </ul>
+    <p><code>SlidingExpiration</code> в тех же настройках продлевает жизнь ключа при каждом чтении (проверено:
+      ключ, записанный с окном 3 секунды, имел в Redis TTL 3), но у него есть цена — «горячий» ключ никогда не
+      истечёт, и устаревшее значение может жить бесконечно, пока его читают.</p>
+    <h2>Инвалидация: что делать при записи</h2>
+    <p>Кэш устаревает не сам по себе, а потому что данные изменились. Три рабочих подхода, от простого к
+      сложному:</p>
+    <ol>
+      <li><strong>Удалить ключ после успешной записи в БД</strong> — самое частое. Именно <em>удалить</em>, а не
+        «записать новое значение»: между записью в БД и записью в кэш кто-то успеет прочитать старое и
+        положить его обратно.</li>
+      <li><strong>Версия в ключе.</strong> <code>catalog:v2:42</code>: при смене формата или «полном сбросе»
+        поднимается версия, старые ключи просто перестают читаться и истекают сами.</li>
+      <li><strong>TTL как страховка.</strong> Даже если инвалидация не сработала (сообщение потерялось, код
+        забыл), через N минут кэш вернётся к правде.</li>
+    </ol>
+    <div class="box warn">
+      <span class="t">Порядок операций важен</span>
+      <p>Инвалидация выполняется <strong>после коммита</strong> транзакции в БД. Если удалить ключ до коммита,
+        параллельный читатель успеет положить в кэш старое значение, и оно останется там до истечения TTL.</p>
+    </div>
+    <p>Чего делать точно не стоит: пытаться «синхронизировать» кэш и БД двумя записями без общей транзакции.
+      Атомарно это не сделать, поэтому правильная стратегия — «кэш может быть устаревшим не дольше TTL».</p>
+
+    <h2>Промах-шторм (stampede) и как его гасят</h2>
+    <p>Популярный ключ истёк — и сто запросов одновременно идут в базу за одним и тем же. Нагрузка на БД
+      умножается на сто, а кэш заполняется одинаковыми значениями. Лечится «право на прогрев»: только один
+      процесс идёт в БД, остальные ждут.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public async Task&lt;CatalogItem?&gt; GetWithLockAsync(int id)   // в том же классе CatalogCache
+{
+    var key     = $"catalog:v1:{id}";
+    var lockKey = $"lock:{key}";
+    var token   = Guid.NewGuid().ToString("N");
+
+    // SET lockKey token NX EX 10 — берёт только один
+    if (await db.StringSetAsync(lockKey, token, TimeSpan.FromSeconds(10), When.NotExists))
+    {
+        try
+        {
+            var item = await repo.FindAsync(id);          // идём в БД один раз
+            if (item is null) return null;
+
+            await db.StringSetAsync(key, JsonSerializer.Serialize(item), TimeSpan.FromMinutes(5));
+            return item;
+        }
+        finally
+        {
+            // снять лок, только если он всё ещё наш (сравнение значения + удаление)
+            await db.ScriptEvaluateAsync(
+                "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end",
+                new RedisKey[] { lockKey }, new RedisValue[] { token });
+        }
+    }
+
+    // лок занят: короткая пауза, затем обычное чтение кэша; не дождались — идём в БД сами
+    await Task.Delay(50);
+    return await GetAsync(id) ?? await repo.FindAsync(id);
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>SET … NX EX</code> — и лок, и его таймаут.</strong> Проверено: первый вызов получает
+        <code>True</code>, второй — <code>False</code>. TTL обязателен: упавший процесс не должен держать лок
+        вечно.</li>
+      <li><strong>Снимать лок скриптом, а не <code>DEL</code>.</strong> Иначе можно удалить чужой лок, который
+        успел истечь и достаться другому процессу.</li>
+      <li><strong>Ждущие не должны висеть.</strong> Пауза с повтором, затем — свой запрос в БД: лучше несколько
+        лишних запросов, чем очередь, которая не движется.</li>
+    </ul>
+
+    <h2>Кэш и запись: три схемы</h2>
+    <table>
+      <thead><tr><th>Схема</th><th>Как работает</th><th>Когда</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Cache-aside</strong></td><td>Приложение читает кэш, при промахе идёт в БД и заполняет
+          кэш</td><td>Почти всегда: просто, предсказуемо, БД — источник истины</td></tr>
+        <tr><td><strong>Write-through</strong></td><td>Пишем в кэш и в БД в одном сценарии</td><td>Редко: две
+          системы не commit-ятся вместе, нужна компенсация</td></tr>
+        <tr><td><strong>Write-behind</strong></td><td>Пишем в кэш, в БД — асинхронно</td><td>Только когда потеря
+          записи допустима и есть надёжная очередь</td></tr>
+      </tbody>
+    </table>
+    <p>Для типового .NET-сервиса правильный выбор — cache-aside плюс инвалидация после коммита. Write-through и
+      write-behind требуют решения проблемы «двух источников истины», а это уже отдельный проект.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Cache-aside:</strong> кэш — ускоритель, истина — в PostgreSQL; при недоступном Redis сервис
+          работает медленнее, но работает.</li>
+        <li><strong>TTL обязателен</strong> у каждого ключа; sliding-окно продлевает жизнь при чтении, поэтому
+          горячие ключи не истекают никогда.</li>
+        <li><strong>Инвалидация — удалением ключа после коммита</strong>; версия в имени ключа даёт бесплатный
+          «полный сброс».</li>
+        <li><strong>Промах-шторм гасят локом <code>SET … NX EX</code></strong> с обязательным TTL и снятием
+          через скрипт.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="rd03-data-structures.html">← <span class="sp">Глава 3. Структуры данных: строки, хеши, списки, множества, sorted sets</span></a>
+      <a href="rd05-operations-memory.html"><span class="sp">Глава 5. Эксплуатация: память, eviction, персистентность и отказоустойчивость</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
