@@ -155,16 +155,92 @@ LIMIT 20;</code></pre>
     </ul>
 
     <h2>Что зависит от приложения</h2>
-    <div class="codewrap">
-      <pre><code class="language-sql">-- ✘ миллионы удалений создают миллионы мёртвых версий
-DELETE FROM orders WHERE created_at &lt; now() - interval '1 year';
+    <p>Блоат создаёт не команда сама по себе, а <strong>сколько строк затронуто и какие колонки вы меняете</strong>.
+      Поэтому «<code>DELETE</code> против <code>UPDATE</code>» — это не сравнение: на трёх строках разница
+      нулевая, а на миллионе решает не тип команды. Ниже — замеры на одинаковых данных (PostgreSQL 16,
+      100 000 строк, <code>fillfactor = 70</code>, меняется каждая десятая строка); все числа получены
+      прогоном, а не оценкой.</p>
 
--- ✔ массовые изменения — одной командой и по указанным колонкам
-UPDATE orders SET status = 'expired' WHERE status = 'new' AND created_at &lt; :cutoff;</code></pre>
+    <h3>Один и тот же объём: <code>DELETE</code> против <code>UPDATE</code></h3>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- три одинаковые таблицы: 100 000 строк, одинаковые индексы (PK, status, created_at)
+--   t_del      — удаляем 10 000 строк
+--   t_upd_idx  — обновляем ИНДЕКСИРУЕМУЮ колонку   (status)
+--   t_upd_hot  — обновляем неиндексируемую колонку (note)
+
+DELETE FROM t_del      WHERE id % 10 = 0;                  -- DELETE 10000
+UPDATE t_upd_idx SET status = 'expired' WHERE id % 10 = 0; -- UPDATE 10000
+UPDATE t_upd_hot SET note   = 'x'       WHERE id % 10 = 0; -- UPDATE 10000</code></pre>
     </div>
+    <table>
+      <thead><tr><th>Что сделали</th><th>Живых строк</th><th>Мёртвых версий</th><th>Из них HOT</th>
+        <th>Таблица</th><th>Индексы</th><th>Время</th></tr></thead>
+      <tbody>
+        <tr><td><code>DELETE</code> 10 000</td><td>90 000</td><td><strong>10 000</strong></td><td>—</td>
+          <td>9640 kB → 9640 kB</td><td>5112 kB → 5112 kB</td><td>11.7 ms</td></tr>
+        <tr><td><code>UPDATE</code> индексируемой колонки</td><td>100 000</td><td><strong>10 000</strong></td>
+          <td>0</td><td>9640 kB → 9640 kB</td><td>5112 kB → <strong>5176 kB</strong></td><td>63.0 ms</td></tr>
+        <tr><td><code>UPDATE</code> неиндексируемой колонки</td><td>100 000</td><td><strong>10 000</strong></td>
+          <td>10 000</td><td>9640 kB → 9640 kB</td><td>5112 kB → 5112 kB</td><td>18.4 ms</td></tr>
+      </tbody>
+    </table>
+    <p>Главное число здесь — третья колонка: <strong>мёртвых версий ровно 10 000 во всех трёх случаях</strong>.
+      По этому счёту <code>UPDATE</code> не лучше <code>DELETE</code>, а если менять индексируемую колонку — то
+      и хуже: добавляется 10 000 записей в индекс (здесь +64 kB, и растёт это пропорционально числу обновлённых
+      строк).</p>
+    <p>Поэтому вопрос ставится не «что дешевле», а «что вам нужно»:</p>
+    <ul>
+      <li><strong>Убрать данные</strong> — это <code>DELETE</code> (а на больших объёмах — партиции, ниже).
+        <code>UPDATE</code> данные не убирает: строки остаются живыми, а мёртвые версии всё равно появляются.</li>
+      <li><strong>Пометить, но сохранить</strong> (история, аудит, восстановление) — это
+        <code>UPDATE status</code>. Цена — те же N мёртвых версий плюс, если <code>status</code> индексирован,
+        рост индекса. Это выбор по смыслу, а не «оптимизация блоата».</li>
+      <li><strong>Обратный сценарий</strong> (3 строки удалить, миллион обновить): плох именно
+        <code>UPDATE</code> на миллионе — миллион мёртвых версий и миллион записей в индекс, если колонка
+        индексирована. Три удалённые строки незаметны ни в статистике, ни в размерах.</li>
+    </ul>
+    <p>Единственное, что действительно снижает цену обновления, — HOT (третья строка таблицы): ноль новых
+      записей в индексах. Мёртвые версии при этом остаются — HOT экономит индекс, а не работу
+      <code>VACUUM</code>. И работает он не «всегда для неиндексируемых колонок», а только пока в странице есть
+      место: в том же замере при <code>fillfactor = 85</code> и обновлении первых 10 000 строк подряд HOT
+      сработал лишь для <strong>2 258 из 10 000</strong> — страницы, где меняются почти все строки, заполняются,
+      и новые версии уходят в другие страницы.</p>
+
+    <h3>Когда <code>DELETE</code> действительно плох: объём</h3>
+    <p>Плох не <code>DELETE</code> как команда, а <em>массовое</em> удаление одним куском. 120 000 строк,
+      удаляем январь — 40 000 строк:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- events_flat: обычная таблица, 120 000 строк (по 40 000 на месяц)
+DELETE FROM events_flat WHERE created_at &lt; '2024-02-01';   -- DELETE 40000
+-- 40 000 строк стали мёртвыми версиями; файл таблицы тот же: 11 MB → 11 MB</code></pre>
+    </div>
+    <p>Те же 40 000 строк, но данные лежат в партициях по месяцам — тогда мы удаляем не строки, а целый
+      файл:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- events: те же данные, но PARTITION BY RANGE (created_at), партиция на месяц
+ALTER TABLE events DETACH PARTITION events_2024_01;   -- отсоединили партицию
+DROP TABLE  events_2024_01;                           -- и удалили её файл</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Способ</th><th>Время</th><th>Мёртвых версий</th><th>Размер данных</th></tr></thead>
+      <tbody>
+        <tr><td><code>DELETE</code> 40 000 строк</td><td>26.3 ms</td><td><strong>40 000</strong></td>
+          <td>11 MB → 11 MB</td></tr>
+        <tr><td><code>DETACH PARTITION</code> + <code>DROP TABLE</code></td>
+          <td>5.0 ms + 8.7 ms</td><td><strong>0</strong></td><td>11 MB → 7360 kB</td></tr>
+      </tbody>
+    </table>
+    <p>Разница не в скорости, а в том, что остаётся после. <code>DELETE</code> оставляет 40 000 мёртвых
+      версий, и даже <code>VACUUM</code> их только «обнулит»: место вернётся внутрь файла (11 MB → 11 MB),
+      а операционной системе его отдаст лишь <code>VACUUM FULL</code> или <code>pg_repack</code>.
+      <code>DETACH</code> + <code>DROP</code> не создаёт мёртвых версий вообще — удаляется целый файл, и место
+      освобождается сразу. Поэтому «удалять данные секциями, а не строками» — не стилистика, а разница в разы
+      (глава 26).</p>
+
+    <p><strong>Остальные рычаги — на стороне приложения:</strong></p>
     <ul>
       <li><strong>Меняйте как можно меньше колонок</strong> за одно обновление: если затронуты только
-        неиндексируемые поля, HOT продолжает работать.</li>
+        неиндексируемые поля и в странице есть место, HOT продолжает работать.</li>
       <li><strong>Не индексируйте <code>updated_at</code></strong>, если он обновляется постоянно и сам по себе не
         используется в условиях поиска.</li>
       <li><strong>Не держите длинных транзакций и «висящих» соединений</strong> (глава 22): они не дают чистить
@@ -184,7 +260,11 @@ UPDATE orders SET status = 'expired' WHERE status = 'new' AND created_at &lt; :c
         <li>Лечение: настройки autovacuum для конкретной таблицы, <code>fillfactor</code>, HOT-дружелюбные индексы,
           секционирование вместо массовых <code>DELETE</code>, <code>pg_repack</code> вместо
           <code>VACUUM FULL</code> на живой базе.</li>
-        <li>Чистке мешают долгие транзакции и <code>idle in transaction</code> — сначала убираем их.</li>
+        <li><strong>Чистке мешают долгие транзакции и <code>idle in transaction</code> — сначала убираем их.</strong></li>
+        <li><strong><code>DELETE</code> и <code>UPDATE</code> дают одинаковое число мёртвых версий</strong> — по
+          одной на строку. Решают объём (сколько строк) и колонки (индексированы ли они), а не тип команды:
+          <code>UPDATE</code> индексируемой колонки дороже, чем <code>DELETE</code>. Массовое удаление — только
+          через <code>DETACH</code> + <code>DROP</code> партиции: там мёртвых версий нет вообще.</li>
       </ul>
     </div>
 
