@@ -176,7 +176,8 @@ FROM   outbox
 WHERE  status = 'pending'
 ORDER  BY created_at
 LIMIT  10
-FOR UPDATE SKIP LOCKED;      -- занятые другими воркерами строки просто пропускаем
+FOR UPDATE SKIP LOCKED;      -- чужие (заблокированные) строки в этот ответ НЕ попадут:
+                             -- они остаются в таблице и достанутся следующему проходу
 
 -- дальше — UPDATE ... SET status = 'in_progress' и COMMIT: строки освободятся
 -- для остальных, но уже со статусом in_progress</code></pre>
@@ -187,10 +188,174 @@ FOR UPDATE SKIP LOCKED;      -- занятые другими воркерами
         остальные ждут — параллелизм нулевой. С <code>SKIP LOCKED</code> каждый воркер берёт <em>свободные</em>
         строки, и они не мешают друг другу. Это ровно тот приём, которым устроены очереди в PostgreSQL (и
         воркер outbox в .NET-разделе).</p>
-      <p>Ограничения: <code>SKIP LOCKED</code> нельзя использовать для «прочитать все данные» — вы
-        <strong>осознанно теряете</strong> занятые строки в этом запросе. И он бесполезен без индекса по
-        условию выборки.</p>
+      <p>Цена: это не «прочитать все данные», а «взять свободную пачку прямо сейчас» — занятые строки в ответ
+        не попадут. С ними при этом ничего не случится: они остаются в таблице в прежнем виде. Подробно, куда
+        они деваются и где здесь настоящая опасность, — следующий раздел. И без индекса по условию выборки
+        приём бесполезен: каждый воркер будет читать всю таблицу.</p>
     </div>
+
+    <h3>Что происходит с «пропущенными» строками</h3>
+    <p>«Пропускаем» здесь значит ровно одно: <strong>этот запрос такие строки не вернул</strong>. С самими
+      строками ничего не произошло — они не удалены, не изменены, статус прежний. Их просто держит чужая
+      транзакция, поэтому в ответ они попасть не могут. Дальше всё зависит от того, запускается запрос
+      <em>ещё раз</em> или нет: это и есть разница между нормой и багом.</p>
+
+    <p><strong>Случай 1: воркеров несколько, очередь разбирается циклами.</strong> Возьмём простую таблицу
+      очереди на пять строк и двух воркеров (проверено на двух сессиях):</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE TABLE jobs (
+    id     int  PRIMARY KEY,
+    status text NOT NULL DEFAULT 'pending',   -- pending | in_progress | sent | done
+    worker text
+);
+INSERT INTO jobs (id) SELECT generate_series(1, 5);
+
+-- воркер A: взял первые две и «работает» (транзакция ещё открыта)
+BEGIN;
+WITH picked AS (
+    SELECT id FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs j SET status = 'in_progress', worker = 'A'
+FROM picked p WHERE j.id = p.id
+RETURNING j.id;
+--  id
+-- ----
+--   1
+--   2
+
+-- воркер B: тот же запрос, пока A не закоммитил
+BEGIN;
+SELECT id FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED;
+--  id
+-- ----
+--   3      ← 1 и 2 «пропущены»: они заняты, но НЕ изменены
+--   4
+
+-- как таблица выглядит для B в этот момент
+SELECT id, status FROM jobs ORDER BY id;
+--  id | status
+-- ----+---------
+--   1 | pending   ← занятая строка по-прежнему pending: A ещё не закоммитил,
+--   2 | pending      и с самой строкой ничего не случилось
+--   3 | pending
+--   4 | pending
+--   5 | pending</code></pre>
+    </div>
+    <p>Теперь A падает — <code>ROLLBACK</code> вместо <code>COMMIT</code> (истёк таймаут, умер процесс). Строки
+      1 и 2 снова свободны, и следующий проход B берёт именно их:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT id FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED;
+--  id
+-- ----
+--   1
+--   2</code></pre>
+    </div>
+    <p>Ни одна строка не потеряна. «Пропустить» = «оставить тому, кто её уже держит, или следующему
+      проходу».</p>
+
+    <p><strong>Случай 2: запрос запускается один раз.</strong> Вот здесь и появляется настоящая опасность.
+      Задача «пометить все <code>pending</code> как отправленные», один прогон, и в это время строку 1
+      заблокировала другая сессия:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH picked AS (
+    SELECT id FROM jobs WHERE status = 'pending' ORDER BY id FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs j SET status = 'sent', worker = 'oneshot'
+FROM picked p WHERE j.id = p.id;
+-- UPDATE 4                      ← не 5
+
+SELECT count(*) FROM jobs WHERE status = 'pending';
+--  1
+
+SELECT id, status FROM jobs ORDER BY id;
+--  1 | pending    ← осталась необработанной; никто её больше не возьмёт,
+--  2 | sent         если задачу не запускают снова
+--  3 | sent
+--  4 | sent
+--  5 | sent</code></pre>
+    </div>
+    <p>Ошибки при этом не было: запрос честно сделал то, о чём его просили, — обновил строки, которые удалось
+      заблокировать сразу. «Обновить <em>все</em>» и <code>SKIP LOCKED</code> — взаимоисключающие требования, и
+      документация формулирует это прямо:</p>
+    <div class="box note">
+      <span class="t">Формулировка из документации PostgreSQL</span>
+      <p>«With <code>SKIP LOCKED</code>, any selected rows that cannot be immediately locked are skipped.
+        Skipping locked rows provides an inconsistent view of the data, so this is not suitable for general
+        purpose work, but can be used to avoid lock contention with multiple consumers accessing a queue-like
+        table» (<code>SELECT</code>, «The Locking Clause»).</p>
+      <p>То есть <em>inconsistent view</em> — не побочный эффект, а суть режима: он отвечает на вопрос «что
+        свободно прямо сейчас», а не «всё ли обработано».</p>
+    </div>
+
+    <p><strong>Как не бояться последствий.</strong> Осознанность здесь — не «закрыть глаза на потерянные
+      строки», а перенести гарантию с запроса на цикл. Запрос с <code>SKIP LOCKED</code> — это «взять пачку
+      сейчас», а «разобрать очередь» — это повторять, пока пачка не окажется пустой:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">DO $$
+DECLARE n int;
+BEGIN
+    LOOP
+        WITH picked AS (
+            SELECT id FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED
+        )
+        UPDATE jobs j SET status = 'done', worker = 'loop'
+        FROM picked p WHERE j.id = p.id;
+        GET DIAGNOSTICS n = ROW_COUNT;
+        RAISE NOTICE 'проход: обновлено %', n;
+        EXIT WHEN n = 0;               -- пачка пустая = свободных строк не осталось
+    END LOOP;
+END $$;
+-- NOTICE:  проход: обновлено 2
+-- NOTICE:  проход: обновлено 2
+-- NOTICE:  проход: обновлено 0</code></pre>
+    </div>
+    <p>В этом прогоне строка 1 была заблокирована «зависшим» воркером, поэтому цикл закончился, когда свободных
+      строк не осталось, — хотя <strong>одна строка всё ещё была <code>pending</code></strong>. Отсюда важная
+      тонкость: <em>«0 строк» значит «нет свободных», а не «таблица пуста»</em>. Когда блокировка снялась, тот
+      же цикл забрал остаток (<code>проход: обновлено 1</code>, затем <code>0</code>).</p>
+    <p>Значит, строка «висит» ровно столько, сколько её держит чужая транзакция. Если держатель исчез — она
+      вернётся в очередь (случай 1 выше). Если держатель «завис» — её не возьмёт никто, и именно поэтому на
+      транзакции ставят таймауты (глава 22). Следить при этом надо не за счётчиком «сколько обработано», а за
+      <strong>возрастом самой старой необработанной строки</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- «лага» очереди: таблица outbox из главы 31 .NET-раздела
+SELECT count(*)                 AS pending,
+       now() - min(occurred_at) AS oldest_age   -- растёт → очередь никто не разбирает
+FROM   outbox
+WHERE  status = 'new';</code></pre>
+    </div>
+
+    <p><strong>Вторая плата — порядок.</strong> <code>SKIP LOCKED</code> ослабляет <code>ORDER BY</code>: пока
+      «первая» строка занята, её обгоняют более молодые. Одна и та же ситуация, два запроса (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- строка 1 заблокирована другой сессией
+SELECT id FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED;
+--  2, 3                       ← «первая» строка пропущена, хотя ORDER BY просит её
+-- Time: 4.005 ms
+
+SELECT id FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 2 FOR UPDATE;
+--  1, 2                       ← порядок соблюдён, но запрос ждал, пока отпустят строку
+-- Time: 5952.691 ms</code></pre>
+    </div>
+    <p>То есть «строго по порядку» и «воркеры не ждут друг друга» — тоже выбор: <code>SKIP LOCKED</code>
+      покупает параллелизм ценой порядка. Для очереди это обычно нормально (важнее не простаивать), для
+      «обработать в порядке поступления» — нет.</p>
+
+    <p><strong>Итог: что именно вы «осознанно» принимаете.</strong></p>
+    <ul>
+      <li><strong>Отказываетесь от свойства «один запрос покрывает все подходящие строки»</strong> — и получаете
+        взамен другое: воркеры не выстраиваются в очередь за одной и той же первой строкой. Это не потеря
+        данных, а другой контракт: «дай свободные», а не «сделай всё».</li>
+      <li><strong>Гарантия «всё будет обработано» переезжает в цикл</strong> и подтверждается метрикой (возраст
+        самой старой необработанной строки). Запрос с <code>SKIP LOCKED</code> сам по себе такой гарантии не
+        даёт — и не должен.</li>
+      <li><strong>Повторная обработка возможна:</strong> если держатель сделал внешний эффект (отправил
+        сообщение) и упал до <code>COMMIT</code>, строка вернётся в <code>pending</code> и будет взята снова —
+        отсюда требование идемпотентности у обработчика (глава 31 .NET-раздела).</li>
+      <li><strong>Нельзя</strong> там, где нужны <em>все</em> строки: backfill, миграция, массовая правка,
+        «пометить всё». Там либо <code>FOR UPDATE</code> без <code>SKIP LOCKED</code> (ждём освобождения), либо
+        цикл с проверкой остатка — как выше.</li>
+    </ul>
 
     <h2>Диагностика: кто кого ждёт</h2>
     <p>Первое, что нужно при «запрос висит», — найти <strong>ожидание</strong>, а не гадать по логам приложения.
@@ -410,6 +575,9 @@ SELECT pg_advisory_lock(42);</code></pre>
           <code>40001</code>, <code>40P01</code>, <code>55P03</code> — по SQLSTATE</td></tr>
         <tr><td><code>FOR UPDATE</code> без <code>SKIP LOCKED</code> в очереди</td><td>Воркеры ждут друг
           друга, параллелизм нулевой</td><td><code>FOR UPDATE SKIP LOCKED</code> + индекс по условию</td></tr>
+        <tr><td><code>SKIP LOCKED</code> в одноразовой задаче («обработать всё»)</td><td>Часть строк молча
+          остаётся необработанной: <code>UPDATE 4</code> вместо 5</td><td>Цикл до пустой пачки или
+          <code>FOR UPDATE</code> без <code>SKIP LOCKED</code></td></tr>
         <tr><td>Advisory-замок взят и «отпущен» в другом соединении</td><td>Замок остаётся висеть, задача
           блокируется навсегда</td><td><code>pg_try_advisory_xact_lock</code> в той же транзакции</td></tr>
         <tr><td><code>lock_timeout = 0</code> (по умолчанию)</td><td>Запрос ждёт вечно, клиент — до
@@ -444,6 +612,9 @@ SELECT pg_advisory_lock(42);</code></pre>
           таблицу, потому что новые запросы встают за ним. Лечится <code>lock_timeout</code> + повтор.</li>
         <li><strong>«Прочитать и изменить»</strong> — <code>SELECT … FOR UPDATE</code>; очереди —
           <code>FOR UPDATE SKIP LOCKED</code>; «не ждать» — <code>NOWAIT</code>.</li>
+        <li><strong><code>SKIP LOCKED</code> — «взять пачку», а не «обработать всё»:</strong> пропущенные
+          строки остаются в таблице и достаются следующему проходу. Опасен только одноразовый запуск (часть
+          строк молча не обработана) и потеря порядка — занятую «первую» обгоняют молодые.</li>
         <li><strong>Дедлок</strong> — следствие разного порядка захвата; база откатывает одну транзакцию с
           <code>40P01</code>, и это надо повторять. Одинаковый порядок (<code>ORDER BY id</code>) убирает
           причину.</li>
