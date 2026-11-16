@@ -91,7 +91,33 @@
     </div>
 
     <h2>Запуск и первая проверка</h2>
-    <p>Для локальной работы достаточно официального образа. Ниже — реальный вывод на Redis 7.4:</p>
+    <p><strong>Почему вообще что-то запускать.</strong> Redis — это <em>отдельный процесс-сервер</em>, а не
+      библиотека внутри приложения: .NET-клиент открывает TCP-соединение на порт <code>6379</code> и
+      пересылает команды по нему. Без запущенного сервера не выполнится ни один пример книги —
+      <code>ConnectionMultiplexer.Connect</code> просто некуда подключаться (что именно он при этом
+      скажет — глава 2).</p>
+    <p><strong>Почему в книге Docker.</strong> Только ради воспроизводимости: образ
+      <code>redis:7-alpine</code> даёт ровно ту версию, на которой получены все выводы ниже (7.4.12),
+      ничего не ставит в систему и убирается одной командой. <strong>Docker не обязателен</strong> —
+      подойдёт любой Redis 7, а всей книге дальше нужен только адрес и порт <code>localhost:6379</code>:</p>
+    <table>
+      <tr><th>Как поднять сервер</th><th>Команды</th><th>Когда удобно</th></tr>
+      <tr><td>Docker (как в книге)</td>
+        <td><code>docker run --rm -d --name redis7 -p 6379:6379 redis:7-alpine</code></td>
+        <td>чисто и воспроизводимо: версия зафиксирована, в системе ничего не остаётся</td></tr>
+      <tr><td>Debian / Ubuntu</td>
+        <td><code>sudo apt install redis-server</code>, затем <code>redis-server</code> (или
+          <code>systemctl start redis-server</code>)</td>
+        <td>сервер нужен постоянно, Docker не хочется ставить</td></tr>
+      <tr><td>macOS</td>
+        <td><code>brew install redis</code>, затем <code>brew services start redis</code></td>
+        <td>локальная разработка на Mac</td></tr>
+      <tr><td>Готовый сервис</td>
+        <td>строка подключения от провайдера (Azure Cache for Redis, Redis Cloud и т. п.)</td>
+        <td>не хочется администрировать; там же TLS и пароль</td></tr>
+    </table>
+    <p>Версия из дистрибутива может быть старше 7.4 — тогда часть чисел в книге будет отличаться; для
+      точного совпадения выводов берите Docker или проверяйте <code>redis-server --version</code>.</p>
     <div class="codewrap">
       <pre><code class="language-bash">docker run --rm -d --name redis7 -p 6379:6379 redis:7-alpine
 
@@ -104,6 +130,18 @@ docker exec redis7 redis-cli info server | grep -E 'redis_version|redis_mode'
     </div>
     <p>Порт <code>6379</code> — стандартный; <code>PONG</code> означает, что сервер принял соединение и ответил
       на <code>PING</code>. Дальше можно работать из <code>redis-cli</code> или из кода.</p>
+    <ul>
+      <li><code>docker exec redis7 …</code> — «выполнить команду внутри уже запущенного контейнера». Если
+        Redis у вас нативный, те же команды вызываются напрямую: <code>redis-cli ping</code>,
+        <code>redis-cli info server</code>. Результат одинаковый — меняется только способ попасть в
+        <code>redis-cli</code>.</li>
+      <li><code>--rm</code> в <code>docker run</code> — контейнер удалится сам, когда его остановят:
+        <code>docker stop redis7</code>. Без <code>--rm</code> он остался бы в списке
+        <code>docker ps -a</code>.</li>
+      <li>Порт занят (<code>port is already allocated</code>) — значит на <code>6379</code> уже слушает
+        другой Redis. Тогда либо переиспользуйте его, либо пробросьте другой порт:
+        <code>-p 6380:6379</code> (тогда и в строке подключения будет <code>localhost:6380</code>).</li>
+    </ul>
 
     <h2>Как с ним говорят из .NET</h2>
     <p>Уровней два, и путать их не стоит:</p>

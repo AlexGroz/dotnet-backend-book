@@ -140,15 +140,52 @@ localhost:6399/Interactive, …</code></pre>
       командой <code>KEYS</code> нельзя: она просматривает <em>всё</em> и блокирует сервер. Для перебора
       используют <code>SCAN</code> — он идёт порциями, через курсор:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var keys = new List&lt;string&gt;();
-await foreach (var k in srv.KeysAsync(pattern: "user:*"))
+      <pre><code class="language-csharp">// mux и db — из примера выше: тот же процесс, одно соединение
+var srv = mux.GetServer("localhost:6379");
+//   IServer — «серверная» часть клиента. У IDatabase команды уровня базы
+//   (GET/SET/HGET/…), у IServer — уровня сервера: SCAN, INFO, CONFIG,
+//   управление базами, версия. GetServer нового соединения не открывает:
+//   он берёт сервер, который мультиплексор уже знает по этому адресу.
+
+await db.StringSetAsync("user:1:name", "Алексей", TimeSpan.FromSeconds(2));
+await db.StringSetAsync("user:2:name", "Борис");
+
+var keys = new List&lt;string&gt;();
+// KeysAsync(pattern:, pageSize:) — это SCAN: сервер отдаёт очередную порцию
+// (до pageSize ключей) и новый курсор, клиент повторяет запрос, пока курсор
+// не станет 0. Поэтому сервер не блокируется на всё время перебора.
+await foreach (var k in srv.KeysAsync(pattern: "user:*", pageSize: 100))
     keys.Add(k.ToString());
 
 Console.WriteLine($"scan:       {string.Join(",", keys)}");
-// scan:       user:1</code></pre>
+// scan:       user:1:name,user:2:name
+
+await Task.Delay(2200);            // у первого ключа истёк TTL
+keys.Clear();
+await foreach (var k in srv.KeysAsync(pattern: "user:*"))
+    keys.Add(k.ToString());
+Console.WriteLine($"after 2.2s: {string.Join(",", keys)}");
+// after 2.2s: user:2:name</code></pre>
     </div>
-    <p>Пример вернул один ключ — остальные уже истекли по TTL. <code>KeysAsync</code> — обёртка над
-      <code>SCAN</code>; в <code>redis-cli</code> то же делает <code>redis-cli --scan --pattern</code>.</p>
+    <ul>
+      <li><strong>Почему <code>srv</code> — отдельный объект.</strong> Перебор ключей — операция
+        <em>сервера</em>, а не базы: баз в Redis по умолчанию 16
+        (<code>CONFIG GET databases</code> → <code>16</code>). Поэтому в API это
+        <code>IServer</code>, а не <code>IDatabase</code>: <code>GetDatabase()</code> такой возможности
+        не даёт.</li>
+      <li><strong><code>KeysAsync</code> — это <code>SCAN</code>, а не <code>KEYS</code>.</strong>
+        Название сбивает: команды <code>KEYS</code> здесь нет, поэтому нет и её блокировки —
+        <code>pageSize</code> как раз задаёт размер порции.</li>
+      <li><strong>Гарантии <code>SCAN</code> слабые</strong>, и это нужно помнить: порядок не определён,
+        ключ может прийти дважды, добавленные во время обхода ключи можно не увидеть, удалённые —
+        увидеть. Для инвалидации и админки этого достаточно; для «точного списка» — нет.</li>
+      <li><strong><code>pattern</code> фильтрует на сервере, но обход всё равно идёт по всей базе:</strong>
+        <code>SCAN</code> просматривает словарь ключей целиком, просто отдаёт только совпавшие. Поэтому
+        перебор — редкая операция (CLI, фоновая уборка), а не запрос пользователя.</li>
+      <li><strong>То же в <code>redis-cli</code>:</strong> <code>redis-cli --scan --pattern 'user:*'</code>
+        (проверено: <code>user:2:name</code>). <code>redis-cli keys 'user:*'</code> вернёт то же самое,
+        но заблокирует сервер — в проде нельзя.</li>
+    </ul>
 
     <h2>Значения: что именно кладут в Redis</h2>
     <p>По проводу ходят <strong>байты</strong>. <code>RedisValue</code> неявно превращается в строку, число и
