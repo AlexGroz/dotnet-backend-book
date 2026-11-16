@@ -74,8 +74,10 @@ Console.WriteLine($"after 2.2s: exists={await db.KeyExistsAsync("user:1:name")} 
                   $"get=[{await db.StringGetAsync("user:1:name")}]");
 
 // атомарный счётчик
-await db.KeyDeleteAsync("hits");
-await db.StringIncrementAsync("hits");        // 1
+// "hits" — произвольное имя ключа, придуманное в этом примере. В Redis нет
+// предопределённых ключей: ключ существует только пока в него писали.
+await db.KeyDeleteAsync("hits");              // «начать с нуля»; False, если ключа не было
+await db.StringIncrementAsync("hits");        // 1: ключа не было — создан с 0 и увеличен
 await db.StringIncrementAsync("hits", 5);     // 6
 Console.WriteLine($"incr:       {await db.StringGetAsync("hits")}");
 
@@ -104,10 +106,40 @@ set nx:     first=True second=False</code></pre>
         проверяют через <code>.HasValue</code>, а не сравнением с <code>null</code>.</li>
       <li><strong><code>StringIncrementAsync</code> — атомарная операция на сервере:</strong> второй воркер не
         «потеряет» обновление, потому что команда выполняется целиком.</li>
+      <li><strong><code>hits</code> — это имя ключа, которое придумали мы сами.</strong> Никакого
+        «счётчика по умолчанию» в Redis нет: пространство ключей плоское и пустое, ключ появляется в
+        момент первой записи (<code>SET</code>, <code>INCR</code>, <code>HSET</code>…) и исчезает после
+        <code>DEL</code> или истечения TTL. Поэтому <code>hits</code> ничем не отличается от
+        <code>user:1:name</code> — это просто строка-имя, выбранная для примера.</li>
+      <li><strong><code>KeyDeleteAsync</code> перед счётчиком — чтобы пример начинался с нуля.</strong>
+        <code>INCR</code> не сбрасывает значение, а продолжает: если запустить программу второй раз без
+        удаления, получится <code>7</code>, а не <code>1</code>. Возвращает метод
+        <code>bool</code>: <code>False</code>, если ключа не было, — это не ошибка, повторное удаление
+        безопасно.</li>
+      <li><strong><code>INCR</code> на отсутствующем ключе создаёт его</strong> со значением
+        <code>0</code> и возвращает <code>1</code>. Тип после этого — строка
+        (<code>KeyTypeAsync</code> → <code>String</code>), TTL нет
+        (<code>KeyTimeToLiveAsync</code> → <code>null</code>).</li>
       <li><strong><code>When.NotExists</code> — это <code>SET … NX</code>:</strong> первый вызов вернул
         <code>True</code>, второй — <code>False</code>. На этом строится и распределённый лок (глава 4), и
         защита от параллельного прогрева кэша.</li>
     </ul>
+    <div class="box note">
+      <span class="t">Что происходит с <code>hits</code> на пустом сервере (реальный вывод)</span>
+      <div class="codewrap">
+        <pre><code class="language-text">del (ключа нет): False     ← KeyDeleteAsync: удалять нечего, и это не ошибка
+exists:          False     ← ключа действительно нет: по умолчанию не заведено ничего
+incr:            1         ← INCR создал ключ: 0 + 1
+incr +5:         6
+get:             6  type=String ttl=   ← тип string, TTL не задан (null)
+incr (повтор):   7         ← без KeyDelete счётчик продолжил бы с прошлого значения
+del (ключ есть): True      ← а теперь удалять было что
+exists:          False</code></pre>
+      </div>
+      <p>В приложении такие имена не пишут руками: ключ собирают из префикса и идентификатора
+        (<code>$"user:{id}:hits"</code>) или держат строки-константы в одном месте — чтобы по имени было
+        видно, чей это ключ (раздел про префиксы ниже).</p>
+    </div>
     <h2>Что означают ошибки подключения</h2>
     <p>Поведение при недоступном сервере зависит от одного флага в строке подключения, и разница
       принципиальная. Проверено на закрытом порту:</p>

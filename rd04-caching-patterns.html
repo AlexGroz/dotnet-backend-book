@@ -70,12 +70,15 @@ public sealed class CatalogCache(IDatabase db, CatalogRepository repo)
       есть абстракция <code>IDistributedCache</code>, а пакет
       <code>Microsoft.Extensions.Caching.StackExchangeRedis</code> подключает её к Redis. Реальный вывод:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">services.AddStackExchangeRedisCache(o =&gt;
+      <pre><code class="language-csharp">// Program.cs (top-level statements): builder — WebApplicationBuilder
+builder.Services.AddStackExchangeRedisCache(o =&gt;
 {
-    o.Configuration = "localhost:6379";
-    o.InstanceName  = "shop:";                  // префикс всех ключей
+    o.Configuration = "localhost:6379";         // адрес сервера
+    o.InstanceName  = "shop:";                  // префикс ВСЕХ ключей этого приложения
 });
 
+// дальше — в любом сервисе: cache — это IDistributedCache, пришедший из DI
+// (public sealed class CatalogCache(IDistributedCache cache))
 await cache.SetStringAsync("catalog:42", "{\"id\":42}",
     new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(5) });
 
