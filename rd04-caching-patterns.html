@@ -28,23 +28,27 @@
       <code>CatalogRepository</code> ниже — обычный репозиторий поверх <code>DbContext</code>;
       <code>IDatabase</code> приходит из DI (глава 2).</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">public sealed record CatalogItem(int Id, string Title);
+      <pre><code class="language-csharp">public sealed record CatalogItem(int Id, string Title);   // то, что кэшируем
 
+// db — Redis из DI (глава 2), repo — источник истины (PostgreSQL)
 public sealed class CatalogCache(IDatabase db, CatalogRepository repo)
 {
     public async Task&lt;CatalogItem?&gt; GetAsync(int id)
     {
-        var key = $"catalog:v1:{id}";
+        var key = $"catalog:v1:{id}";        // префикс + версия формата + id
 
+        // GET catalog:v1:42 — сначала спрашиваем кэш
         var cached = await db.StringGetAsync(key);
-        if (cached.HasValue)
-            return JsonSerializer.Deserialize&lt;CatalogItem&gt;(cached.ToString());
+        if (cached.HasValue)                 // HasValue, а не «!= null»: значение может быть пустым
+            return JsonSerializer.Deserialize&lt;CatalogItem&gt;(cached.ToString());   // попали в кэш
 
-        var item = await repo.FindAsync(id);              // PostgreSQL
-        if (item is null) return null;
+        // промах: идём в базу за настоящими данными (дорого, но один раз)
+        var item = await repo.FindAsync(id);
+        if (item is null) return null;       // «нет такого» не кэшируем: null — это не данные
 
+        // SET catalog:v1:42 &lt;json&gt; EX 300 — кладём в кэш с TTL 5 минут
         await db.StringSetAsync(key, JsonSerializer.Serialize(item),
-            TimeSpan.FromMinutes(5));                     // TTL обязателен
+            TimeSpan.FromMinutes(5));
         return item;
     }
 }</code></pre>
@@ -73,19 +77,28 @@ public sealed class CatalogCache(IDatabase db, CatalogRepository repo)
       <pre><code class="language-csharp">// Program.cs (top-level statements): builder — WebApplicationBuilder
 builder.Services.AddStackExchangeRedisCache(o =&gt;
 {
-    o.Configuration = "localhost:6379";         // адрес сервера
+    o.Configuration = "localhost:6379";         // адрес сервера (та же строка подключения)
     o.InstanceName  = "shop:";                  // префикс ВСЕХ ключей этого приложения
 });
 
 // дальше — в любом сервисе: cache — это IDistributedCache, пришедший из DI
 // (public sealed class CatalogCache(IDistributedCache cache))
-await cache.SetStringAsync("catalog:42", "{\"id\":42}",
-    new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(5) });
 
-Console.WriteLine(await cache.GetStringAsync("catalog:42"));   // {"id":42}
-Console.WriteLine((await cache.GetAsync("catalog:42"))?.Length); // 9
-await Task.Delay(5500);
-Console.WriteLine($"[{await cache.GetStringAsync("catalog:42")}]"); // []</code></pre>
+// SetStringAsync — «положить строку»; третий аргумент — политика жизни ключа
+await cache.SetStringAsync("catalog:42", "{\"id\":42}",
+    new DistributedCacheEntryOptions
+    {
+        AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(5)   // умрёт через 5 с
+    });
+
+// GetStringAsync — прочитать строку; null, если ключа нет
+Console.WriteLine(await cache.GetStringAsync("catalog:42"));      // {"id":42}
+
+// GetAsync — те же байты, что лежат в Redis: 9 = длина {"id":42}
+Console.WriteLine((await cache.GetAsync("catalog:42"))?.Length);  // 9
+
+await Task.Delay(5500);                                          // пережили TTL
+Console.WriteLine($"[{await cache.GetStringAsync("catalog:42")}]"); // [] — это null в скобках</code></pre>
     </div>
     <p>Две детали, которые видно только в самом Redis:</p>
     <ul>
@@ -95,6 +108,35 @@ Console.WriteLine($"[{await cache.GetStringAsync("catalog:42")}]"); // []</code>
       <li><strong>Промах и истечение — это <code>null</code></strong>, а не исключение; после 5,5 секунд
         вернулось пустое значение.</li>
     </ul>
+    <div class="box note">
+      <span class="t">Что <code>IDistributedCache</code> реально кладёт в Redis</span>
+      <p>Важно один раз увидеть: ключ — это <strong>не строка</strong>, а хеш из трёх полей. Иначе
+        непонятно, почему «руками» такой ключ не прочитать:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">$ redis-cli keys '*'
+shop:probe                  # InstanceName добавил префикс к имени "probe"
+$ redis-cli type shop:probe
+hash                        # ХЕШ, а не string
+$ redis-cli hgetall shop:probe
+absexp
+639304252946046557         # когда истекать: абсолютное время в тиках DateTime
+sldexp
+-1                          # sliding-окно не задано (−1), иначе — его длина
+data
+x                           # сами данные (байты, которые вы положили)
+$ redis-cli pttl shop:probe
+294234                      # сколько осталось жить, мс (≈5 минут из теста)</code></pre>
+      </div>
+      <p>Отсюда практическое следствие: записать такой ключ «в лоб» строкой нельзя — абстракция ждёт
+        хеш. Проверено:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">$ redis-cli set shop:manual manual-value    # положили строку
+$ # а приложение читает через IDistributedCache:
+manual -&gt; RedisServerException: WRONGTYPE Operation against a key holding the wrong kind of value</code></pre>
+      </div>
+      <p>Поэтому кэш из <code>IDistributedCache</code> и «свой» кэш на <code>StackExchange.Redis</code>
+        не смешивают на одних и тех же ключах: форматы разные.</p>
+    </div>
     <p><code>SlidingExpiration</code> в тех же настройках продлевает жизнь ключа при каждом чтении (проверено:
       ключ, записанный с окном 3 секунды, имел в Redis TTL 3), но у него есть цена — «горячий» ключ никогда не
       истечёт, и устаревшее значение может жить бесконечно, пока его читают.</p>
@@ -125,31 +167,39 @@ Console.WriteLine($"[{await cache.GetStringAsync("catalog:42")}]"); // []</code>
     <div class="codewrap">
       <pre><code class="language-csharp">public async Task&lt;CatalogItem?&gt; GetWithLockAsync(int id)   // в том же классе CatalogCache
 {
-    var key     = $"catalog:v1:{id}";
-    var lockKey = $"lock:{key}";
-    var token   = Guid.NewGuid().ToString("N");
+    var key     = $"catalog:v1:{id}";                  // тот же ключ кэша, что и выше
+    var lockKey = $"lock:{key}";                       // отдельный ключ-лок для этого id
+    var token   = Guid.NewGuid().ToString("N");        // «кто взял лок»: уникально для попытки
 
-    // SET lockKey token NX EX 10 — берёт только один
+    // SET lock:{key} &lt;token&gt; NX EX 10 — берёт лок только один:
+    //   NX (When.NotExists) — «поставь, только если ключа нет»,
+    //   EX 10 — лок сам истечёт, если процесс умрёт, не сняв его
     if (await db.StringSetAsync(lockKey, token, TimeSpan.FromSeconds(10), When.NotExists))
     {
         try
         {
-            var item = await repo.FindAsync(id);          // идём в БД один раз
+            var item = await repo.FindAsync(id);       // в базу идёт ОДИН процесс
             if (item is null) return null;
 
+            // заполнили кэш для остальных ожидающих
             await db.StringSetAsync(key, JsonSerializer.Serialize(item), TimeSpan.FromMinutes(5));
             return item;
         }
         finally
         {
-            // снять лок, только если он всё ещё наш (сравнение значения + удаление)
+            // снять лок, только если он всё ещё наш: GET + сравнение с token + DEL
+            // должны быть одной атомарной операцией — иначе можно удалить ЧУЖОЙ лок,
+            // который успел истечь и достаться другому процессу (EVAL на Lua)
             await db.ScriptEvaluateAsync(
                 "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end",
-                new RedisKey[] { lockKey }, new RedisValue[] { token });
+                new RedisKey[] { lockKey },    // KEYS[1] = lock:{key}
+                new RedisValue[] { token });   // ARGV[1] = наш token
         }
     }
 
-    // лок занят: короткая пауза, затем обычное чтение кэша; не дождались — идём в БД сами
+    // лок занят: короткая пауза, чтобы владелец успел заполнить кэш,
+    // затем обычное чтение кэша; если он всё ещё пуст — идём в БД сами
+    // (без лока: лучше лишний запрос, чем ожидание)
     await Task.Delay(50);
     return await GetAsync(id) ?? await repo.FindAsync(id);
 }</code></pre>

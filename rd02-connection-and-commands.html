@@ -37,14 +37,20 @@
     </ul>
     <div class="codewrap">
       <pre><code class="language-csharp">// Program.cs — регистрация в DI: один экземпляр на всё приложение
+// "Redis" — имя строки подключения из appsettings.json (ConnectionStrings:Redis)
 var cs = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379";
+//                                                           ↑ запасной вариант, если в конфиге пусто
 
+// AddSingleton — создать ОДИН раз на процесс; параметр «_» — IServiceProvider,
+// который фабрике здесь не нужен
 builder.Services.AddSingleton&lt;IConnectionMultiplexer&gt;(_ =&gt;
-    ConnectionMultiplexer.Connect(cs));
+    ConnectionMultiplexer.Connect(cs));   // Connect — синхронный, соединение при старте
+                                          // (есть и ConnectAsync — ниже в примере)
 
 // в сервисе — только IDatabase, никаких новых соединений
-public sealed class CatalogCache(IConnectionMultiplexer mux)
+public sealed class CatalogCache(IConnectionMultiplexer mux)   // мультиплексор из DI
 {
+    // GetDatabase() не открывает соединение: это «вид» на базу №0 внутри того же сокета
     private readonly IDatabase _db = mux.GetDatabase();
 }</code></pre>
     </div>
@@ -57,33 +63,48 @@ public sealed class CatalogCache(IConnectionMultiplexer mux)
       Она проверяет всё, на чём держится дальнейшее: время жизни ключа, атомарный счётчик и «поставить, только
       если нет».</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var mux = await ConnectionMultiplexer.ConnectAsync("localhost:6379");
-var db  = mux.GetDatabase();
-var srv = mux.GetServer("localhost:6379");
+      <pre><code class="language-csharp">// ConnectAsync — подключиться к серверу; "localhost:6379" = «хост:порт»
+// (в Docker порт проброшен из контейнера, глава 1)
+var mux = await ConnectionMultiplexer.ConnectAsync("localhost:6379");
 
+var db  = mux.GetDatabase();                 // база №0 — через неё идут команды данных
+var srv = mux.GetServer("localhost:6379");   // «сервер»: версия, INFO, SCAN
+
+// PING — проверка связи; возвращает время ответа (TimeSpan), а не строку «PONG»
 Console.WriteLine($"ping:       {await db.PingAsync()}");
+
+// srv.Version — версия из INFO server, это свойство, а не отдельная команда на каждый вызов
 Console.WriteLine($"server:     {srv.Version}");
 
-// строка с TTL: 2 секунды
+// SET user:1:name "Алексей" EX 2 — значение вместе с TTL 2 секунды
 await db.StringSetAsync("user:1:name", "Алексей", TimeSpan.FromSeconds(2));
+
+// GET user:1:name — значение по ключу
 Console.WriteLine($"get:        {await db.StringGetAsync("user:1:name")}");
+
+// TTL user:1:name — сколько осталось жить; пусто (null) значит «TTL не задан»
 Console.WriteLine($"ttl:        {await db.KeyTimeToLiveAsync("user:1:name")}");
 
+// подождали больше TTL — ключ должен исчезнуть сам, без наших команд
 await Task.Delay(2200);
+
+// EXISTS user:1:name → False, GET → пусто (RedisValue без значения)
 Console.WriteLine($"after 2.2s: exists={await db.KeyExistsAsync("user:1:name")} " +
                   $"get=[{await db.StringGetAsync("user:1:name")}]");
 
 // атомарный счётчик
-// "hits" — произвольное имя ключа, придуманное в этом примере. В Redis нет
-// предопределённых ключей: ключ существует только пока в него писали.
-await db.KeyDeleteAsync("hits");              // «начать с нуля»; False, если ключа не было
-await db.StringIncrementAsync("hits");        // 1: ключа не было — создан с 0 и увеличен
-await db.StringIncrementAsync("hits", 5);     // 6
-Console.WriteLine($"incr:       {await db.StringGetAsync("hits")}");
+// "hits" — имя ключа, придуманное в этом примере; предопределённых ключей в Redis нет
+await db.KeyDeleteAsync("hits");              // DEL hits — «начать с нуля»; False, если ключа не было
+await db.StringIncrementAsync("hits");        // INCR hits: ключа не было → создан с 0, стало 1
+await db.StringIncrementAsync("hits", 5);     // INCRBY hits 5 → 6
+Console.WriteLine($"incr:       {await db.StringGetAsync("hits")}");   // GET hits
 
-// «поставить, только если ключа нет» + TTL — основа локов и лимитов
+// «поставить, только если ключа нет» + TTL — основа локов и лимитов:
+//   "lock:job" — имя лока, "w1"/"w2" — значения-«владельцы» (кто его взял),
+//   When.NotExists = NX, TimeSpan = EX 10: лок истечёт сам, если процесс умрёт
 var nx1 = await db.StringSetAsync("lock:job", "w1", TimeSpan.FromSeconds(10), When.NotExists);
 var nx2 = await db.StringSetAsync("lock:job", "w2", TimeSpan.FromSeconds(10), When.NotExists);
+// первый SET … NX вернул True (лок взят), второй — False (уже занято)
 Console.WriteLine($"set nx:     first={nx1} second={nx2}");</code></pre>
     </div>
     <div class="codewrap">
@@ -172,31 +193,30 @@ localhost:6399/Interactive, …</code></pre>
       командой <code>KEYS</code> нельзя: она просматривает <em>всё</em> и блокирует сервер. Для перебора
       используют <code>SCAN</code> — он идёт порциями, через курсор:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// mux и db — из примера выше: тот же процесс, одно соединение
-var srv = mux.GetServer("localhost:6379");
-//   IServer — «серверная» часть клиента. У IDatabase команды уровня базы
-//   (GET/SET/HGET/…), у IServer — уровня сервера: SCAN, INFO, CONFIG,
-//   управление базами, версия. GetServer нового соединения не открывает:
-//   он берёт сервер, который мультиплексор уже знает по этому адресу.
+      <pre><code class="language-csharp">// mux, db и srv — из примера выше: тот же процесс, одно соединение.
+// srv — это IServer, «серверная» часть клиента (результат mux.GetServer("localhost:6379")):
+//   у IDatabase команды уровня базы (GET/SET/HGET/…), у IServer — уровня сервера:
+//   SCAN, INFO, CONFIG, версия. Перебора ключей в IDatabase нет вообще.
 
-await db.StringSetAsync("user:1:name", "Алексей", TimeSpan.FromSeconds(2));
-await db.StringSetAsync("user:2:name", "Борис");
+await db.StringSetAsync("user:1:name", "Алексей", TimeSpan.FromSeconds(2));   // SET … EX 2
+await db.StringSetAsync("user:2:name", "Борис");                             // SET без TTL
 
 var keys = new List&lt;string&gt;();
 // KeysAsync(pattern:, pageSize:) — это SCAN: сервер отдаёт очередную порцию
 // (до pageSize ключей) и новый курсор, клиент повторяет запрос, пока курсор
 // не станет 0. Поэтому сервер не блокируется на всё время перебора.
 await foreach (var k in srv.KeysAsync(pattern: "user:*", pageSize: 100))
-    keys.Add(k.ToString());
+    keys.Add(k.ToString());                  // RedisKey → string для вывода
 
-Console.WriteLine($"scan:       {string.Join(",", keys)}");
+// порядок SCAN не определён — сортируем, чтобы вывод был стабильным
+Console.WriteLine($"scan:       {string.Join(",", keys.OrderBy(k =&gt; k))}");
 // scan:       user:1:name,user:2:name
 
-await Task.Delay(2200);            // у первого ключа истёк TTL
+await Task.Delay(2200);            // у первого ключа истёк TTL (2 с)
 keys.Clear();
 await foreach (var k in srv.KeysAsync(pattern: "user:*"))
     keys.Add(k.ToString());
-Console.WriteLine($"after 2.2s: {string.Join(",", keys)}");
+Console.WriteLine($"after 2.2s: {string.Join(",", keys.OrderBy(k =&gt; k))}");
 // after 2.2s: user:2:name</code></pre>
     </div>
     <ul>

@@ -40,8 +40,16 @@
     </table>
     <p>Значения по умолчанию (проверено):</p>
     <div class="codewrap">
-      <pre><code class="language-bash">redis-cli config get maxmemory          # maxmemory  0
-redis-cli config get maxmemory-policy   # maxmemory-policy  noeviction</code></pre>
+      <pre><code class="language-bash"># CONFIG GET &lt;параметр&gt; — прочитать настройку работающего сервера
+#   maxmemory — сколько памяти разрешено данным; 0 = лимита нет
+redis-cli config get maxmemory
+maxmemory                    # ← сначала печатается имя параметра
+0                            # ← затем значение (в байтах; 0 = без лимита)
+#   maxmemory-policy — что делать, когда лимит достигнут:
+#   noeviction = ничего не удалять, а отклонять записи с ошибкой
+redis-cli config get maxmemory-policy
+maxmemory-policy
+noeviction</code></pre>
     </div>
     <p>То есть «из коробки» Redis не вытесняет ничего: он просто отказывается писать, когда память кончилась.
       Для кэша это почти всегда неправильная настройка.</p>
@@ -50,22 +58,28 @@ redis-cli config get maxmemory-policy   # maxmemory-policy  noeviction</code></p
     <p>Ограничим память 4 МБ и включим <code>allkeys-lru</code>, затем запишем 20 000 ключей по 200 байт
       (проверено):</p>
     <div class="codewrap">
-      <pre><code class="language-bash">redis-cli config set maxmemory 4mb
-redis-cli config set maxmemory-policy allkeys-lru
+      <pre><code class="language-bash"># CONFIG SET — меняет настройку «на живом» сервере, без перезапуска
+#   (в конфиг-файл это не пишется: после рестарта вернутся прежние значения)
+redis-cli config set maxmemory 4mb                # лимит данных — 4 МБ
+redis-cli config set maxmemory-policy allkeys-lru # при переполнении вытеснять любые ключи по LRU
 
-# 20 000 команд SET через pipe
+# 20 000 команд SET разом через pipe: каждая строка sets.txt — это "SET key value".
+# pipe = конвейер: клиент не ждёт ответа на каждую команду, поэтому в разы быстрее цикла
 redis-cli --pipe &lt; sets.txt
 # All data transferred. Waiting for the last reply...
 # Last reply received from server.
-# errors: 0, replies: 20000
+# errors: 0, replies: 20000       ← 20 000 команд принято, ни одной ошибки
 
+# INFO memory — сколько занято и какая политика действует прямо сейчас
 redis-cli info memory | grep -E 'used_memory_human|maxmemory_policy'
-# used_memory_human:4.00M
+# used_memory_human:4.00M         ← упёрлись в лимит
 # maxmemory_policy:allkeys-lru
 
+# INFO stats → evicted_keys: сколько ключей сервер вытеснил сам, без наших команд
 redis-cli info stats | grep evicted_keys
 # evicted_keys:12796
 
+# DBSIZE — сколько ключей осталось в базе: 20 000 − 12 796 ≈ 7 208
 redis-cli dbsize
 # 7208</code></pre>
     </div>
@@ -75,7 +89,8 @@ redis-cli dbsize
       <span class="t">Обратная сторона: <code>noeviction</code> поверх лимита</span>
       <p>С той же памятью, но с политикой <code>noeviction</code>, запись падает:</p>
       <div class="codewrap">
-        <pre><code class="language-text">redis-cli set probe:key value
+        <pre><code class="language-text"># noeviction: место кончилось, удалять нечего/нельзя — сервер отклоняет запись
+redis-cli set probe:key value
 (error) OOM command not allowed when used memory &gt; 'maxmemory'.</code></pre>
       </div>
       <p>Чтение при этом продолжает работать. Для кэша это означает, что приложение обязано переживать ошибки
@@ -84,12 +99,18 @@ redis-cli dbsize
     <h2>Мониторинг: на что смотреть</h2>
     <p>Три блока <code>INFO</code> закрывают почти все вопросы:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">redis-cli info memory    # used_memory_human, maxmemory_human, maxmemory_policy,
-                         # mem_fragmentation_ratio
-redis-cli info stats     # keyspace_hits, keyspace_misses, evicted_keys, expired_keys,
-                         # rejected_connections, total_commands_processed
-redis-cli info keyspace  # db0:keys=...,expires=...,avg_ttl=...
-redis-cli info clients   # connected_clients, blocked_clients</code></pre>
+      <pre><code class="language-bash"># INFO &lt;раздел&gt; — метрики сервера; в проде их снимает мониторинг, здесь смотрим руками
+redis-cli info memory    # память: used_memory_human — сколько занято,
+                         #   maxmemory_human — лимит, maxmemory_policy — что делать при переполнении,
+                         #   mem_fragmentation_ratio — фрагментация (заметно &gt;1.5 — повод разбираться)
+redis-cli info stats     # счётчики: keyspace_hits / keyspace_misses — эффективность кэша,
+                         #   evicted_keys — сколько вытеснено, expired_keys — сколько истекло по TTL,
+                         #   rejected_connections — отклонено из-за maxclients,
+                         #   total_commands_processed — общая нагрузка
+redis-cli info keyspace  # по базам: db0:keys=2,expires=1,avg_ttl=29268,subexpiry=0
+                         #   keys — всего ключей, expires — из них с TTL, avg_ttl — средний остаток TTL
+redis-cli info clients   # подключения: connected_clients — сколько клиентов,
+                         #   blocked_clients — сколько висит в BLPOP/BRPOP и подобных ожиданиях</code></pre>
     </div>
     <ul>
       <li><strong>Доля попаданий</strong> = <code>keyspace_hits / (keyspace_hits + keyspace_misses)</code>.

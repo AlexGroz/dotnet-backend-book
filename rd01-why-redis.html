@@ -119,14 +119,22 @@
     <p>Версия из дистрибутива может быть старше 7.4 — тогда часть чисел в книге будет отличаться; для
       точного совпадения выводов берите Docker или проверяйте <code>redis-server --version</code>.</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker run --rm -d --name redis7 -p 6379:6379 redis:7-alpine
+      <pre><code class="language-bash"># docker run — запустить контейнер из образа redis:7-alpine (Alpine Linux, ~59 МБ)
+#   --rm        удалить контейнер, когда его остановят (не копить мусор)
+#   -d          в фоне (detached), а не в текущем терминале
+#   --name redis7   имя контейнера, по нему потом обращаемся: docker exec redis7 …
+#   -p 6379:6379    порт 6379 хоста → порт 6379 в контейнере (слева хост, справа контейнер)
+docker run --rm -d --name redis7 -p 6379:6379 redis:7-alpine
 
+# docker exec … redis-cli ping — выполнить ВНУТРИ контейнера команду redis-cli ping
+#   PING — «ты жив?»; ответ PONG значит, что сервер принял соединение
 docker exec redis7 redis-cli ping
 # PONG
 
+# INFO server — паспорт сервера (версия, режим, аптайм); grep оставляет две нужные строки
 docker exec redis7 redis-cli info server | grep -E 'redis_version|redis_mode'
-# redis_version:7.4.12
-# redis_mode:standalone</code></pre>
+# redis_version:7.4.12          ← версия Redis, на ней сняты все выводы в книге
+# redis_mode:standalone         ← одиночный сервер (не cluster/sentinel)</code></pre>
     </div>
     <p>Порт <code>6379</code> — стандартный; <code>PONG</code> означает, что сервер принял соединение и ответил
       на <code>PING</code>. Дальше можно работать из <code>redis-cli</code> или из кода.</p>
