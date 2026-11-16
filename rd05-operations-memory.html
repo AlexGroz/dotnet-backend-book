@@ -77,13 +77,13 @@ redis-cli info memory | grep -E 'used_memory_human|maxmemory_policy'
 
 # INFO stats → evicted_keys: сколько ключей сервер вытеснил сам, без наших команд
 redis-cli info stats | grep evicted_keys
-# evicted_keys:12796
+# evicted_keys:10536
 
-# DBSIZE — сколько ключей осталось в базе: 20 000 − 12 796 ≈ 7 208
+# DBSIZE — сколько ключей осталось в базе: 20 000 − 10 536 = 9 464
 redis-cli dbsize
-# 7208</code></pre>
+# 9464</code></pre>
     </div>
-    <p>Из 20 000 записанных ключей в памяти осталось 7 208, а 12 796 были вытеснены — и ни одна команда не
+    <p>Из 20 000 записанных ключей в памяти осталось 9 464, а 10 536 были вытеснены — и ни одна команда не
       вернула ошибку. Именно этого и ждут от кэша: память ограничена, старые ключи уходят, приложение работает.</p>
     <div class="box warn">
       <span class="t">Обратная сторона: <code>noeviction</code> поверх лимита</span>
@@ -97,36 +97,376 @@ redis-cli set probe:key value
         записи в Redis: не падать, а просто идти в базу.</p>
     </div>
     <h2>Мониторинг: на что смотреть</h2>
-    <p>Три блока <code>INFO</code> закрывают почти все вопросы:</p>
+    <p><code>INFO</code> — команда, которая возвращает снимок состояния сервера: пары «поле: значение».
+      Без аргумента печатает все разделы сразу, с аргументом — только один. Список разделов (реальный вывод
+      на Redis 7.4):</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># INFO &lt;раздел&gt; — метрики сервера; в проде их снимает мониторинг, здесь смотрим руками
-redis-cli info memory    # память: used_memory_human — сколько занято,
-                         #   maxmemory_human — лимит, maxmemory_policy — что делать при переполнении,
-                         #   mem_fragmentation_ratio — фрагментация (заметно &gt;1.5 — повод разбираться)
-redis-cli info stats     # счётчики: keyspace_hits / keyspace_misses — эффективность кэша,
-                         #   evicted_keys — сколько вытеснено, expired_keys — сколько истекло по TTL,
-                         #   rejected_connections — отклонено из-за maxclients,
-                         #   total_commands_processed — общая нагрузка
-redis-cli info keyspace  # по базам: db0:keys=2,expires=1,avg_ttl=29268,subexpiry=0
-                         #   keys — всего ключей, expires — из них с TTL, avg_ttl — средний остаток TTL
-redis-cli info clients   # подключения: connected_clients — сколько клиентов,
-                         #   blocked_clients — сколько висит в BLPOP/BRPOP и подобных ожиданиях</code></pre>
+      <pre><code class="language-bash">redis-cli info | grep '^#'      # какие разделы вообще есть у этого сервера
+# Server
+# Clients
+# Memory
+# Persistence
+# Stats
+# Replication
+# CPU
+# Modules
+# Errorstats
+# Cluster
+# Keyspace
+
+redis-cli INFO MEMORY           # регистр не важен: INFO MEMORY = info memory</code></pre>
     </div>
-    <ul>
-      <li><strong>Доля попаданий</strong> = <code>keyspace_hits / (keyspace_hits + keyspace_misses)</code>.
-        Если она падает — кэш перестал помогать: мало памяти, слишком короткий TTL или ключи не те, что
-        читаются.</li>
-      <li><strong><code>evicted_keys</code> растёт</strong> — память закончилась и кэш вытесняет данные быстрее,
-        чем они успевают пригодиться. Либо увеличивать память, либо уменьшать TTL и объём значений.</li>
-      <li><strong><code>blocked_clients</code></strong> — сколько клиентов висит на <code>BLPOP</code> и
-        подобных командах; резкий рост означает, что потребители ждут, а producer не успевает.</li>
-      <li><strong><code>mem_fragmentation_ratio</code></strong> заметно больше единицы — память фрагментирована;
-        помогает перезапуск или включение <code>activedefrag</code> (настройка сервера).</li>
-      <li><strong><code>rejected_connections</code></strong> — упёрлись в <code>maxclients</code>: обычно это
-        утечка соединений (например, мультиплексор создаётся на каждый запрос).</li>
-    </ul>
+
+    <div class="box note">
+      <span class="t">Где вводятся эти команды</span>
+      <p>В книге команды записаны коротко: <code>redis-cli info memory</code>. Это то, что набирают
+        <em>внутри контейнера</em> с Redis (он запущен в главе 1 под именем <code>redis7</code>). Три
+        равнозначных способа — все запускаются из обычного терминала на вашей машине:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash"># 1) одной строкой: redis-cli запускается внутри контейнера, вывод приходит в ваш терминал
+docker exec redis7 redis-cli info memory
+
+# 2) войти в оболочку redis-cli и вводить команды там — уже без «redis-cli» и без «docker»
+docker exec -it redis7 redis-cli
+127.0.0.1:6379> info keyspace     # приглашение «127.0.0.1:6379>» = вы внутри redis-cli
+127.0.0.1:6379> quit              # выход
+
+# 3) если redis-cli установлен на хосте, а порт опубликован (-p 6379:6379 из главы 1)
+redis-cli -h localhost -p 6379 info memory</code></pre>
+      </div>
+      <p>Для команд, читающих файл со stdin, контейнеру нужен флаг <code>-i</code>:
+        <code>docker exec -i redis7 redis-cli --pipe &lt; sets.txt</code> — так и снимались цифры про вытеснение
+        выше. На сам вывод способ запуска не влияет: ниже он ровно такой, каким его печатает сервер.</p>
+    </div>
+
+    <h3>1. <code>INFO memory</code> — сколько памяти занято и какой лимит</h3>
+    <p>Печатает раздел <code>Memory</code> целиком — 54 строки (первая строка <code># Memory</code> — это
+      заголовок раздела, тоже часть вывода). Снято на том же сервере, где мы записали 20 000 ключей и часть
+      из них вытеснили:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli info memory
+# Memory
+used_memory:4194248
+used_memory_human:4.00M
+used_memory_rss:11915264
+used_memory_rss_human:11.36M
+used_memory_peak:4218936
+used_memory_peak_human:4.02M
+used_memory_peak_perc:99.41%
+used_memory_overhead:1446352
+used_memory_startup:948552
+used_memory_dataset:2747896
+used_memory_dataset_perc:84.66%
+allocator_allocated:4792080
+allocator_active:5304320
+allocator_resident:10371072
+allocator_muzzy:0
+total_system_memory:15508402176
+total_system_memory_human:14.44G
+used_memory_lua:32768
+used_memory_vm_eval:32768
+used_memory_lua_human:32.00K
+used_memory_scripts_eval:0
+number_of_cached_scripts:0
+number_of_functions:0
+number_of_libraries:0
+used_memory_vm_functions:33792
+used_memory_vm_total:66560
+used_memory_vm_total_human:65.00K
+used_memory_functions:192
+used_memory_scripts:192
+used_memory_scripts_human:192B
+maxmemory:4194304
+maxmemory_human:4.00M
+maxmemory_policy:allkeys-lru
+allocator_frag_ratio:1.10
+allocator_frag_bytes:436208
+allocator_rss_ratio:1.96
+allocator_rss_bytes:5066752
+rss_overhead_ratio:1.15
+rss_overhead_bytes:1544192
+mem_fragmentation_ratio:2.87
+mem_fragmentation_bytes:7759400
+mem_not_counted_for_evict:0
+mem_replication_backlog:0
+mem_total_replication_buffers:0
+mem_clients_slaves:0
+mem_clients_normal:0
+mem_cluster_links:0
+mem_aof_buffer:0
+mem_allocator:jemalloc-5.3.0
+mem_overhead_db_hashtable_rehashing:0
+active_defrag_running:0
+lazyfree_pending_objects:0
+lazyfreed_objects:0</code></pre>
+    </div>
+    <p>Полезных строк здесь меньше, чем кажется. Вот те, на которые действительно смотрят:</p>
+    <table>
+      <thead><tr><th>Поле</th><th>В примере</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>used_memory_human</code></td><td><code>4.00M</code></td><td>Столько Redis считает
+          занятым под данные (в байтах — <code>used_memory:4194248</code>). Упёрлось в лимит ровно в
+          <code>maxmemory</code> — значит, дальше работает вытеснение.</td></tr>
+        <tr><td><code>used_memory_rss_human</code></td><td><code>11.36M</code></td><td>Столько памяти процесс
+          занимает по мнению ОС: данные + фрагментация + служебные буферы.</td></tr>
+        <tr><td><code>used_memory_peak_human</code></td><td><code>4.02M</code></td><td>Максимум за всё время
+          работы — видно, насколько близко сервер подходил к лимиту.</td></tr>
+        <tr><td><code>maxmemory_human</code></td><td><code>4.00M</code></td><td>Действующий лимит.
+          <code>0B</code> означал бы «лимита нет».</td></tr>
+        <tr><td><code>maxmemory_policy</code></td><td><code>allkeys-lru</code></td><td>Что сервер делает при
+          достижении лимита — та самая политика из таблицы выше.</td></tr>
+        <tr><td><code>mem_fragmentation_ratio</code></td><td><code>2.87</code></td><td>Отношение
+          <em>rss / used_memory</em>: ОС отдала процессу 11.36 МБ, а данными занято 4 МБ. Больше 1.5 — память
+          «размазана»: после 20 000 записей и 10 536 вытеснений аллокатор держит освободившиеся страницы.
+          Меньше 1 — часть памяти ушла в swap, это ещё хуже.</td></tr>
+        <tr><td><code>mem_allocator</code></td><td><code>jemalloc-5.3.0</code></td><td>Аллокатор, которым
+          собран сервер: от него и зависит фрагментация.</td></tr>
+        <tr><td><code>active_defrag_running</code></td><td><code>0</code></td><td>Идёт ли сейчас активная
+          дефрагментация (<code>activedefrag yes</code>). Здесь выключена.</td></tr>
+        <tr><td><code>lazyfree_pending_objects</code></td><td><code>0</code></td><td>Сколько больших ключей
+          ждут асинхронного удаления (<code>UNLINK</code>, вытеснение): ключа уже нет, а память ещё не
+          вернулась.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2. <code>INFO stats</code> — счётчики: попадания, вытеснения, ошибки</h3>
+    <p>Раздел <code>Stats</code> целиком — 64 строки накопительных счётчиков с момента старта сервера. Снято
+      на том же сервере (на нём мы записали 20 000 ключей, часть вытеснили, часть прочитали):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli info stats
+# Stats
+total_connections_received:51
+total_commands_processed:21859
+instantaneous_ops_per_sec:1
+total_net_input_bytes:4387253
+total_net_output_bytes:420010
+total_net_repl_input_bytes:0
+total_net_repl_output_bytes:0
+instantaneous_input_kbps:0.05
+instantaneous_output_kbps:0.04
+instantaneous_input_repl_kbps:0.00
+instantaneous_output_repl_kbps:0.00
+rejected_connections:0
+sync_full:0
+sync_partial_ok:0
+sync_partial_err:0
+expired_subkeys:0
+expired_keys:2
+expired_stale_perc:0.00
+expired_time_cap_reached_count:0
+expire_cycle_cpu_milliseconds:21
+evicted_keys:10853
+evicted_clients:0
+evicted_scripts:0
+total_eviction_exceeded_time:0
+current_eviction_exceeded_time:0
+keyspace_hits:14
+keyspace_misses:8
+pubsub_channels:0
+pubsub_patterns:0
+pubsubshard_channels:0
+latest_fork_usec:846
+total_forks:1
+migrate_cached_sockets:0
+slave_expires_tracked_keys:0
+active_defrag_hits:0
+active_defrag_misses:0
+active_defrag_key_hits:0
+active_defrag_key_misses:0
+total_active_defrag_time:0
+current_active_defrag_time:0
+tracking_total_keys:0
+tracking_total_items:0
+tracking_total_prefixes:0
+unexpected_error_replies:0
+total_error_replies:0
+dump_payload_sanitizations:0
+total_reads_processed:2150
+total_writes_processed:2098
+io_threaded_reads_processed:0
+io_threaded_writes_processed:0
+client_query_buffer_limit_disconnections:0
+client_output_buffer_limit_disconnections:0
+reply_buffer_shrinks:2
+reply_buffer_expands:0
+eventloop_cycles:8869
+eventloop_duration_sum:4559898
+eventloop_duration_cmd_sum:20768
+instantaneous_eventloop_cycles_per_sec:12
+instantaneous_eventloop_duration_usec:614
+acl_access_denied_auth:0
+acl_access_denied_cmd:0
+acl_access_denied_key:0
+acl_access_denied_channel:0</code></pre>
+    </div>
+    <p>Строк много, но решения принимаются по этим:</p>
+    <table>
+      <thead><tr><th>Поле</th><th>В примере</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>keyspace_hits</code> / <code>keyspace_misses</code></td><td><code>14</code> /
+          <code>8</code></td><td>Сколько чтений попало в существующий ключ, а сколько вернуло
+          <code>nil</code>. Доля попаданий = 14 / (14 + 8) = <strong>64 %</strong> — это главная метрика
+          эффективности кэша.</td></tr>
+        <tr><td><code>evicted_keys</code></td><td><code>10853</code></td><td>Сколько ключей сервер удалил сам,
+          чтобы уложиться в <code>maxmemory</code>. Растёт постоянно — кэш не держит рабочий набор.</td></tr>
+        <tr><td><code>expired_keys</code></td><td><code>2</code></td><td>Сколько ключей удалено по истечении
+          TTL (у нас — ключи, которые мы записывали с <code>EX 1</code> и <code>EX 300</code>). В
+          <code>evicted_keys</code> такие ключи не попадают: истечение и вытеснение считаются отдельно.</td></tr>
+        <tr><td><code>rejected_connections</code></td><td><code>0</code></td><td>Сколько соединений отклонено,
+          потому что достигнут <code>maxclients</code>. Ноль — хорошая новость; рост означает утечку
+          соединений.</td></tr>
+        <tr><td><code>total_connections_received</code></td><td><code>51</code></td><td>Сколько TCP-соединений
+          открыто за всё время. В нашем случае это ~50 запусков <code>redis-cli</code>. Если такое число
+          быстро растёт на проде — клиент открывает соединение на каждый запрос вместо одного
+          <code>ConnectionMultiplexer</code>.</td></tr>
+        <tr><td><code>total_commands_processed</code></td><td><code>21859</code></td><td>Сколько команд
+          обработано всего (20 000 из них — <code>SET</code> из конвейера).</td></tr>
+        <tr><td><code>instantaneous_ops_per_sec</code></td><td><code>1</code></td><td>Текущая скорость
+          обработки. Как и остальные <code>instantaneous_*</code> (вход/выход в КБ/с, длина цикла событий),
+          это мгновенное значение — именно такие рисуют на графиках, а не накопительные счётчики.</td></tr>
+        <tr><td><code>total_error_replies</code></td><td><code>0</code></td><td>Сколько команд завершились
+          ошибкой (<code>OOM command not allowed</code>, <code>WRONGTYPE</code>). Рост — приложение делает
+          что-то не то.</td></tr>
+        <tr><td><code>total_forks</code> / <code>latest_fork_usec</code></td><td><code>1</code> /
+          <code>846</code></td><td>Сколько раз сервер форкался (снимок RDB, перезапись AOF) и сколько
+          микросекунд занял последний форк. На больших объёмах форк — это уже миллисекунды реальной паузы
+          для всего сервера.</td></tr>
+        <tr><td><code>instantaneous_eventloop_duration_usec</code></td><td><code>614</code></td><td>Сколько
+          микросекунд длится один цикл обработки событий. Раздувается, когда в очереди медленные команды —
+          те самые <code>KEYS *</code>.</td></tr>
+      </tbody>
+    </table>
     <p>В примере с вытеснением счётчики выглядели так: <code>keyspace_hits:14</code>,
-      <code>keyspace_misses:7</code> — доля попаданий 67 % на кэше, куда всё только что записали.</p>
+      <code>keyspace_misses:8</code> — 64 % попаданий на кэше, куда всё только что записали.</p>
+    <div class="box note">
+      <span class="t">Накопительные счётчики против мгновенных значений</span>
+      <p>В <code>Stats</code> почти всё — счётчики <em>за всё время с момента старта</em>: они только растут.
+        В <code>Memory</code> и <code>Keyspace</code> наоборот — <em>текущее</em> состояние. Поэтому два
+        снимка одного сервера могут не сходиться, и это нормально: сразу после записи 20 000 ключей было
+        <code>evicted_keys:10536</code> и <code>dbsize 9464</code>, а через несколько наших экспериментов —
+        уже <code>evicted_keys:10853</code> и 9 148 ключей в базе: мы дописали ещё пару ключей, и вытеснение
+        продолжилось.</p>
+      <div class="codewrap">
+        <pre><code class="language-bash"># счётчики можно обнулить, не перезапуская сервер (например, чтобы мерить «с этого момента»)
+redis-cli config resetstat
+OK
+redis-cli info stats | grep -E 'rejected_connections|total_commands_processed'
+# rejected_connections:0        ← было 1 (эксперимент с maxclients — ниже)
+# total_commands_processed:1    ← в счётчик попала только эта же команда INFO</code></pre>
+      </div>
+    </div>
+
+    <h3>3. <code>INFO keyspace</code> — сколько ключей и сколько из них с TTL</h3>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli info keyspace
+# Keyspace
+db0:keys=9148,expires=1,avg_ttl=0,subexpiry=0</code></pre>
+    </div>
+    <p>Одна строка на каждую непустую базу (<code>db0</code>…<code>db15</code>). Если база пуста, строки для
+      неё нет — на пустом сервере вывод состоит из одного заголовка <code># Keyspace</code>:</p>
+    <ul>
+      <li><code>keys=9148</code> — сколько ключей в базе сейчас: 20 000 записанных − 10 853 вытесненных
+        + 1 наш <code>session:demo</code>.</li>
+      <li><code>expires=1</code> — из них с TTL: только <code>session:demo</code> (остальные 20 000 писали
+        без TTL, и политика <code>allkeys-lru</code> вытесняет в том числе вечные ключи).</li>
+      <li><code>avg_ttl=0</code> — средний остаток TTL по ключам с TTL, в миллисекундах. Ноль здесь не потому,
+        что TTL нет (он есть — <code>expires=1</code>), а потому что снимок снят сразу после записи
+        единственного TTL-ключа: значение считает цикл истечения, а не сама команда <code>SET</code>.
+        Воспроизводится в три команды — <code>flushall</code>, <code>set k v ex 600</code> и сразу
+        <code>info keyspace</code>: время от времени видно <code>avg_ttl=0</code>, а через секунду уже
+        <code>avg_ttl=599900</code>. Когда TTL-ключей много, значение стабильно: 200 ключей по
+        <code>EX 600</code> дают <code>db0:keys=200,expires=200,avg_ttl=599819,subexpiry=0</code>.</li>
+      <li><code>subexpiry=0</code> — сколько <em>полей хешей</em> имеют собственный TTL (команда
+        <code>HEXPIRE</code>, новое в Redis 7.4). Проверяется в две команды: <code>hset h:1 a 1 b 2</code> →
+        <code>subexpiry=0</code>; <code>hexpire h:1 100 fields 1 a</code> → <code>subexpiry=1</code> (у поля
+        <code>a</code> свой TTL 100 секунд, <code>hpttl h:1 fields 1 a</code> → <code>99857</code>).</li>
+    </ul>
+
+    <h3>4. <code>INFO clients</code> — подключения и те, кто ждёт</h3>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli info clients
+# Clients
+connected_clients:1
+cluster_connections:0
+maxclients:10000
+client_recent_max_input_buffer:0
+client_recent_max_output_buffer:0
+blocked_clients:0
+tracking_clients:0
+pubsub_clients:0
+watching_clients:0
+clients_in_timeout_table:0
+total_watched_keys:0
+total_blocking_keys:0
+total_blocking_keys_on_nokey:0</code></pre>
+    </div>
+    <p>Смысл полей: <code>connected_clients:1</code> — прямо сейчас подключён один клиент (сам
+      <code>redis-cli</code>; предыдущая команда уже отключилась). <code>maxclients:10000</code> — лимит
+      одновременных соединений. <code>blocked_clients:0</code> — никто не висит в ожидании данных
+      (<code>BLPOP</code>, <code>BRPOP</code>, <code>XREAD BLOCK</code>). Команда <code>WAIT</code> в этот
+      счётчик не попадает — проверено: висящий <code>wait 0 5000</code> даёт
+      <code>connected_clients:2</code> при <code>blocked_clients:0</code>, а <code>xread block 5000</code> —
+      <code>blocked_clients:1</code>. Вот как выглядит вывод, когда один клиент действительно ждёт (в
+      соседнем терминале запущен <code>blpop queue:jobs 0</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec -d redis7 sh -c 'redis-cli blpop queue:jobs 0'   # клиент повис в ожидании элемента
+docker exec redis7 redis-cli info clients | head -7
+# Clients
+connected_clients:2
+cluster_connections:0
+maxclients:10000
+client_recent_max_input_buffer:20520
+client_recent_max_output_buffer:0
+blocked_clients:1
+
+docker exec redis7 redis-cli client list
+# id=41 addr=127.0.0.1:45930 ... flags=b ...     ← b = blocked, это наш BLPOP
+# id=43 addr=127.0.0.1:45952 ... flags=N ...     ← N = normal, это сам client list</code></pre>
+    </div>
+    <p>Растущий <code>blocked_clients</code> — сигнал, что потребители ждут, а producer не успевает; но
+      помните, что в <code>BLPOP</code> висит и «нормальный» потребитель очереди, который просто ждёт
+      работы.</p>
+
+    <div class="box warn">
+      <span class="t">Как своими руками получить ненулевой <code>rejected_connections</code></span>
+      <p>Этот счётчик растёт, когда соединений больше, чем <code>maxclients</code>. Чтобы увидеть, а не
+        поверить на слово, эксперимент делали на отдельном контейнере (порт 6380), чтобы не ломать основной:
+        ставим лимит 1, занимаем его висящим <code>BLPOP</code>, затем пробуем подключиться ещё раз.</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">docker run -d --name redistest -p 6380:6379 redis:7-alpine   # отдельный сервер для опытов
+docker exec redistest redis-cli config set maxclients 1
+OK
+docker exec -d redistest sh -c 'redis-cli blpop q 0'   # единственное разрешённое соединение занято
+docker exec redistest redis-cli ping
+ERR max number of clients reached                        # ← это и считает rejected_connections
+
+# освободили место и посмотрели счётчик
+docker exec redistest sh -c 'pkill -f "redis-cli blpop"'
+docker exec redistest redis-cli config set maxclients 10000
+OK
+docker exec redistest redis-cli info stats | grep rejected_connections
+rejected_connections:1</code></pre>
+      </div>
+      <p>На проде то же самое выглядит как <code>RedisConnectionException</code> в .NET и всплеск
+        <code>rejected_connections</code>: почти всегда это утечка соединений — например,
+        <code>ConnectionMultiplexer</code> создаётся на каждый запрос вместо одного на процесс.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Четыре цифры, по которым видно здоровье Redis</span>
+      <ul>
+        <li><strong>Доля попаданий</strong> <code>keyspace_hits / (hits + misses)</code>: в примере 64 %.
+          Падает — кэш перестал помогать: мало памяти, короткий TTL или ключи не те, что читаются.</li>
+        <li><strong><code>evicted_keys</code> растёт</strong> — памяти не хватает на рабочий набор: либо
+          больше памяти, либо меньше TTL и объём значений.</li>
+        <li><strong><code>blocked_clients</code></strong> — сколько клиентов ждёт в блокирующих командах;
+          устойчивый рост = потребители не успевают.</li>
+        <li><strong><code>mem_fragmentation_ratio</code></strong> стабильно &gt; 1.5 — фрагментация: помогает
+          <code>activedefrag yes</code> или плановый перезапуск; &lt; 1 — память ушла в swap, это хуже.</li>
+      </ul>
+    </div>
+
+
 
     <h2>Персистентность: что теряется при перезапуске</h2>
     <p>У Redis два механизма, и по умолчанию включён только первый:</p>
