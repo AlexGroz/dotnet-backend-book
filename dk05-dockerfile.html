@@ -62,7 +62,8 @@
       <p>Почти. Dockerfile <em>собирает образ</em>. Контейнера на этом этапе ещё нет. Но конфиг
         образа — это, по сути, «инструкция для будущего контейнера»: в нём записано, что запускать
         (<code>ENTRYPOINT</code>/<code>CMD</code>), от какого пользователя (<code>USER</code>), с какими
-        переменными (<code>ENV</code>), какой порт слушать (<code>EXPOSE</code>). Каждый контейнер,
+        переменными (<code>ENV</code>), какой порт заявлен как «портовый» (<code>EXPOSE</code> — сама
+        программа о нём не знает). Каждый контейнер,
         созданный из этого образа, заберёт эти настройки.</p>
     </div>
 
@@ -223,6 +224,8 @@ RUN ["dotnet", "restore"]
 # а) одна команда — одна инструкция: шелла нет, поэтому просто не склеиваем их
 RUN ["apt-get", "update"]
 RUN ["apt-get", "install", "-y", "curl"]
+#    очистки /var/lib/apt/lists/* здесь НЕТ и быть не может: rm отдельным RUN
+#    места не освободит — файлы останутся в предыдущем слое (замер ниже)
 
 # б) шелл вызвать явно: тогда &amp;&amp; и редиректы снова работают
 RUN ["/bin/sh", "-c", "apt-get update &amp;&amp; apt-get install -y curl &amp;&amp; rm -rf /var/lib/apt/lists/*"]
@@ -237,16 +240,40 @@ RUN ["/bin/sh", "-c", "apt-get update &amp;&amp; apt-get install -y curl &amp;&a
       команде на <code>RUN</code> (вариант «а»), либо явный вызов <code>/bin/sh -c</code> (вариант «б»).
       Вариант «б» недоступен в образах без оболочки — там остаётся только «а».</p>
     <div class="box note">
+      <span class="t">Почему в варианте «а» нет <code>rm -rf /var/lib/apt/lists/*</code></span>
+      <p>Это не забытая строка — в exec-форме её <strong>некуда поставить</strong>. Без оболочки две
+        команды в один <code>RUN</code> не склеить (см. ✘ выше), а отдельной инструкцией
+        <code>rm</code> выполняется уже в другом слое и места не освобождает: удаление в верхнем слое
+        лишь <em>помечает</em> файл, а его байты остаются в нижнем. Замер на <code>alpine:3.20</code>
+        (файл 40 МБ, размер смотрим у готового образа):</p>
+      <div class="codewrap">
+        <pre><code class="language-dockerfile"># 1) создали и оставили
+RUN dd if=/dev/zero of=/big bs=1M count=40
+#   docker image inspect --format '{{.Size}}'  →  54 090 368 байт (51,6 МиБ)
+
+# 2) создали, а потом удалили другим слоем
+RUN dd if=/dev/zero of=/big bs=1M count=40
+RUN rm /big
+#                                               →  54 094 933 байта (51,6 МиБ)  ← не уменьшилось
+
+# 3) создали и удалили в одном слое
+RUN dd if=/dev/zero of=/big bs=1M count=40 &amp;&amp; rm /big
+#                                               →  12 106 521 байт (11,5 МиБ)  ← −40 МБ</code></pre>
+      </div>
+      <p>Поэтому установку пакетов с очисткой пишут shell-формой, где <code>&amp;&amp;</code> склеивает
+        всё в один слой (вариант «б»). Вариант «а» годится для шагов из одной команды
+        (<code>RUN ["apt-get", "update"]</code> сам по себе, <code>RUN ["dotnet", "restore"]</code>) —
+        там чистить нечего. А в образах без оболочки пакеты обычно вообще не устанавливают: туда
+        копируют уже собранное приложение (глава 7). Подробнее про слои и почему они не перезаписывают
+        друг друга — глава 3.</p>
+    </div>
+    <div class="box note">
       <span class="t">Тогда зачем вообще exec-форма, если shell удобнее?</span>
       <p>Потому что она <strong>предсказуема</strong>: аргументы не проходят через разбор оболочкой, и
         Docker не нужно, чтобы внутри образа был <code>/bin/sh</code>. В минимальных образах
         (chiseled, distroless) оболочки нет вообще — там <code>RUN ["apt-get", …]</code> единственно
-        возможный вариант (и такие образы обычно ничего не устанавливают, а копируют готовое из стадии
-        сборки — глава 7).</p>
+        возможный вариант.</p>
     </div>
-    <p><strong>Почему установка и очистка — одной строкой:</strong> каждая <code>RUN</code> — отдельный
-      слой, а слои не перезаписывают друг друга. Если разделить «поставил» и «удалил кэш» на два
-      <code>RUN</code>, кэш останется в нижнем слое и образ не уменьшится (подробно — глава 3).</p>
     <div class="box note">
       <span class="t">Что такое <code>/var/lib/apt/lists/*</code> и кто его создал</span>
       <p><code>apt-get update</code> не «обновляет программы» — он скачивает <strong>индексы
@@ -295,8 +322,15 @@ RUN dotnet publish -c Release -o /app -p:Version=$APP_VERSION --no-restore</code
 $ docker inspect --format '{{json .Config.Labels}}' orders-api:1.4.2
 {"version":"1.4.2"}</code></pre>
     </div>
-    <p><strong>Что если не указать <code>ENV</code>:</strong> приложение возьмёт значения по умолчанию
-      (порт 5000) — частая причина «контейнер запустился, а порт не отвечает».</p>
+    <p><strong>Что если не указать <code>ENV</code>:</strong> приложение возьмёт порт из того, что уже
+      задано в образе, а если не задано нигде — свой умолчанный (<code>5000</code> для
+      <code>dotnet run</code> на хосте). Важная деталь: в официальном
+      <code>mcr.microsoft.com/dotnet/aspnet:8.0</code> переменная <strong>уже стоит</strong> —
+      <code>docker image inspect … --format '{{json .Config.Env}}'</code> показывает
+      <code>"ASPNETCORE_HTTP_PORTS=8080"</code> и <code>APP_UID=1654</code>. То есть ваша
+      <code>ENV</code> в Dockerfile — это <em>явное повторение</em> значения базового образа (полезно,
+      когда база сменится или когда порт нужен другой); а вот <code>EXPOSE</code> в этом образе
+      <strong>нет вообще</strong> — <code>null</code> в <code>.Config.ExposedPorts</code>.</p>
     <div class="box warn">
       <span class="t">Секреты не передают ни через <code>ARG</code>, ни через <code>ENV</code></span>
       <p>Оба значения остаются в метаданных образа: <code>docker history --no-trunc</code> покажет
@@ -309,8 +343,10 @@ $ docker inspect --format '{{json .Config.Labels}}' orders-api:1.4.2
       сборки в образ. Ничего не распаковывает и никуда не ходит по сети: взял файл — положил файл.
       Разбор <code>COPY . .</code> был выше, а вот другие формы:</p>
     <div class="codewrap">
-      <pre><code class="language-dockerfile">COPY Orders.Api/Orders.Api.csproj Orders.Api/   # файл → в папку Orders.Api/
-COPY appsettings.Production.json ./             # файл → в текущую папку (WORKDIR)
+      <pre><code class="language-dockerfile"># откуда — на ХОСТЕ (контекст сборки); куда — в ОБРАЗЕ, от текущей папки (WORKDIR = /src)
+COPY Orders.Api/Orders.Api.csproj Orders.Api/   # хост: Orders.Api/Orders.Api.csproj
+                                                # образ: /src/Orders.Api/Orders.Api.csproj
+COPY appsettings.Production.json ./             # файл → в текущую папку: /src/appsettings.Production.json
 COPY wwwroot ./wwwroot                          # папку целиком, со всем содержимым
 COPY --chown=$APP_UID:0 . .                     # скопировать и сразу сменить владельца</code></pre>
     </div>
@@ -322,6 +358,28 @@ COPY --chown=$APP_UID:0 . .                     # скопировать и ср
       <li><code>--chown=uid:gid</code> — сменить владельца на лету; иначе файлы принадлежат
         <code>root</code> (об этом — в разделе про <code>USER</code> и в главе 7).</li>
     </ul>
+    <h4>Почему путь слева и справа выглядит одинаково</h4>
+    <p>Потому что это два <strong>разных места</strong>: слева — диск вашей машины, справа — файловая
+      система образа. Совпадение путей получилось из стандартной раскладки: контекстом сборки выбрали
+      корень репозитория (<code>docker build … .</code>), а <code>WORKDIR</code> — <code>/src</code>;
+      поэтому относительный <code>Orders.Api/</code> с обеих сторон означает «папка
+      <code>Orders.Api</code> от текущей». Сам в себя файл не копируется: в образе его до этой строки
+      не существовало, он создаётся из файла на хосте.</p>
+    <table>
+      <tr><th>Как записано</th><th>Что окажется в образе</th></tr>
+      <tr><td><code>COPY Orders.Api/Orders.Api.csproj Orders.Api/</code></td>
+        <td><code>/src/Orders.Api/Orders.Api.csproj</code> — слэш в конце: «куда» — это папка</td></tr>
+      <tr><td><code>COPY Orders.Api/Orders.Api.csproj Orders.Api/Orders.Api.csproj</code></td>
+        <td><code>/src/Orders.Api/Orders.Api.csproj</code> — то же самое, записано длинно</td></tr>
+      <tr><td><code>COPY Orders.Api/Orders.Api.csproj Orders.Api</code></td>
+        <td><code>/src/Orders.Api</code> — <strong>файл без расширения</strong>: слэша нет, папки
+          <code>Orders.Api</code> в образе ещё нет, значит «куда» — имя файла</td></tr>
+    </table>
+    <p>Проверяется одной командой — <code>docker run --rm образ find /src</code>. Отсюда два вывода:
+      слэш в конце назначения важен, а совпадение путей «слева и справа» — задумано: папка проекта в
+      образе называется так же, как на хосте, и <code>dotnet restore</code> находит проект по тому же
+      относительному пути. Зачем <code>.csproj</code> копируют отдельно от остального кода — глава 6
+      (кэш слоёв).</p>
     <p><code>ADD</code> умеет то же самое <em>плюс</em> два действия, которые выполняет сам, без спроса:</p>
     <table>
       <tr><th>Что в источнике</th><th><code>ADD</code> делает сам</th><th>Чем это плохо</th></tr>
@@ -408,6 +466,80 @@ api     0.0.0.0:8080->8080/tcp</code></pre>
       <li><code>-P</code> — «опубликуй <em>все</em> заявленные в <code>EXPOSE</code> порты, каждый на
         случайный свободный порт машины». Поэтому <code>EXPOSE</code> — не только документация.</li>
     </ul>
+
+    <h4><code>EXPOSE</code> и <code>ENV</code>: в чём разница и заменяют ли они друг друга</h4>
+    <p>Путаница возникает потому, что обе инструкции «говорят про порт». Но адресаты у них разные:
+      <code>ENV</code> настраивает <em>процесс</em> внутри контейнера (в .NET порт читается из
+      <code>ASPNETCORE_HTTP_PORTS</code>), а <code>EXPOSE</code> — это <em>метаданные образа</em> для
+      Docker, приложение о них не знает вообще.</p>
+    <table>
+      <tr><th></th><th><code>ENV ASPNETCORE_HTTP_PORTS=8080</code></th><th><code>EXPOSE 8080</code></th></tr>
+      <tr><td>Что создаёт</td><td>переменную окружения процесса</td>
+        <td>запись в <code>Config.ExposedPorts</code> образа</td></tr>
+      <tr><td>Кто читает</td><td>само приложение (в .NET — через <code>IConfiguration</code>)</td>
+        <td>Docker и инструменты: <code>-P</code>, compose, генераторы манифестов</td></tr>
+      <tr><td>Заставляет приложение слушать этот порт</td><td>да — если приложение читает эту переменную</td>
+        <td>нет, приложение о ней не знает</td></tr>
+      <tr><td>Публикует порт наружу</td><td>нет</td><td>нет (публикует только <code>-p</code>)</td></tr>
+      <tr><td>Влияет на <code>docker run -P</code></td><td>нет</td><td>да</td></tr>
+      <tr><td>Как переопределить при запуске</td><td><code>docker run -e …</code></td>
+        <td><code>docker run -p …</code> или <code>--expose</code></td></tr>
+      <tr><td>Где посмотреть</td><td><code>docker inspect</code> → <code>.Config.Env</code></td>
+        <td><code>docker image inspect</code> → <code>.Config.ExposedPorts</code></td></tr>
+    </table>
+    <p>Замер на двух образах-пустышках (внутри только <code>sleep</code>, никакого приложения —
+      чтобы видно было, что каждая инструкция делает <em>сама по себе</em>):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># образ, в котором есть только ENV ASPNETCORE_HTTP_PORTS=8080
+$ docker image inspect port-test:env --format '{{json .Config.ExposedPorts}}'
+null                                  ← Docker не знает ни про какой порт
+$ docker run -d --name p-env -P port-test:env sleep 60
+$ docker ps --format '{{.Names}}|{{.Ports}}' | grep p-env
+p-env|                                ← -P нечего публиковать
+
+# образ, в котором есть только EXPOSE 8080
+$ docker image inspect port-test:expose --format '{{json .Config.ExposedPorts}}'
+{"8080/tcp":{}}
+$ docker run -d --name p-expose -P port-test:expose sleep 60
+$ docker ps --format '{{.Names}}|{{.Ports}}' | grep p-expose
+p-expose|0.0.0.0:32770->8080/tcp, [::]:32770->8080/tcp
+
+# а публикация работает и без EXPOSE — если порт указать руками
+$ docker run -d --name p-noport -p 8080:8080 port-test:env sleep 60
+$ docker ps --format '{{.Names}}|{{.Ports}}' | grep p-noport
+p-noport|0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+
+# EXPOSE можно добавить при запуске, не пересобирая образ
+$ docker run -d --name p-flag --expose 9000 -P port-test:env sleep 60
+$ docker ps --format '{{.Names}}|{{.Ports}}' | grep p-flag
+p-flag|0.0.0.0:32771->9000/tcp, [::]:32771->9000/tcp</code></pre>
+    </div>
+    <p>Номера 32770/32771 у вас будут другими: это случайные свободные порты машины, их выбирает
+      <code>-P</code>.</p>
+    <p><strong>Взаимозаменяемы ли они:</strong> нет, ни в одну сторону. <code>EXPOSE</code> не заставит
+      приложение слушать 8080 — оно слушает то, что ему сказали через конфиг или переменную окружения.
+      <code>ENV</code> не даст <code>-P</code> ничего опубликовать и не покажет порт в
+      <code>docker ps</code>. В рабочем Dockerfile обычно стоят обе инструкции, и число в них
+      <strong>одно и то же</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile">ENV ASPNETCORE_HTTP_PORTS=8080   # «слушай 8080» — для приложения
+EXPOSE 8080                      # «порт 8080 заявлен» — для Docker</code></pre>
+    </div>
+    <p>Если оставить только <code>EXPOSE 8080</code>, а приложение слушает 5000, получится вывеска на
+      двери, за которой никого нет: <code>-p 8080:8080</code> опубликует порт, соединение дойдёт до
+      контейнера и упрётся в закрытый порт — ответа не будет. И наоборот: одна <code>ENV</code> без
+      <code>EXPOSE</code> работает, но <code>-P</code> и <code>docker ps</code> останутся пустыми, а
+      человек, читающий Dockerfile, не увидит, куда стучаться.</p>
+    <div class="box note">
+      <span class="t">Частный случай: официальные образы .NET</span>
+      <p>В <code>mcr.microsoft.com/dotnet/aspnet:8.0</code> переменная уже задана
+        (<code>ASPNETCORE_HTTP_PORTS=8080</code>), а <code>EXPOSE</code> — нет:
+        <code>docker image inspect … --format '{{json .Config.ExposedPorts}}'</code> возвращает
+        <code>null</code>. Поэтому <code>docker run -P</code> с таким образом ничего не опубликует, и
+        <code>EXPOSE 8080</code> в своём Dockerfile пишут руками — ради документации и <code>-P</code>.
+        Заодно это объясняет, почему у людей «работает без EXPOSE»: порт слушается благодаря переменной
+        из базового образа, а публикует его <code>-p</code>.</p>
+    </div>
     <p>Подробно про порты, интерфейсы и <code>localhost</code> — глава 8.</p>
 
     <h3><code>USER</code>: от какого пользователя работать</h3>
@@ -738,10 +870,13 @@ orders-api    1.4.2   5d3c1b7a9e21   10 seconds ago   1.02GB</code></pre>
         <li><code>WORKDIR</code> задаёт текущую папку; <code>COPY . .</code> — «контекст → текущая
           папка».</li>
         <li><code>RUN</code> — две формы: shell (нужны <code>&amp;&amp;</code>, <code>$VAR</code>) и exec
-          (без шелла); установка и очистка — в одной инструкции.</li>
+          (без шелла, зато и склеить команды нечем — поэтому установка с очисткой пишется shell-формой:
+          <code>rm</code> в отдельном слое место не освобождает).</li>
         <li><code>ARG</code> — только сборка, <code>ENV</code> — и сборка, и запуск; секреты — ни там, ни
           там.</li>
-        <li><code>EXPOSE</code> — документация; <code>USER</code> — non-root; <code>HEALTHCHECK</code> —
+        <li><code>EXPOSE</code> — метаданные для Docker (по ним работает <code>-P</code>), а
+          <code>ENV</code> — настройка самого приложения: это разные вещи, и одно другое не заменяет;
+          <code>USER</code> — non-root; <code>HEALTHCHECK</code> —
           как Docker проверяет живость.</li>
         <li><code>ENTRYPOINT</code> — программа (в exec-форме), <code>CMD</code> — аргументы по
           умолчанию.</li>
