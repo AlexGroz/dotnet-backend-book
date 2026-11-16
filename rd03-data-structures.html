@@ -26,16 +26,26 @@
       изменить, положить обратно» приложение говорит «добавь элемент в множество» — и сервер делает это
       атомарно, не пересылая весь объект. Ниже — пять базовых типов, каждый с реальным выводом. Во всех примерах
       главы <code>db</code> — это <code>IDatabase</code> из мультиплексора (глава 2), а <code>Stopwatch</code> —
-      из <code>System.Diagnostics</code>.</p>
+      из <code>System.Diagnostics</code>. Имена ключей (<code>hits</code>, <code>user:1</code>, <code>board</code>)
+      и элементов (<code>alice</code>, <code>task-1</code>) тоже придуманы: предопределённых ключей в Redis нет,
+      ключ появляется с первой записи (глава 2).</p>
+
+    <p>Договоримся о формате, он одинаковый во всей главе: в коде комментарий рядом со строкой объясняет
+      <strong>команду Redis и её аргументы</strong>, а строки сразу после <code>Console.WriteLine</code> —
+      это <strong>реальный вывод</strong> программы ровно в том виде, в каком он был получен.</p>
 
     <h2>Строка: <code>string</code></h2>
     <p>Универсальное значение: JSON, число, флаг, сериализованный объект. Отдельно ценны атомарные операции
       над числами — <code>INCR</code>/<code>INCRBY</code>:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await db.StringSetAsync("hits", 0);
-await db.StringIncrementAsync("hits");        // 1
-await db.StringIncrementAsync("hits", 5);     // 6
-Console.WriteLine(await db.StringGetAsync("hits"));   // 6</code></pre>
+      <pre><code class="language-csharp">// "hits" — имя ключа-счётчика; имена ключей придумываем мы (глава 2)
+await db.StringSetAsync("hits", 0);          // SET hits 0   — стартовое значение
+
+await db.StringIncrementAsync("hits");       // INCR hits    → 0 + 1 = 1
+await db.StringIncrementAsync("hits", 5);    // INCRBY hits 5 → 1 + 5 = 6
+
+Console.WriteLine($"after incr: {await db.StringGetAsync("hits")}");   // GET hits
+// after incr: 6</code></pre>
     </div>
     <ul>
       <li><strong>Когда:</strong> кэш ответа, счётчик, distributed-флаг, «ключ-значение с TTL».</li>
@@ -48,19 +58,24 @@ Console.WriteLine(await db.StringGetAsync("hits"));   // 6</code></pre>
     <p>Объект, разложенный по полям: <code>HSET user:1 name … plan …</code>. Читать можно как весь объект, так и
       одно поле, и менять одно поле, не пересылая остальные.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await db.HashSetAsync("user:1", new[]
+      <pre><code class="language-csharp">// "user:1" — ключ-хеш; HashEntry — пара «поле + значение»
+await db.HashSetAsync("user:1", new[]
 {
-    new HashEntry("name", "Алексей"),
-    new HashEntry("plan", "pro"),
+    new HashEntry("name", "Алексей"),        // HSET user:1 name Алексей
+    new HashEntry("plan", "pro"),            // HSET user:1 plan pro
 });
 
+// HGETALL user:1 — все поля разом
 var all = await db.HashGetAllAsync("user:1");
-Console.WriteLine(string.Join(", ", all.Select(e =&gt; $"{e.Name}={e.Value}")));
-// name=Алексей, plan=pro
+Console.WriteLine($"hgetall: {string.Join(", ", all.Select(e =&gt; $"{e.Name}={e.Value}"))}");
+// hgetall: name=Алексей, plan=pro
 
+// HSET user:1 visits 10 — заводим счётчик в поле «visits»
 await db.HashSetAsync("user:1", "visits", 10);
+// HINCRBY user:1 visits 5 — атомарно +5, метод возвращает новое значение
 var visits = await db.HashIncrementAsync("user:1", "visits", 5);
-Console.WriteLine($"hincrby visits={visits}");          // hincrby visits=15</code></pre>
+Console.WriteLine($"hincrby visits={visits}");
+// hincrby visits=15</code></pre>
     </div>
     <ul>
       <li><strong>Когда:</strong> сущность с небольшим числом полей, которую читают частично (профиль, настройки,
@@ -74,14 +89,18 @@ Console.WriteLine($"hincrby visits={visits}");          // hincrby visits=15</co
       с другого. Из неё получается и стек, и очередь. Главное — <strong>блокирующее чтение</strong>: клиент ждёт
       на сервере, пока элемент появится, вместо опроса в цикле.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await db.KeyDeleteAsync("q");
+      <pre><code class="language-csharp">await db.KeyDeleteAsync("q");                // DEL q — чистим ключ от прошлых запусков
 
-// producer: кладём в правый конец
+// RPUSH q task-1 task-2 — два элемента в правый конец одной командой
 await db.ListRightPushAsync("q", new RedisValue[] { "task-1", "task-2" });
 
-// consumer: забираем с левого — FIFO
-Console.WriteLine(await db.ListLeftPopAsync("q"));     // task-1
-Console.WriteLine(await db.ListLengthAsync("q"));      // 1</code></pre>
+// LPOP q — забрать элемент с левого конца (FIFO: что раньше положили, то раньше и взяли)
+Console.WriteLine($"lpop:   {await db.ListLeftPopAsync("q")}");
+// lpop:   task-1
+
+// LLEN q — сколько элементов осталось
+Console.WriteLine($"length: {await db.ListLengthAsync("q")}");
+// length: 1</code></pre>
     </div>
     <p>Блокирующий вариант в Redis — команда <code>BLPOP</code>. Тонкость, которая ломает половину примеров из
       интернета: <strong>в <code>StackExchange.Redis</code> 2.8 у <code>IDatabase</code> нет типизированного
@@ -89,9 +108,14 @@ Console.WriteLine(await db.ListLengthAsync("q"));      // 1</code></pre>
       количеством. Поэтому <code>BLPOP</code> вызывают как обычную команду:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">var sw = Stopwatch.StartNew();
-var blpop = await db.ExecuteAsync("BLPOP", "empty:list", 2);   // ждать 2 секунды
-Console.WriteLine($"[{blpop}] after {sw.ElapsedMilliseconds} ms");
-// [(nil)] after 2108 ms</code></pre>
+
+// BLPOP empty:list 2 — «ждать в очереди empty:list до 2 секунд».
+// Ключа "empty:list" нет, поэтому сервер держит соединение и ждёт появления
+// элемента; по таймауту возвращает nil.
+var blpop = await db.ExecuteAsync("BLPOP", "empty:list", 2);
+
+Console.WriteLine($"blpop: {blpop} after {sw.ElapsedMilliseconds} ms");
+// blpop: (nil) after 2022 ms</code></pre>
     </div>
     <p>Через 2 секунды сервер вернул «nil», а клиент — примерно 2100 мс ожидания. Это дешевле, чем опрос
       <code>LPOP</code> раз в 100 мс: один «спящий» запрос вместо сотни пустых.</p>
@@ -108,16 +132,42 @@ Console.WriteLine($"[{blpop}] after {sw.ElapsedMilliseconds} ms");
     <p>Неупорядоченный набор уникальных значений. Проверка вхождения — O(1); пересечения и объединения считает
       сервер.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await db.KeyDeleteAsync("tags:post:1");
+      <pre><code class="language-csharp">await db.KeyDeleteAsync("tags:post:1");      // DEL — начинаем с чистого ключа
+
+// SADD tags:post:1 redis cache dotnet — три элемента одной командой;
+// дубликаты игнорируются, поэтому повторный SADD ничего не изменит
 await db.SetAddAsync("tags:post:1", new RedisValue[] { "redis", "cache", "dotnet" });
 
-Console.WriteLine(await db.SetContainsAsync("tags:post:1", "redis"));  // True
-Console.WriteLine(await db.SetContainsAsync("tags:post:1", "cobol"));  // False
-Console.WriteLine(await db.SetLengthAsync("tags:post:1"));              // 3
+// SISMEMBER tags:post:1 redis — «есть ли элемент»: True или False
+Console.WriteLine($"contains redis: {await db.SetContainsAsync("tags:post:1", "redis")}");
+// contains redis: True
+Console.WriteLine($"contains cobol: {await db.SetContainsAsync("tags:post:1", "cobol")}");
+// contains cobol: False
 
-// sismember redis=True cobol=False
-// scard=3 smembers=redis,cache,dotnet</code></pre>
+// SCARD tags:post:1 — размер множества
+Console.WriteLine($"length:         {await db.SetLengthAsync("tags:post:1")}");
+// length:         3</code></pre>
     </div>
+    <p>Строки с капсом в комментариях выше — это <strong>имена команд Redis</strong>, которые вызываются
+      за каждым методом (<code>SET</code>, <code>GET</code>, <code>INCR</code>, <code>HSET</code>,
+      <code>SADD</code>, <code>SMEMBERS</code>). Полезно уметь читать обе записи: в <code>redis-cli</code>,
+      логах и документации Redis вы увидите команды, а в коде — методы, названные по-человечески.
+      Те же три операции «руками» (реальный вывод):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ redis-cli sismember tags:post:1 redis    # ↔ SetContainsAsync
+1                                          # 1 = есть, 0 = нет (число, а не True/False)
+$ redis-cli sismember tags:post:1 cobol
+0
+$ redis-cli scard tags:post:1              # ↔ SetLengthAsync
+3
+$ redis-cli smembers tags:post:1           # ↔ SetMembersAsync: все элементы
+redis
+cache
+dotnet</code></pre>
+    </div>
+    <p><code>SMEMBERS</code> отдаёт элементы <em>без определённого порядка</em> — полагаться на
+      последовательность нельзя. Для больших множеств есть <code>SSCAN</code>: обход порциями, как
+      <code>SCAN</code> вместо <code>KEYS</code> (глава 2).</p>
     <ul>
       <li><strong>Когда:</strong> теги, «кто уже видел», дедупликация, пересечение аудиторий
         (<code>SINTER</code>), чёрные списки.</li>
@@ -129,34 +179,80 @@ Console.WriteLine(await db.SetLengthAsync("tags:post:1"));              // 3
     <p>Множество, где у каждого элемента есть <em>вес</em> (score), и сервер держит элементы отсортированными по
       нему. Это «рейтинг» и «окно времени» одновременно.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await db.KeyDeleteAsync("board");
+      <pre><code class="language-csharp">await db.KeyDeleteAsync("board");            // "board" — ключ-рейтинг (leaderboard), имя наше
+
+// ZADD board 10 alice — ПЕРВЫЙ способ: один элемент за вызов
+//   аргументы: ключ "board", элемент "alice", вес (score) 10
 await db.SortedSetAddAsync("board", "alice", 10);
+
+// ZADD board 30 bob 20 carol — ВТОРОЙ способ: та же команда, но пачкой.
+// Здесь второй параметр — массив SortedSetEntry, где каждый элемент — пара
+// «элемент + вес». Оба вызова делают одно и то же, разница только в форме.
 await db.SortedSetAddAsync("board", new[]
 {
     new SortedSetEntry("bob", 30),
     new SortedSetEntry("carol", 20),
 });
 
+// ZREVRANGE board 0 1 WITHSCORES — топ-2 по убыванию веса:
+//   0 и 1 — индексы (с нуля), Order.Descending — от большего веса к меньшему
 var top2 = await db.SortedSetRangeByRankWithScoresAsync("board", 0, 1, Order.Descending);
-Console.WriteLine(string.Join(", ", top2.Select(t =&gt; $"{t.Element}={t.Score}")));
-// bob=30, carol=20
+Console.WriteLine($"top2: {string.Join(", ", top2.Select(t =&gt; $"{t.Element}={t.Score}"))}");
+// top2: bob=30, carol=20
 
-// прибавить к весу атомарно
+// ZINCRBY board 15 alice — прибавить 15 к весу alice; вернётся НОВЫЙ вес
 var score = await db.SortedSetIncrementAsync("board", "alice", 15);
-Console.WriteLine(score);                                  // 25
-Console.WriteLine(await db.SortedSetLengthAsync("board")); // 3</code></pre>
+Console.WriteLine($"zincrby alice={score}");
+// zincrby alice=25
+
+// ZCARD board — сколько элементов в множестве
+Console.WriteLine($"length: {await db.SortedSetLengthAsync("board")}");
+// length: 3</code></pre>
     </div>
+    <p>Что происходит с весами по шагам: <code>alice=10</code>, <code>bob=30</code>,
+      <code>carol=20</code> → топ-2 это <code>bob</code> и <code>carol</code> → после
+      <code>ZINCRBY</code> у <code>alice</code> становится <code>25</code>, и она обгоняет
+      <code>carol</code>. В <code>redis-cli</code> то же видно наглядно (<code>WITHSCORES</code> печатает
+      элемент и вес):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ redis-cli zrange board 0 -1 withscores   # все элементы от меньшего веса к большему
+carol
+20
+alice
+25
+bob
+30
+$ redis-cli zrevrange board 0 1 withscores  # топ-2 от большего к меньшему
+bob
+30
+alice
+25</code></pre>
+    </div>
+    <p>Вес — <em>число с плавающей точкой</em>, а не обязательно «очки»: часто туда кладут метку времени,
+      и тогда получается очередь с приоритетом по времени (следующий пример). Элемент уникален: повторный
+      <code>ZADD</code> с тем же именем не добавит второй, а <em>заменит</em> вес.</p>
     <p>Второе применение — <strong>лимит запросов</strong> («не больше N за минуту»): элементы — запросы,
       вес — метка времени, а количество считается по диапазону:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await db.KeyDeleteAsync("rate:user:1");
+      <pre><code class="language-csharp">await db.KeyDeleteAsync("rate:user:1");      // «журнал» запросов одного пользователя
+
+// Три запроса: элемент "req:0", "req:1", "req:2" — сами запросы (имена уникальны),
+// вес — время запроса в миллисекундах: ZADD rate:user:1 &lt;время&gt; req:i
 for (var i = 0; i &lt; 3; i++)
     await db.SortedSetAddAsync("rate:user:1", $"req:{i}", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
+// ZCOUNT rate:user:1 &lt;минуту назад&gt; +inf — сколько весов попало в окно 60 секунд:
+//   от = сейчас − 60 с (в мс), до = +∞, то есть «всё, что новее»
 var from = DateTimeOffset.UtcNow.AddSeconds(-60).ToUnixTimeMilliseconds();
 var count = await db.SortedSetLengthAsync("rate:user:1", from, double.PositiveInfinity);
-Console.WriteLine($"rate last 60s={count}");     // rate last 60s=3</code></pre>
+
+Console.WriteLine($"rate last 60s={count}");
+// rate last 60s=3</code></pre>
     </div>
+    <p>Два продолжения, без которых лимит в проде не работает: старые записи нужно удалять —
+      <code>ZREMRANGEBYSCORE rate:user:1 0 &lt;минуту назад&gt;</code>, иначе множество растёт бесконечно;
+      и проверку «сколько уже было» вместе с добавлением делают атомарно — скриптом на Lua, как снятие лока в
+      главе 4, — иначе два параллельных запроса оба увидят <code>3</code> и оба пройдут.</p>
     <ul>
       <li><strong>Когда:</strong> рейтинги и лидерборды, отложенные задачи (вес = время выполнения), лимиты,
         «последние N по времени».</li>
