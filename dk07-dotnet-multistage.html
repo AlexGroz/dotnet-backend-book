@@ -52,20 +52,24 @@
       <li><strong>Исходники уезжают вместе с образом.</strong> Кто получил образ — получил и ваш код. Для
         закрытого продукта это уже инцидент.</li>
     </ul>
-    <p>Схема того, что делает multi-stage:</p>
+    <p>Схема того, что делает multi-stage (два <code>FROM</code> — по одному на стадию):</p>
     <div class="codewrap">
-      <pre><code class="language-text">СТАДИЯ 1 (build)                        СТАДИЯ 2 (final)
-FROM sdk:8.0                            FROM aspnet:8.0
-  ├ компилятор, MSBuild, NuGet            ├ только рантайм .NET
-  ├ исходники                             ├
-  ├ dotnet restore                        │
-  ├ dotnet publish -c Release -o /app     │
-  └ /app — готовые dll   ───────────────► └ COPY --from=build /app .
-                                               │
-                                               ▼
-                                   ОБРАЗ 218 МБ: без SDK, без исходников
-
-Стадия 1 целиком остаётся в кэше сборки (глава 6) — в результат она не входит.</code></pre>
+      <pre><code class="language-text">СТАДИЯ 1 — build  (в результат не входит, остаётся в кэше)
+FROM sdk:8.0
+  ├ компилятор, MSBuild, NuGet, исходники
+  ├ dotnet restore
+  ├ dotnet publish -c Release -o /app
+  └ /app — готовые dll
+        │
+        │  COPY --from=build /app .
+        ▼
+СТАДИЯ 2 — final  (это и есть итоговый образ)
+FROM aspnet:8.0
+  ├ только рантайм .NET + Kestrel
+  └ /app — то, что приехало из build
+        │
+        ▼
+ОБРАЗ 218 МБ: без SDK, без исходников</code></pre>
     </div>
     <h2>Полный Dockerfile</h2>
     <p>Вот файл целиком — в нём всё, что нужно боевому .NET-API. Дальше разбираем каждую строку.</p>
@@ -109,7 +113,11 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
     </div>
     <p>Что важно увидеть сразу:</p>
     <ul>
-      <li><strong>Два <code>FROM</code></strong> — это два независимых образа. Имена после
+      <li><strong>Два <code>FROM</code></strong> — по одному на стадию, это два независимых образа.
+        В блоке выше они подписаны комментариями: первый —
+        <code>FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build</code> (под «стадия 1: сборка»), второй —
+        <code>FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final</code> (под «стадия 2: то, что поедет в
+        прод»). Имена после
         <code>AS</code> (<code>build</code>, <code>final</code>) нужны, чтобы на стадию можно было
         сослаться: <code>--from=build</code>.</li>
       <li><strong>Между стадиями ничего не перетекает само.</strong> Всё, что нужно взять, перечислено в
@@ -120,10 +128,42 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
       <li><strong>В образ попадает только последняя стадия.</strong> Первая остаётся в кэше сборки (глава
         6), поэтому <code>docker images</code> покажет 218 МБ, а не 1 ГБ.</li>
     </ul>
+    <p>Дальше файл разбирается по шагам, и шаг — не всегда одна строка: <code>restore</code> и
+      <code>publish</code> записаны с переносом через <code>\</code>, а несколько строк разбираются внутри
+      соседних шагов. Чтобы ничего не искать по смыслу, вот карта соответствия:</p>
+    <table>
+      <tr><th>Шаг разбора</th><th>Какие строки Dockerfile</th></tr>
+      <tr><td>1. Первый <code>FROM</code> — стадия сборки</td>
+        <td><code>FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build</code></td></tr>
+      <tr><td>2. Копирование проектов и <code>restore</code></td>
+        <td><code>WORKDIR /src</code>, <code>COPY Orders.sln ./</code>, два
+          <code>COPY …csproj …</code>, <code>RUN --mount=… dotnet restore</code></td></tr>
+      <tr><td>3. Код и публикация</td>
+        <td><code>COPY . .</code>, <code>RUN dotnet publish … -c Release -o /app --no-restore</code></td></tr>
+      <tr><td>4. Второй <code>FROM</code> — финальная стадия</td>
+        <td><code>FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final</code></td></tr>
+      <tr><td>5. Передача результата между стадиями</td>
+        <td><code>WORKDIR /app</code>, <code>COPY --from=build /app .</code></td></tr>
+      <tr><td>6. Пользователь</td><td><code>USER $APP_UID</code></td></tr>
+      <tr><td>7. Порт и запуск</td>
+        <td><code>EXPOSE 8080</code>, <code>ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></td></tr>
+      <tr><td>вне шагов</td><td><code># syntax=docker/dockerfile:1</code> — служебная директива, о ней ниже</td></tr>
+    </table>
+    <div class="box note">
+      <span class="t">Что такое первая строка <code># syntax=docker/dockerfile:1</code></span>
+      <p>Это не комментарий, а <strong>директива парсеру</strong>: она говорит BuildKit, какой версией
+        синтаксиса читать файл, и обязана быть <em>самой первой строкой</em>. Смысл — зафиксировать
+        парсер, чтобы инструкции вроде <code>RUN --mount=type=cache,…</code> читались одинаково на любой
+        машине и в CI. На современных Docker встроенный парсер это уже умеет: на 29.9.3 команды с
+        <code>--mount</code> (и даже <code>COPY --parents</code> из главы 6) собираются
+        <strong>без</strong> заголовка — проверено. А на старых сборщиках без него
+        <code>--mount</code> просто не поддерживается: сборка падает на неизвестном флаге
+        <code>mount</code>. На сам образ строка не влияет — в слоях её нет.</p>
+    </div>
 
     <h2>Разбор по строкам</h2>
 
-    <h3>1. <code>FROM … sdk:8.0 AS build</code></h3>
+    <h3>1. <code>FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build</code></h3>
     <p>Первая стадия — <strong>строительная площадка</strong>. Здесь нужен полный SDK: компилятор, MSBuild,
       NuGet, шаблоны проектов. Имя стадии можно взять любое (<code>AS compile</code>,
       <code>AS builder</code>) — важно, что потом на него ссылаются.</p>
@@ -144,13 +184,21 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
     <p>Копируем не весь код, а только <code>.sln</code> и <code>.csproj</code> — то, от чего зависит
       восстановление пакетов. Это приём из главы 6: правка <code>Program.cs</code> не должна заставлять
       заново качать пакеты.</p>
+    <p>Строка <code>WORKDIR /src</code> перед ними создаёт в образе папку <code>/src</code> и делает её
+      текущей (глава 5): поэтому <code>COPY Orders.sln ./</code> кладёт solution именно туда, и все
+      относительные пути в следующих инструкциях считаются от <code>/src</code>.</p>
     <p><code>--mount=type=cache,target=/root/.nuget/packages</code> — пакеты складываются в кэш демона,
       который переживает между сборками и не попадает в образ. Если синтаксис незнаком — вернитесь к главе
       6: там разобрано и монтирование, и почему <code>publish</code> потом идёт с
       <code>--no-restore</code>.</p>
 
-    <h3>3. <code>RUN dotnet publish … -c Release -o /app --no-restore</code></h3>
-    <p>Главная инструкция стадии. Каждый флаг по делу:</p>
+    <h3>3. <code>COPY . .</code> и <code>RUN dotnet publish</code></h3>
+    <p>Сначала весь остальной код попадает в образ: <code>COPY . .</code> копирует контекст сборки в
+      текущую папку стадии (<code>/src</code>). До этого копировались только <code>.sln</code> и
+      <code>.csproj</code>, а компилятору нужны все <code>.cs</code>, поэтому порядок именно такой:
+      <code>restore</code> — по манифестам, <code>COPY . .</code> — уже после него, чтобы правка кода не
+      сбрасывала кэш восстановления пакетов (глава 6).</p>
+    <p>Вторая строка — главная инструкция стадии. Каждый флаг по делу:</p>
     <ul>
       <li><code>dotnet publish</code>, а не <code>build</code>: <code>build</code> только компилирует в
         <code>bin/Debug/net8.0</code>, а <code>publish</code> ещё и раскладывает результат в папку, готовую
@@ -165,7 +213,7 @@ ENTRYPOINT ["dotnet", "Orders.Api.dll"]</code></pre>
       <li><code>Orders.Api/Orders.Api.csproj</code> — публикуется <em>конкретный проект</em>, а не solution:
         в solution обычно есть тесты и утилиты, в образе они не нужны.</li>
     </ul>
-    <h3>4. <code>FROM … aspnet:8.0 AS final</code></h3>
+    <h3>4. <code>FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final</code></h3>
     <p>Вторая стадия начинается <strong>с нуля</strong> — из чистого <code>aspnet</code>. Здесь нет ни
       исходников, ни SDK: только рантайм .NET и ASP.NET Core с веб-сервером Kestrel. Именно этот образ и
       станет результатом сборки, потому что он <em>последний</em>.</p>
