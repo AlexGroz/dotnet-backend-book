@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 3 · Структуры данных</title>
+<title>Глава 4 · Структуры данных</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="redis.html">← Оглавление</a>
   <span class="booktitle">Redis</span>
-  <a href="rd04-caching-patterns.html">Далее →</a>
+  <a href="rd05-caching-patterns.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">Redis · Часть II · Структуры и кэш</div>
-    <h1>Глава 3. Структуры данных: строки, хеши, списки, множества, sorted sets</h1>
+    <h1>Глава 4. Структуры данных: строки, хеши, списки, множества, sorted sets</h1>
     <p class="sublead">Что выбрать под задачу и как это выглядит в StackExchange.Redis</p>
     <p><span class="tag core">основная глава</span></p>
 
@@ -463,7 +463,7 @@ Console.WriteLine($"rate last 60s={count}");
     <p>Два продолжения, без которых лимит в проде не работает: старые записи нужно удалять —
       <code>ZREMRANGEBYSCORE rate:user:1 0 &lt;минуту назад&gt;</code>, иначе множество растёт бесконечно;
       и проверку «сколько уже было» вместе с добавлением делают атомарно — скриптом на Lua, как снятие лока в
-      главе 4, — иначе два параллельных запроса оба увидят <code>3</code> и оба пройдут.</p>
+      главе 5, — иначе два параллельных запроса оба увидят <code>3</code> и оба пройдут.</p>
     <ul>
       <li><strong>Когда:</strong> рейтинги и лидерборды, отложенные задачи (вес = время выполнения), лимиты,
         «последние N по времени».</li>
@@ -518,8 +518,8 @@ Console.WriteLine($"rate last 60s={count}");
     </div>
 
     <div class="pager">
-      <a href="rd02-connection-and-commands.html">← <span class="sp">Глава 2. Подключение из .NET: ConnectionMultiplexer и первые команды</span></a>
-      <a href="rd04-caching-patterns.html"><span class="sp">Глава 4. Кэширование: cache-aside, TTL, инвалидация и stampede</span> →</a>
+      <a href="rd03-ttl.html">← <span class="sp">Глава 3. Время жизни ключа: TTL, EX/PX и истечение</span></a>
+      <a href="rd05-caching-patterns.html"><span class="sp">Глава 5. Кэширование: cache-aside, TTL, инвалидация и stampede</span> →</a>
     </div>
   </div>
 </div>

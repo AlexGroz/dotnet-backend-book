@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Глава 4 · Кэширование</title>
+<title>Глава 5 · Кэширование</title>
 <link rel="stylesheet" href="book.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -13,12 +13,12 @@
 <div class="topbar"><div class="in">
   <a href="redis.html">← Оглавление</a>
   <span class="booktitle">Redis</span>
-  <a href="rd05-operations-memory.html">Далее →</a>
+  <a href="rd06-operations-memory.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
     <div class="part">Redis · Часть II · Структуры и кэш</div>
-    <h1>Глава 4. Кэширование: cache-aside, TTL, инвалидация и stampede</h1>
+    <h1>Глава 5. Кэширование: cache-aside, TTL, инвалидация и stampede</h1>
     <p class="sublead">Как кэш ускоряет сервис и как он же ломает данные, если ошибиться с временем жизни</p>
     <p><span class="tag core">основная глава</span></p>
 
@@ -70,9 +70,68 @@ public sealed class CatalogCache(IDatabase db, CatalogRepository repo)
     </div>
 
     <h2>Тот же паттерн через <code>IDistributedCache</code></h2>
-    <p>Если нужен только кэш «байты по ключу», брать <code>StackExchange.Redis</code> не обязательно: в ASP.NET
-      есть абстракция <code>IDistributedCache</code>, а пакет
-      <code>Microsoft.Extensions.Caching.StackExchangeRedis</code> подключает её к Redis. Реальный вывод:</p>
+    <p>У ASP.NET Core есть готовая абстракция кэша — интерфейс <strong><code>IDistributedCache</code></strong>
+      из <code>Microsoft.Extensions.Caching.Abstractions</code>. Это <em>не</em> клиент Redis: это четыре
+      операции «положить/взять/обновить/удалить байты по ключу», за которыми может стоять Redis, память
+      процесса или SQL Server. Реализацию для Redis даёт пакет
+      <code>Microsoft.Extensions.Caching.StackExchangeRedis</code>.</p>
+    <p>Полный список методов интерфейса (получен рефлексией по сборке, не по памяти):</p>
+    <table>
+      <thead><tr><th>Метод</th><th>Что делает</th></tr></thead>
+      <tbody>
+        <tr><td><code>SetAsync(key, byte[], options)</code><br><code>GetAsync(key)</code></td>
+          <td>записать и прочитать значение; тип — только <code>byte[]</code> (для строк есть расширения
+            <code>SetStringAsync</code>/<code>GetStringAsync</code>)</td></tr>
+        <tr><td><code>RemoveAsync(key)</code></td><td>удалить ключ</td></tr>
+        <tr><td><code>RefreshAsync(key)</code></td><td>продлить скользящий срок, не читая значение</td></tr>
+        <tr><td colspan="2">Больше ничего: ни чтения TTL, ни атомарных операций, ни перебора ключей. Это и есть
+          главное при выборе.</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Чем он хорош</strong> — почему в ASP.NET Core его берут по умолчанию:</p>
+    <ul>
+      <li><strong>Не нужно знать Redis.</strong> Нет команд, структур ключей и ручной сериализации — «ключ →
+        байты». Для кэша ответа этого достаточно.</li>
+      <li><strong>Провайдер меняется одной строкой.</strong> <code>AddStackExchangeRedisCache</code> — Redis,
+        <code>AddDistributedMemoryCache</code> — память процесса (проверено: этот метод компилируется в чистом
+        веб-проекте, отдельный пакет не нужен). Код сервисов при смене провайдера не меняется.</li>
+      <li><strong>Три вида срока из главы 3 — готовыми настройками:</strong>
+        <code>AbsoluteExpiration</code>, <code>AbsoluteExpirationRelativeToNow</code>,
+        <code>SlidingExpiration</code>.</li>
+      <li><strong>Это стандарт платформы:</strong> на той же абстракции работает сессия ASP.NET Core и другие
+        компоненты, которым нужен «распределённый кэш».</li>
+    </ul>
+    <p><strong>Чем он хуже</strong> — точный список того, чего в интерфейсе нет:</p>
+    <ul>
+      <li><strong>Никакой атомарности.</strong> Нет <code>INCR</code> и <code>SET … NX</code>: счётчик через
+        <code>Get</code> + <code>Set</code> теряет обновления при параллельных запросах, а распределённый лок на
+        этой абстракции не построить.</li>
+      <li><strong>Только байты и строки.</strong> Хеши, списки, множества и sorted sets недоступны: «профиль по
+        полям» или очередь на <code>IDistributedCache</code> не выразить.</li>
+      <li><strong>Срок не прочитать.</strong> Сколько ключу осталось жить, через интерфейс не узнать — только
+        своим клиентом.</li>
+      <li><strong>Нет перебора и пайплайнов.</strong> Ни <code>SCAN</code>, ни массовых операций: инвалидация
+        «по префиксу» превращается в список ключей, который ведёте вы.</li>
+      <li><strong>Свой формат внутри Redis.</strong> Значение — не строка, а хеш из трёх полей
+        (<code>absexp</code>, <code>sldexp</code>, <code>data</code>), а ключ получает префикс
+        <code>InstanceName</code> (см. ниже). Поэтому такие ключи нельзя читать «руками» и на каждый ключ
+        расходуется чуть больше памяти.</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Как решить: «нужен только кэш» или полноценный клиент</span>
+      <p>Ответьте на четыре вопроса. Если хотя бы один ответ «да» — нужен <code>StackExchange.Redis</code>:</p>
+      <ul>
+        <li>нужна атомарная операция «прочитать — изменить — записать» (счётчик <code>INCR</code>, лок
+          <code>SET NX</code>)?</li>
+        <li>нужна структура, а не одно значение: хеш, список, множество, sorted set?</li>
+        <li>нужно знать TTL ключа или перебирать ключи по маске?</li>
+        <li>нужны пайплайны, транзакции или Lua-скрипты?</li>
+      </ul>
+      <p>Если все ответы «нет» — это обычный кэш «байты по ключу», и <code>IDistributedCache</code> короче:
+        меньше кода, меньше знаний, проще сменить провайдера. Обе линии можно держать в одном приложении, если
+        префиксы ключей не пересекаются.</p>
+    </div>
+    <p>Дальше — тот же cache-aside, но через абстракцию. Реальный вывод:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">// Program.cs (top-level statements): builder — WebApplicationBuilder
 builder.Services.AddStackExchangeRedisCache(o =&gt;
@@ -244,8 +303,8 @@ manual -&gt; RedisServerException: WRONGTYPE Operation against a key holding the
     </div>
 
     <div class="pager">
-      <a href="rd03-data-structures.html">← <span class="sp">Глава 3. Структуры данных: строки, хеши, списки, множества, sorted sets</span></a>
-      <a href="rd05-operations-memory.html"><span class="sp">Глава 5. Эксплуатация: память, eviction, персистентность и отказоустойчивость</span> →</a>
+      <a href="rd04-data-structures.html">← <span class="sp">Глава 4. Структуры данных: строки, хеши, списки, множества, sorted sets</span></a>
+      <a href="rd06-operations-memory.html"><span class="sp">Глава 6. Эксплуатация: память, eviction, персистентность и отказоустойчивость</span> →</a>
     </div>
   </div>
 </div>

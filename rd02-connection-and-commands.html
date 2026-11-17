@@ -13,7 +13,7 @@
 <div class="topbar"><div class="in">
   <a href="redis.html">← Оглавление</a>
   <span class="booktitle">Redis</span>
-  <a href="rd03-data-structures.html">Далее →</a>
+  <a href="rd03-ttl.html">Далее →</a>
 </div></div>
 <div class="container">
   <div class="chapter">
@@ -61,7 +61,8 @@ public sealed class CatalogCache(IConnectionMultiplexer mux)   // мультип
     <h2>Первые команды: SET, GET, TTL, INCR, SET NX</h2>
     <p>Ниже — программа и её реальный вывод (Redis 7.4.12, клиент <code>StackExchange.Redis</code> 2.8.58).
       Она проверяет всё, на чём держится дальнейшее: время жизни ключа, атомарный счётчик и «поставить, только
-      если нет».</p>
+      если нет». TTL здесь — просто параметр вызова; что это за механизм, какие бывают сроки и почему обычная
+      перезапись ключа их сбрасывает — отдельная глава 3.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">// ConnectAsync — подключиться к серверу; "localhost:6379" = «хост:порт»
 // (в Docker порт проброшен из контейнера, глава 1)
@@ -142,7 +143,7 @@ set nx:     first=True second=False</code></pre>
         (<code>KeyTypeAsync</code> → <code>String</code>), TTL нет
         (<code>KeyTimeToLiveAsync</code> → <code>null</code>).</li>
       <li><strong><code>When.NotExists</code> — это <code>SET … NX</code>:</strong> первый вызов вернул
-        <code>True</code>, второй — <code>False</code>. На этом строится и распределённый лок (глава 4), и
+        <code>True</code>, второй — <code>False</code>. На этом строится и распределённый лок (глава 5), и
         защита от параллельного прогрева кэша.</li>
     </ul>
     <div class="box note">
@@ -171,7 +172,7 @@ scan 0 match 'user:1:*' count 100
         <li>если <code>id</code> сам содержит <code>:</code> (составной ключ) — экранируйте часть
           (<code>Uri.EscapeDataString</code>) или берите другой разделитель, иначе разбор «поплывёт»;</li>
         <li>ключ — не обязательно «одно значение»: <code>user:1</code> как хеш вместо трёх отдельных ключей даёт
-          одну команду и один TTL на объект (глава 3).</li>
+          одну команду и один TTL на объект (глава 4).</li>
       </ul>
       <p>Поэтому <code>user:1:name</code>, <code>lock:job</code>, <code>hits</code> в книге — просто строки,
         выбранные для примера: любая другая запись работала бы так же. Подробнее про префиксы и перебор —
@@ -303,7 +304,7 @@ Console.WriteLine($"after 2.2s: {string.Join(",", keys.OrderBy(k =&gt; k))}");
 
     <div class="pager">
       <a href="rd01-why-redis.html">← <span class="sp">Глава 1. Зачем нужен Redis и где он встаёт в .NET-сервисе</span></a>
-      <a href="rd03-data-structures.html"><span class="sp">Глава 3. Структуры данных: строки, хеши, списки, множества, sorted sets</span> →</a>
+      <a href="rd03-ttl.html"><span class="sp">Глава 3. Время жизни ключа: TTL, EX/PX и истечение</span> →</a>
     </div>
   </div>
 </div>

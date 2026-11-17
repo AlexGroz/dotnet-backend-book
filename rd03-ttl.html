@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Время жизни ключа: TTL, EX/PX и истечение</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="redis.html">← Оглавление</a>
+  <span class="booktitle">Redis</span>
+  <a href="rd04-data-structures.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Redis · Часть I · Основы</div>
+    <h1>Глава 3. Время жизни ключа: TTL, EX/PX и истечение</h1>
+    <p class="sublead">Что именно истекает, какие бывают сроки, как они задаются из C# и почему обычная
+      перезапись ключа их сбрасывает</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <p>В главе 2 TTL появился как третий параметр вызова: <code>SET user:1:name … EX 2</code> — «и это
+      значение умрёт само через 2 секунды». Дальше TTL используется везде: в кэше (глава 5), в локах, в
+      лимитах, в эксплуатации (глава 6). Поэтому разберём его отдельно и до конца: без этого «5 минут» в
+      коде — просто число, скопированное у соседа.</p>
+
+    <h2>Что такое TTL</h2>
+    <p><strong>TTL</strong> (time to live, «время жизни») — это <em>свойство самого ключа</em>, а не значения
+      внутри него. Ключ с TTL существует до указанного момента; когда срок истёк, Redis считает ключ
+      отсутствующим, а память под ним освобождает. Ничего «помечать» и «чистить» приложению не нужно — это
+      единственный механизм, который убирает данные без чьей-либо команды.</p>
+    <p>Посмотреть срок можно двумя командами, и они отличаются только единицами:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># TTL — сколько секунд осталось жить; PTTL — то же в миллисекундах
+docker exec redis7 redis-cli set user:1:name Алексей EX 2
+# OK
+docker exec redis7 redis-cli ttl user:1:name
+# 2
+docker exec redis7 redis-cli pttl user:1:name
+# 1881      ← вторая команда выполнилась на ~120 мс позже первой</code></pre>
+    </div>
+    <p>Кроме числа у этих команд есть два специальных ответа, которые нужно узнавать сразу:</p>
+    <table>
+      <thead><tr><th>Ответ <code>TTL</code></th><th>Что значит</th><th>Что делать</th></tr></thead>
+      <tbody>
+        <tr><td><code>-2</code></td><td>ключа <strong>нет</strong> (не было, удалили или истёк)</td>
+          <td>это нормальный промах кэша, а не ошибка</td></tr>
+        <tr><td><code>-1</code></td><td>ключ <strong>есть</strong>, но TTL у него нет — он будет жить, пока его
+          не удалят</td><td>для кэша это обычно ошибка: такой ключ никто не уберёт</td></tr>
+        <tr><td><code>0</code></td><td>жить осталось меньше секунды. Ключ <strong>ещё жив</strong></td>
+          <td>не путать с «истёк»: <code>PTTL</code> покажет, скажем, <code>385</code></td></tr>
+        <tr><td>Положительное число</td><td>столько секунд (или миллисекунд для <code>PTTL</code>) осталось</td>
+          <td>—</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t"><code>TTL</code> и <code>KeyTimeToLiveAsync</code> отвечают по-разному</span>
+      <p>В <code>redis-cli</code> «нет ключа» и «нет TTL» — это <code>-2</code> и <code>-1</code>. В
+        <code>StackExchange.Redis</code> метод <code>KeyTimeToLiveAsync</code> возвращает
+        <code>TimeSpan?</code> и в <em>обоих</em> случаях даёт <code>null</code>: различить «ключа нет» и
+        «срок не задан» им нельзя. Если различие важно, проверяйте <code>KeyExistsAsync</code> отдельно или
+        берите сырое значение: <code>(long)await db.ExecuteAsync("TTL", key)</code>.</p>
+    </div>
+
+    <h2>Как задать срок: команды</h2>
+    <p>Способов несколько, и они отличаются не «синтаксисом», а смыслом: срок можно задать <em>вместе с
+      записью значения</em> или <em>отдельной командой</em>, а отсчитывать — от текущего момента или от
+      конкретной даты.</p>
+    <table>
+      <thead><tr><th>Команда</th><th>Что делает</th><th>Когда удобна</th></tr></thead>
+      <tbody>
+        <tr><td><code>SET k v EX 300</code></td><td>записать значение и срок 300 с</td>
+          <td>обычная запись кэша</td></tr>
+        <tr><td><code>SET k v PX 500</code></td><td>то же, но срок в миллисекундах</td>
+          <td>сроки меньше секунды</td></tr>
+        <tr><td><code>SET k v EXAT 1730000000</code><br><code>SET k v PXAT 1730000000123</code></td>
+          <td>срок — конкретный момент (unix-время, с или мс)</td>
+          <td>«умрёт в 12:00», а не «через 5 минут»</td></tr>
+        <tr><td><code>SET k v KEEPTTL</code></td><td>записать значение, <strong>сохранив</strong> прежний
+          TTL</td><td>обновление значения без продления жизни</td></tr>
+        <tr><td><code>SETEX k 300 v</code><br><code>PSETEX k 500 v</code></td>
+          <td>запись со сроком в секундах / миллисекундах</td><td>старый способ, то же, что SET … EX/PX</td></tr>
+        <tr><td><code>EXPIRE k 300</code><br><code>PEXPIRE k 500</code></td>
+          <td>поставить срок на <em>уже существующий</em> ключ любого типа</td>
+          <td>значение записано раньше, срок — отдельным решением</td></tr>
+        <tr><td><code>EXPIREAT k 1730000000</code><br><code>PEXPIREAT k 1730000000123</code></td>
+          <td>срок — конкретный момент</td><td>абсолютный дедлайн</td></tr>
+        <tr><td><code>GETEX k EX 300</code></td><td>прочитать значение и обновить срок</td>
+          <td>скользящий срок вручную</td></tr>
+        <tr><td><code>PERSIST k</code></td><td>снять срок, сделать ключ «вечным»</td>
+          <td>перед тем как отдать ключ в долгое хранение</td></tr>
+      </tbody>
+    </table>
+    <p>Из <code>StackExchange.Redis</code> это выглядит короче, чем кажется: срок — просто параметр. Что
+      именно уходит на провод, видно в <code>MONITOR</code> — это реальный перехват вызовов клиента 2.8.58:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># что печатает redis-cli monitor, пока выполняется C#-код
+"SETEX" "m1" "100" "v"          ← StringSetAsync("m1", "v", TimeSpan.FromSeconds(100))
+"PSETEX" "m2" "500" "v"         ← StringSetAsync("m2", "v", TimeSpan.FromMilliseconds(500))
+"EXPIRE" "m1" "30"              ← KeyExpireAsync("m1", TimeSpan.FromSeconds(30))
+"PEXPIREAT" "a1" "1794912759009" ← KeyExpireAsync("a1", DateTime.UtcNow.AddMinutes(3))
+"PTTL" "a1"                     ← KeyTimeToLiveAsync("a1")
+"SET" "lk" "w1" "EX" "10" "NX"  ← StringSetAsync("lk", "w1", TimeSpan…, When.NotExists)</code></pre>
+    </div>
+    <p>Два вывода из этого перехвата. Первый: <strong>клиент сам выбирает команду</strong> — целые секунды
+      уходят как <code>SETEX</code>/<code>EX 10</code>, миллисекунды как <code>PSETEX</code>, а если нужен
+      <code>NX</code>, то <code>SET … EX … NX</code> (у <code>SETEX</code> такого флага нет). Второй:
+      отдельной перегрузки <code>StringSetAsync</code> с <code>DateTime</code> в 2.8.58 нет — попытка даёт
+      ошибку компиляции <code>CS1503: cannot convert from 'System.DateTime' to 'System.TimeSpan?'</code>;
+      абсолютный срок ставят через <code>KeyExpireAsync(key, DateTime)</code>.</p>
+
+    <h2>Срок — у ключа, а не у типа данных</h2>
+    <p>TTL не связан со строкой: его можно повесить на хеш, список, множество, sorted set, поток. Ниже —
+      реальный прогон, показывающий сразу всё поведение: как читать срок, как его ставить и снимать, и что
+      бывает с ключом после истечения. Вспомогательная функция <code>Ttl</code> нужна только для того,
+      чтобы <code>null</code> печатался словом, а не пустой строкой:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static string Ttl(TimeSpan? t) =&gt; t?.ToString() ?? "null";
+
+// «ключа нет» и «срок не задан» — разные ответы в Redis
+Console.WriteLine(await db.ExecuteAsync("TTL", "nope"));            // -2
+await db.StringSetAsync("k", "v");                                  // SET k v
+Console.WriteLine(await db.ExecuteAsync("TTL", "k"));               // -1
+Console.WriteLine(Ttl(await db.KeyTimeToLiveAsync("k")));           // null
+
+// относительный срок: клиент отправит SETEX k 100 v
+await db.StringSetAsync("k", "v", TimeSpan.FromSeconds(100));
+Console.WriteLine(Ttl(await db.KeyTimeToLiveAsync("k")));           // 00:01:39.9990000
+
+// ОБЫЧНАЯ перезапись без срока его сбрасывает
+await db.StringSetAsync("k", "v2");                                 // SET k v2
+Console.WriteLine(Ttl(await db.KeyTimeToLiveAsync("k")));           // null
+
+// KEEPTTL — перезапись с сохранением прежнего срока
+await db.StringSetAsync("k", "v3", TimeSpan.FromSeconds(100));      // SETEX k 100 v3
+await db.ExecuteAsync("SET", "k", "v4", "KEEPTTL");                 // SET k v4 KEEPTTL
+Console.WriteLine(Ttl(await db.KeyTimeToLiveAsync("k")));           // 00:01:39.9990000
+
+// поставить и снять срок отдельными командами
+await db.StringSetAsync("k", "v5");
+Console.WriteLine(await db.KeyExpireAsync("k", TimeSpan.FromSeconds(30)));   // True   (EXPIRE k 30)
+Console.WriteLine(Ttl(await db.KeyTimeToLiveAsync("k")));           // 00:00:29.9990000
+Console.WriteLine(await db.KeyPersistAsync("k"));                   // True   (PERSIST k)
+Console.WriteLine(Ttl(await db.KeyTimeToLiveAsync("k")));           // null
+Console.WriteLine(await db.KeyPersistAsync("k"));                   // False  — снимать уже нечего
+
+// миллисекунды: TTL округляет вниз, PTTL — нет
+await db.StringSetAsync("ms", "v", TimeSpan.FromMilliseconds(500));  // PSETEX ms 500 v
+Console.WriteLine($"{await db.ExecuteAsync("PTTL", "ms")} {await db.ExecuteAsync("TTL", "ms")}");
+// 499 0
+
+// срок живёт на ключе любого типа; новые поля хеша его не сбрасывают
+await db.HashSetAsync("h", "f1", "v");
+await db.KeyExpireAsync("h", TimeSpan.FromSeconds(50));
+await db.HashSetAsync("h", "f2", "v");
+Console.WriteLine($"{await db.KeyTypeAsync("h")} {Ttl(await db.KeyTimeToLiveAsync("h"))}");
+// Hash 00:00:49.9960000
+
+// GETEX — прочитать значение и обновить срок одним обращением
+db.StringSet("g", "v");
+Console.WriteLine($"{await db.ExecuteAsync("GETEX", "g", "EX", 20)} {Ttl(await db.KeyTimeToLiveAsync("g"))}");
+// v 00:00:20
+
+// абсолютный срок: клиент отправит PEXPIREAT abs &lt;мс&gt;
+await db.StringSetAsync("abs", "v");
+Console.WriteLine(await db.KeyExpireAsync("abs", DateTime.UtcNow.AddMinutes(3)));   // True
+Console.WriteLine(Ttl(await db.KeyTimeToLiveAsync("abs")));         // 00:02:59.9980000
+
+// истёкший ключ для клиента просто не существует
+await db.StringSetAsync("gone", "v", TimeSpan.FromMilliseconds(200));
+await Task.Delay(400);
+Console.WriteLine($"{await db.KeyExistsAsync("gone")} {Ttl(await db.KeyTimeToLiveAsync("gone"))} {await db.ExecuteAsync("TTL", "gone")}");
+// False null -2</code></pre>
+    </div>
+    <p>Из этого прогона следуют три вещи, которые чаще всего и ломают кэш:</p>
+    <ul>
+      <li><strong>Перезапись значения без срока убивает TTL.</strong> <code>SET k v2</code> — и ключ снова
+        «вечный»: в кэше это значит, что после первого же обновления данные останутся навсегда. Если значение
+        обновляют, а срок хотят сохранить, нужен <code>KEEPTTL</code>.</li>
+
+      <li><strong>Изменение содержимого срок не сбрасывает.</strong> <code>HSET</code> нового поля в хеш,
+        <code>INCR</code> счётчика, <code>LPUSH</code> в список — TTL остаётся прежним (в прогоне: хеш после
+        второго <code>HSET</code> всё ещё <code>49.996</code>). Это удобно: счётчик с TTL не «продлевается»
+        каждым инкрементом.</li>
+      <li><strong><code>PERSIST</code> возвращает <code>false</code>, если снимать нечего.</strong> Это не
+        ошибка: так же, как <code>DEL</code> отсутствующего ключа.</li>
+    </ul>
+    <h2>Как именно происходит истечение</h2>
+    <p>Redis не заводит «будильник» на каждый ключ: держать таймер на миллион ключей дороже, чем сами данные.
+      Работают два механизма вместе:</p>
+    <ul>
+      <li><strong>Ленивое истечение:</strong> когда команда обращается к ключу, сервер проверяет его срок.
+        Если срок прошёл — ключ считается отсутствующим <em>прямо в этот момент</em>: <code>GET</code> вернул
+        <code>nil</code>, <code>EXISTS</code> — <code>0</code>, <code>TTL</code> — <code>-2</code>.</li>
+      <li><strong>Активный цикл:</strong> несколько раз в секунду (по умолчанию <code>hz 10</code>) сервер
+        порциями просматривает словарь ключей со сроком и удаляет истёкшие — чтобы они не висели в памяти до
+        первого обращения.</li>
+    </ul>
+    <p>Проверка «второго механизма» без единого обращения к ключам — 2000 ключей со сроком 120 мс, потом
+      ожидание:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># 2000 команд SET exp:N v PX 120 — одной пачкой через pipe
+python3 -c "print('\r\n'.join(f'SET exp:{i} v PX 120' for i in range(2000)))" > /tmp/exp.txt
+docker exec -i redis7 sh -c 'redis-cli --pipe' < /tmp/exp.txt
+# errors: 0, replies: 2000
+
+docker exec redis7 redis-cli dbsize
+# 2000                                   ← сразу после записи ключи ещё на месте
+docker exec redis7 redis-cli info stats | grep expired_keys
+# expired_keys:0
+
+sleep 1.5        # ни одной команды к самим ключам не посылаем
+
+docker exec redis7 redis-cli dbsize
+# 0                                      ← ключей нет
+docker exec redis7 redis-cli info stats | grep expired_keys
+# expired_keys:2000                      ← их удалил фоновый цикл</code></pre>
+    </div>
+    <p>Следствия, важные на практике:</p>
+    <ul>
+      <li><strong>Истечение — не мгновенное событие, а процесс.</strong> В момент <code>TTL</code> ключ уже
+        недоступен для команд, но память под него освобождается чуть позже. Поэтому <code>INFO stats</code>
+        и <code>DBSIZE</code> могут «не сходиться» с ожиданием — это нормально.</li>
+      <li><strong><code>expired_keys</code> — счётчик именно истечений</strong>, отдельно от
+        <code>evicted_keys</code> (вытеснение при <code>maxmemory</code>, глава 6). Рост первого — норма,
+        рост второго — сигнал, что памяти не хватает.</li>
+      <li><strong>Память освобождается не всегда сразу:</strong> флаг <code>lazyfree-lazy-expire</code> по
+        умолчанию <code>no</code>, то есть большой ключ удаляется синхронно в момент истечения. Для ключей на
+        сотни мегабайт это заметная пауза, и флаг включают.</li>
+    </ul>
+
+    <h2>Три вида срока и когда какой брать</h2>
+    <p>«TTL 300» можно понимать трояко, и разница проявляется именно в кэше:</p>
+    <table>
+      <thead><tr><th>Вид</th><th>Как задать</th><th>Смысл</th><th>Когда брать</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Относительный</strong></td>
+          <td><code>SET … EX 300</code>, <code>SETEX</code>,<br><code>TimeSpan</code> в
+            <code>StringSetAsync</code></td>
+          <td>«300 секунд с момента записи»</td>
+          <td>обычный кэш: чем свежее записали, тем дольше живёт</td>
+        </tr>
+        <tr>
+          <td><strong>Абсолютный</strong></td>
+          <td><code>SET … EXAT</code>, <code>EXPIREAT</code>,<br><code>KeyExpireAsync(key, DateTime)</code></td>
+          <td>«умрёт в 12:00», независимо от того, когда записали</td>
+          <td>данные с известным дедлайном: прогноз, расписание, «до конца дня»</td>
+        </tr>
+        <tr>
+          <td><strong>Скользящий</strong></td>
+          <td><code>GETEX … EX 300</code> или <code>EXPIRE</code> при каждом чтении;
+            в <code>IDistributedCache</code> — <code>SlidingExpiration</code></td>
+          <td>«300 секунд с последнего <em>чтения</em>»</td>
+          <td>сессии: пока человек активен, данные живут</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Скользящий срок — единственный, который меняет поведение при чтении, и у него есть цена: «горячий»
+      ключ, который читают чаще, чем раз в 5 минут, <strong>не истечёт никогда</strong>. Если данные при этом
+      устарели, кэш будет отдавать устаревшее бесконечно — об этом уже сказано в главе 5 про
+      <code>IDistributedCache</code>.</p>
+
+    <div class="box warn">
+      <span class="t">Абсолютный срок и <code>DateTime</code>: <code>Kind</code> обязан быть Utc или Local</span>
+      <p><code>KeyExpireAsync(key, DateTime)</code> не принимает «время без зоны». Если у значения
+        <code>Kind = Unspecified</code> (так ведёт себя <code>new DateTime(2026, 11, 17, 16, 0, 0)</code>), клиент бросает
+        <code>System.ArgumentException: Expiry time must be either Utc or Local (Parameter 'when')</code> —
+        проверено. А вот <code>Utc</code> и <code>Local</code> обрабатываются правильно: для
+        <code>DateTime.UtcNow.AddMinutes(3)</code> и <code>DateTime.Now.AddMinutes(3)</code> TTL получился
+        <code>00:02:59.995</code> и <code>00:02:59.986</code> — локальное время клиент приводит к UTC сам.</p>
+    </div>
+
+    <h2>Сколько ставить: как выбирать TTL</h2>
+    <p>Универсального числа нет, но есть три вопроса, которые дают ответ почти всегда:</p>
+    <ol>
+      <li><strong>Насколько устаревшие данные допустимы?</strong> Если показать цену, которая изменилась минуту
+        назад, — это нормально, TTL в минутах. Если это баланс или остаток на складе — минуты недопустимы, и
+        основную работу делает инвалидация при записи (глава 5), а TTL только страхует.</li>
+      <li><strong>Сколько стоит промах?</strong> Запрос в PostgreSQL за 5 мс — можно ставить срок коротко.
+        Вызов внешнего API за 800 мс с лимитом запросов — срок ставят длиннее, потому что промах дорогой.</li>
+      <li><strong>Сколько памяти это съест?</strong> Время жизни умножается на скорость записи: 1000 ключей в
+        секунду с TTL в час — это 3,6 млн ключей одновременно (глава 6, eviction).</li>
+    </ol>
+    <p>Стартовые значения, с которых обычно начинают (их меняют по результатам измерений, а не копируют
+      вслепую):</p>
+    <table>
+      <thead><tr><th>Что кэшируем / для чего срок</th><th>Стартовый TTL</th><th>Почему так</th></tr></thead>
+      <tbody>
+        <tr><td>Ответ API, страница, список</td><td>30–300 с</td>
+          <td>устаревание на минуты допустимо, промах дешёвый</td></tr>
+        <tr><td>Справочник, каталог</td><td>5–60 мин + сброс при записи</td>
+          <td>меняется редко, но «навсегда» кэшировать нельзя</td></tr>
+        <tr><td>Профиль пользователя</td><td>1–5 мин + сброс при записи</td>
+          <td>пользователь ждёт своих изменений сразу</td></tr>
+        <tr><td>Сессия</td><td>20–30 мин, скользящий</td>
+          <td>пока человек активен, сессия живёт</td></tr>
+        <tr><td>Одноразовый код (OTP)</td><td>3–5 мин</td><td>срок — часть бизнес-правила</td></tr>
+        <tr><td>Ключ идемпотентности запроса</td><td>часы–сутки</td>
+          <td>столько живёт окно повторной доставки</td></tr>
+        <tr><td>Распределённый лок</td><td>5–30 с</td>
+          <td>страховка, если владелец умер, не сняв лок (глава 5)</td></tr>
+        <tr><td>Окно лимита запросов</td><td>ровно окно: 60 с</td>
+          <td>элементы старше окна не должны учитываться</td></tr>
+        <tr><td>Данные, которые не должны протухать</td><td>TTL нет</td>
+          <td>это уже не кэш, а хранилище</td></tr>
+      </tbody>
+    </table>
+    <p>Два правила, которые важнее конкретных цифр:</p>
+    <ul>
+      <li><strong>TTL — страховка, а не замена инвалидации.</strong> Кэш обязан сбрасываться при изменении
+        данных; TTL лишь гарантирует, что забытая инвалидация не превратится в вечное вранье.</li>
+      <li><strong>Один ключ — один срок.</strong> Если у части данных требования разные (цена меняется чаще
+        описания), это разные ключи, а не один с общим TTL.</li>
+    </ul>
+
+    <h2>TTL и память: истечение — это не вытеснение</h2>
+    <p>Эти два механизма часто путают, хотя они делают разное:</p>
+    <table>
+      <thead><tr><th></th><th>Истечение (expiration)</th><th>Вытеснение (eviction)</th></tr></thead>
+      <tbody>
+        <tr><td>Кто решает</td><td>вы, задавая TTL</td><td>Redis, когда упёрся в <code>maxmemory</code></td></tr>
+        <tr><td>Когда срабатывает</td><td>когда прошёл срок ключа</td><td>когда не хватает памяти, даже если
+          срок ещё не вышел</td></tr>
+        <tr><td>Счётчик в <code>INFO stats</code></td><td><code>expired_keys</code></td>
+          <td><code>evicted_keys</code></td></tr>
+        <tr><td>Что значит для приложения</td><td>нормальная работа кэша</td>
+          <td>данные пропали раньше срока: рабочих ключей больше, чем памяти</td></tr>
+      </tbody>
+    </table>
+    <p>Практический вывод: <strong>TTL не спасает от нехватки памяти</strong>. Если записывать быстрее, чем
+      истекает, объём растёт, и при <code>maxmemory</code> Redis начнёт вытеснять ключи по политике
+      (<code>allkeys-lru</code> и другие — глава 6). TTL уменьшает объём, но не ограничивает его.</p>
+    <div class="box note">
+      <span class="t">TTL у полей хеша</span>
+      <p>Исторически срок был только у ключа целиком. В Redis 7.4 появились команды для полей:
+        <code>HEXPIRE</code>/<code>HPEXPIRE</code>, а <code>INFO keyspace</code> показывает счётчик
+        <code>subexpiry</code> (проверено в главе 6: <code>hexpire</code> на одном поле → <code>subexpiry=1</code>).
+        Это удобно для «хеш на пользователя, у каждого поля свой срок», но по умолчанию проектируют всё же
+        «один ключ — один TTL»: меньше сюрпризов и работает на любой версии.</p>
+    </div>
+
+
+    <h2>Где ошибаются чаще всего</h2>
+    <table>
+      <thead><tr><th>Ошибка</th><th>Что происходит</th><th>Как правильно</th></tr></thead>
+      <tbody>
+        <tr><td>перепутаны секунды и миллисекунды</td>
+          <td><code>EX 300</code> вместо <code>PX 300</code> — ключ живёт в 1000 раз дольше задуманного
+            (5 минут против 0,3 с)</td>
+          <td>в C# передавать <code>TimeSpan</code> — клиент сам выберет <code>SETEX</code> или
+            <code>PSETEX</code></td></tr>
+        <tr><td>обновили значение «обычным» <code>SET</code></td><td>TTL исчез, ключ стал вечным</td>
+          <td><code>SET … KEEPTTL</code> или ставить срок при каждой записи</td></tr>
+        <tr><td>считают <code>TTL 0</code> истёкшим ключом</td><td>ключ ещё жив, просто осталось меньше
+          секунды</td><td>смотреть <code>PTTL</code> или <code>EXISTS</code></td></tr>
+        <tr><td>кэш без TTL</td><td>данные устаревают, память растёт, Redis упирается в
+          <code>maxmemory</code></td><td>TTL по умолчанию для всего, что кэш</td></tr>
+        <tr><td>TTL вместо инвалидации</td><td>пользователь видит старые данные до конца срока</td>
+          <td>сброс ключа при записи + TTL как страховка (глава 5)</td></tr>
+        <tr><td>скользящий срок на «дорогом для устаревания» ключе</td>
+          <td>горячий ключ не истекает никогда и врёт бесконечно</td>
+          <td>скользящий — для сессий, абсолютный/относительный — для данных</td></tr>
+        <tr><td><code>KeyExpireAsync</code> с <code>DateTime</code> без зоны</td>
+          <td><code>ArgumentException: Expiry time must be either Utc or Local</code></td>
+          <td><code>DateTime.UtcNow</code> (или явно <code>DateTimeKind.Local</code>)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>TTL — свойство ключа, а не значения:</strong> срок можно повесить на любой тип, и по
+          истечении ключ для команд просто перестаёт существовать.</li>
+        <li><strong><code>-2</code> — ключа нет, <code>-1</code> — срока нет, <code>0</code> — меньше секунды до
+          конца.</strong> В <code>KeyTimeToLiveAsync</code> первые два случая неразличимы: оба
+          <code>null</code>.</li>
+        <li><strong>Перезапись без <code>KEEPTTL</code> сбрасывает срок</strong>, а <code>HSET</code>,
+          <code>INCR</code>, <code>RENAME</code> его сохраняют.</li>
+        <li><strong>Истечение ленивое + фоновый цикл</strong> (<code>hz 10</code>): ключ недоступен сразу, а
+          память освобождается чуть позже; <code>expired_keys</code> — счётчик этого процесса.</li>
+        <li><strong>Относительный, абсолютный и скользящий срок</strong> — три разных инструмента: кэш,
+          дедлайн, сессия.</li>
+        <li><strong>TTL не заменяет инвалидацию и не ограничивает память:</strong> он уменьшает объём и
+          страхует от забытых сбросов, а от <code>maxmemory</code> защищает eviction (глава 6).</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="rd02-connection-and-commands.html">← <span class="sp">Глава 2. Подключение из .NET: ConnectionMultiplexer и первые команды</span></a>
+      <a href="rd04-data-structures.html"><span class="sp">Глава 4. Структуры данных: строки, хеши, списки, множества, sorted sets</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
