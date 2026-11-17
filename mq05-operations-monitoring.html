@@ -39,12 +39,28 @@
     </table>
     <p>Первые три видны и в CLI, и в панели. Проверено:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker exec rmq3 rabbitmqctl list_queues name type durable messages
+      <pre><code class="language-bash"># docker exec rmq3 — выполнить команду внутри контейнера rmq3 (он поднят в главе 1)
+# rabbitmqctl list_queues — показать очереди; name, type, durable, messages — список колонок
+docker exec rmq3 rabbitmqctl list_queues name type durable messages
 # name            type     durable  messages
-# q.durable       classic  true     0
-# q.alarm         classic  false    4
+# q.durable       classic  true     0        &lt;- durable: переживёт рестарт
+# q.alarm         classic  false    4        &lt;- четыре сообщения ждут потребителя
 # orders.new      classic  true     0</code></pre>
     </div>
+    <p>Что означают колонки:</p>
+    <table>
+      <thead><tr><th>Колонка</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>имя очереди</td></tr>
+        <tr><td><code>type</code></td><td>тип очереди: <code>classic</code>, <code>quorum</code> или
+          <code>stream</code></td></tr>
+        <tr><td><code>durable</code></td><td>переживёт ли очередь перезапуск брокера</td></tr>
+        <tr><td><code>messages</code></td><td>сколько сообщений в очереди суммарно: готовые к доставке плюс
+          выданные, но не подтверждённые. Раздельно — колонки <code>messages_ready</code> и
+          <code>messages_unacknowledged</code></td></tr>
+      </tbody>
+    </table>
+
     <p>Колонка <code>type</code> показывает, что все очереди — <code>classic</code>. Это важно для разговора о
       репликации (ниже).</p>
 
@@ -52,9 +68,14 @@
     <p>Плагин <code>rabbitmq_management</code> даёт не только веб-интерфейс на <code>:15672</code>, но и JSON
       API — удобно для дашбордов и алертов. Например, состояние одной очереди:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">curl -s -u guest:guest 'http://localhost:15672/api/queues/%2F/q.dlq'
+      <pre><code class="language-bash"># -s — «тихий» режим: без прогресс-бара, только тело ответа
+# -u guest:guest — HTTP Basic-аутентификация, формат логин:пароль
+# %2F в пути — vhost "/" в URL-кодировке; дальше имя очереди
+curl -s -u guest:guest 'http://localhost:15672/api/queues/%2F/q.dlq'
 
-# {'name': 'q.dlq', 'messages': 1, 'consumers': 0, 'durable': False, 'auto_delete': False, ...}</code></pre>
+# {"name":"q.dlq","messages":1,"messages_ready":1,"messages_unacknowledged":0,
+#  "consumers":0,"durable":false,"auto_delete":false,"type":"classic", ...}
+#  ^ длина очереди, число подписок и флаги — те же данные, что в CLI, но одним JSON-объектом</code></pre>
     </div>
     <p>Список очередей — <code>/api/queues</code>, конкретная — <code>/api/queues/{vhost}/{name}</code>
       (vhost по умолчанию в URL кодируется как <code>%2F</code>). Для алертов достаточно двух правил:
@@ -64,33 +85,44 @@
     <p>RabbitMQ следит за памятью и местом на диске. Когда порог превышен, включается <strong>alarm</strong>, и
       брокер перестаёт читать данные от публикующих соединений — это защита, чтобы не упасть целиком.</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># порог по умолчанию — 0.4 доступной памяти; поставим заведомо низкий
+      <pre><code class="language-bash"># set_vm_memory_high_watermark — доля доступной памяти, при превышении которой включается alarm
+# 0.000001 — заведомо низкий порог, чтобы alarm сработал сразу; 0.4 — значение по умолчанию
 docker exec rmq3 rabbitmqctl set_vm_memory_high_watermark 0.000001
+# Setting memory threshold on rabbit@&lt;id&gt; to 0.000001 ...
 
+# status — состояние узла (память, диск, лимиты)
+# grep -A2 '^Alarms' — печатает строку «Alarms» и две строки после неё
 docker exec rmq3 rabbitmqctl status | grep -A2 '^Alarms'
 # Alarms
 #
-# Memory alarm on node rabbit@6a1d93a32e2d
+# Memory alarm on node rabbit@&lt;id&gt;
 
-# вернуть как было
+# снять alarm: вернуть порог 0.4
 docker exec rmq3 rabbitmqctl set_vm_memory_high_watermark 0.4</code></pre>
     </div>
     <p>Самое интересное — как это выглядит <em>из приложения</em>. Проверено дважды, на одном и том же
       publish:</p>
     <div class="codewrap">
       <pre><code class="language-text"># канал БЕЗ подтверждений
-publish: ok
-channel.IsOpen: True
+publish: ok                    # вызов вернулся: байты ушли в сокет, ответа брокера никто не ждал
+channel.IsOpen: True           # канал жив — ошибки не было
 
 # канал С подтверждениями, таймаут 3 секунды
-confirm: NOT received -&gt; TaskCanceledException</code></pre>
+confirm: NOT received -&gt; TaskCanceledException   # подтверждения нет — ожидание отменено по таймауту</code></pre>
     </div>
     <ul>
       <li><strong>Без confirm</strong> публикация «успешна»: клиент записал байты в сокет и пошёл дальше. Ни
-        ошибки, ни задержки — просто сообщения никуда не делись.</li>
+        ошибки, ни задержки — сообщение осталось в буфере и уйдёт в брокер, когда тот снова начнёт читать.</li>
       <li><strong>С confirm</strong> вызов ждёт подтверждения, не получает его и падает по таймауту. Только так
         перегрузка брокера становится видимой.</li>
     </ul>
+    <div class="box note">
+      <span class="t">Куда делись «зависшие» сообщения</span>
+      <p>Проверено: под alarm в очереди <code>0</code> сообщений, а после возврата порога — <code>2</code>. Оба
+        publish (без confirm и «отменённый» по токену) остались в буфере клиента и дошли до брокера, когда он
+        снова начал читать. Отсюда два вывода: таймаут confirm означает «подтверждения пока нет», а не
+        «сообщение не отправлено»; повтор после таймаута создаёт дубль.</p>
+    </div>
     <div class="box warn">
       <span class="t">Что делать при alarm</span>
       <ul>

@@ -35,38 +35,83 @@
     <div class="codewrap">
       <pre><code class="language-csharp">// ch — канал (глава 1), ct — CancellationToken приложения,
 // HandleAsync — ваш обработчик сообщения
-var consumer = new AsyncEventingBasicConsumer(ch);
+var consumer = new AsyncEventingBasicConsumer(ch);       // подписчик, привязанный к каналу
 
-consumer.ReceivedAsync += async (_, ea) =&gt;
+consumer.ReceivedAsync += async (_, ea) =&gt;               // срабатывает на каждую доставку
 {
     try
     {
-        await HandleAsync(ea.Body, ct);                 // бизнес-логика
-        await ch.BasicAckAsync(ea.DeliveryTag, false);  // успех: убрать из очереди
+        await HandleAsync(ea.Body, ct);                  // бизнес-логика; ea.Body — ReadOnlyMemory&lt;byte&gt;
+        await ch.BasicAckAsync(ea.DeliveryTag, false);   // успех: подтвердить; false — только это сообщение
     }
     catch (Exception)
     {
-        // вернуть в очередь (requeue) или отправить в DLQ — глава 4
+        // requeue: true — вернуть в очередь; здесь false — сообщение уйдёт в DLX (глава 4)
         await ch.BasicNackAsync(ea.DeliveryTag, false, requeue: false);
     }
 };
 
-await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer);</code></pre>
+await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer); // подписка: очередь, ручные ack, обработчик</code></pre>
     </div>
+    <p>Что означает каждый элемент:</p>
+    <table>
+      <thead><tr><th>Что</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>ea.Body</code></td><td>тело сообщения, <code>ReadOnlyMemory&lt;byte&gt;</code>; строкой
+          становится через <code>Encoding.UTF8.GetString(ea.Body.Span)</code></td></tr>
+        <tr><td><code>ea.DeliveryTag</code></td><td>номер доставки в рамках канала — по нему сообщение
+          подтверждают или отклоняют</td></tr>
+        <tr><td><code>ea.Redelivered</code></td><td><code>true</code>, если брокер доставляет сообщение
+          повторно (после requeue или обрыва соединения)</td></tr>
+        <tr><td><code>ea.Exchange</code>, <code>ea.RoutingKey</code></td><td>как сообщение было
+          опубликовано — удобно для логов и маршрутизации ответа</td></tr>
+        <tr><td><code>ea.BasicProperties</code></td><td>свойства из главы 2: <code>MessageId</code>,
+          <code>Headers</code>, <code>Persistent</code></td></tr>
+        <tr><td><code>BasicAckAsync(deliveryTag, multiple)</code></td><td><code>multiple: false</code> —
+          подтвердить только это сообщение; <code>true</code> — все доставки до него включительно</td></tr>
+        <tr><td><code>BasicNackAsync(deliveryTag, multiple, requeue)</code></td><td><code>requeue: true</code>
+          — вернуть в очередь и доставить снова; <code>false</code> — удалить или отправить в DLX, если он
+          настроен (глава 4)</td></tr>
+        <tr><td><code>BasicConsumeAsync(queue, autoAck, consumer)</code></td><td><code>autoAck: false</code> —
+          подтверждает приложение, а не брокер; <code>true</code> — брокер считает доставленным сразу</td></tr>
+      </tbody>
+    </table>
     <p>Обратите внимание: подтверждение относится к <strong>каналу</strong> и его <code>DeliveryTag</code>, а не
       к сообщению «вообще». Поэтому канал, на котором потребляют, не должен использоваться для других
       подтверждений из другого потока.</p>
 
     <h2>Requeue и признак повторной доставки</h2>
     <p>Если обработка не удалась, сообщение можно вернуть в очередь: <code>requeue: true</code>. Брокер доставит
-      его снова, и в этот раз <code>Redelivered</code> будет <code>true</code>. Реальный вывод:</p>
+      его снова, и в этот раз <code>Redelivered</code> будет <code>true</code>. Код опыта:</p>
     <div class="codewrap">
-      <pre><code class="language-text">delivery #1: body=job-1 Redelivered=False
-delivery #2: body=job-1 Redelivered=True
-q.requeue left=0</code></pre>
+      <pre><code class="language-csharp">await ch.QueueDeclareAsync("q.requeue", durable: false, exclusive: false, autoDelete: false); // очередь для опыта
+await ch.BasicPublishAsync("", "q.requeue", Encoding.UTF8.GetBytes("job-1"));                 // одно сообщение через default exchange
+
+var deliveries = 0;                                            // сколько раз сообщение уже приходило
+var consumer = new AsyncEventingBasicConsumer(ch);             // подписчик на том же канале
+consumer.ReceivedAsync += async (_, ea) =&gt;                     // обработчик каждой доставки
+{
+    deliveries++;                                              // считаем доставки
+    Console.WriteLine($"delivery #{deliveries}: body={Encoding.UTF8.GetString(ea.Body.Span)} Redelivered={ea.Redelivered}");
+    if (deliveries == 1)                                       // первая попытка «падает»
+        await ch.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: true);  // вернуть в очередь
+    else
+        await ch.BasicAckAsync(ea.DeliveryTag, multiple: false);                  // со второй — подтвердить
+};
+
+await ch.BasicConsumeAsync("q.requeue", autoAck: false, consumer); // подписка с ручными подтверждениями
+await Task.Delay(1500);                                            // ждём обе доставки
+
+var q = await ch.QueueDeclarePassiveAsync("q.requeue");            // passive: спросить состояние, не создавая очередь
+Console.WriteLine($"q.requeue left={q.MessageCount}");             // left=0 — сообщение подтверждено и удалено</code></pre>
     </div>
-    <p>Код, который это даёт: первый раз обработчик делает <code>BasicNack(requeue: true)</code>, второй —
-      <code>BasicAck</code>. Отсюда два вывода:</p>
+    <p>Реальный вывод:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">delivery #1: body=job-1 Redelivered=False   # первая доставка: сообщение новое
+delivery #2: body=job-1 Redelivered=True    # после nack(requeue: true) брокер прислал его снова
+q.requeue left=0                            # ack во второй раз убрал сообщение из очереди</code></pre>
+    </div>
+    <p>Отсюда два вывода:</p>
     <ul>
       <li><strong>Доставка — at-least-once.</strong> Одно и то же сообщение может быть обработано дважды: из-за
         requeue, из-за падения потребителя до подтверждения, из-за переподключения. Гарантии «ровно один раз»
@@ -87,8 +132,24 @@ q.requeue left=0</code></pre>
       медленный разбирается с первым сообщением. Проверим на двух потребителях одной очереди: 10 сообщений,
       потребитель A обрабатывает 100 мс, потребитель B — мгновенно.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await ch.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false);</code></pre>
+      <pre><code class="language-csharp">await ch.BasicQosAsync(
+    prefetchSize: 0,      // лимит по размеру в байтах; 0 — не ограничивать (на практике всегда 0)
+    prefetchCount: 1,     // сколько неподтверждённых сообщений разрешено держать потребителю
+    global: false);       // false — лимит на каждого потребителя, true — общий на весь канал</code></pre>
     </div>
+    <table>
+      <thead><tr><th>Аргумент</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>prefetchSize</code></td><td>ограничение по суммарному размеру неподтверждённых сообщений в
+          байтах; <code>0</code> — без ограничения. Ограничивать «по штукам» практичнее, поэтому обычно
+          <code>0</code></td></tr>
+        <tr><td><code>prefetchCount</code></td><td>сколько сообщений потребитель может держать
+          неподтверждёнными одновременно. <code>1</code> — строго по одному; <code>10</code> — пачкой</td></tr>
+        <tr><td><code>global</code></td><td><code>false</code> — лимит считается для каждого потребителя
+          отдельно; <code>true</code> — на весь канал (все потребители канала делят один лимит)</td></tr>
+      </tbody>
+    </table>
+
     <div class="codewrap">
       <pre><code class="language-text">prefetch=1/1, A slow:   A=1  B=9
 prefetch=10/10, A slow: A=0  B=10</code></pre>
@@ -124,34 +185,59 @@ prefetch=10/10, A slow: A=0  B=10</code></pre>
       время работы, а при остановке приложения канал закрывается, и неподтверждённые сообщения возвращаются в
       очередь.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">public sealed class OrdersConsumer(IConnection conn, IServiceScopeFactory scopes) : BackgroundService
+      <pre><code class="language-csharp">public sealed class OrdersConsumer(IConnection conn, IServiceScopeFactory scopes) : BackgroundService // DI даёт соединение и фабрику scope
 {
-    protected override async Task ExecuteAsync(CancellationToken ct)
+    protected override async Task ExecuteAsync(CancellationToken ct)  // ct отменяется при остановке приложения
     {
-        await using var ch = await conn.CreateChannelAsync(cancellationToken: ct);
-        await ch.BasicQosAsync(0, prefetchCount: 10, global: false);
+        await using var ch = await conn.CreateChannelAsync(cancellationToken: ct); // свой канал на всё время жизни сервиса
+        await ch.BasicQosAsync(0, prefetchCount: 10, global: false);               // не больше 10 неподтверждённых сообщений
 
-        var consumer = new AsyncEventingBasicConsumer(ch);
-        consumer.ReceivedAsync += async (_, ea) =&gt;
+        var consumer = new AsyncEventingBasicConsumer(ch);                         // подписчик на этом канале
+        consumer.ReceivedAsync += async (_, ea) =&gt;                                 // обработчик каждого сообщения
         {
             using var scope = scopes.CreateScope();      // scoped-сервисы (DbContext) — из scope
             try
             {
                 await scope.ServiceProvider.GetRequiredService&lt;OrderHandler&gt;()   // ваш scoped-обработчик
-                           .HandleAsync(ea.Body, ct);
-                await ch.BasicAckAsync(ea.DeliveryTag, false);
+                           .HandleAsync(ea.Body, ct);                            // работа с телом сообщения
+                await ch.BasicAckAsync(ea.DeliveryTag, false);                   // успех: убрать из очереди
             }
             catch (Exception)
             {
-                await ch.BasicNackAsync(ea.DeliveryTag, false, requeue: false);
+                await ch.BasicNackAsync(ea.DeliveryTag, false, requeue: false);  // ошибка: в DLX, не в очередь
             }
         };
 
-        await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer, cancellationToken: ct);
-        await Task.Delay(Timeout.Infinite, ct);           // держим сервис живым
+        await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer, cancellationToken: ct); // подписка
+        await Task.Delay(Timeout.Infinite, ct);           // держим сервис живым до остановки
     }
 }</code></pre>
     </div>
+    <p>Что здесь за что отвечает:</p>
+    <table>
+      <thead><tr><th>Элемент</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>OrdersConsumer(IConnection conn, IServiceScopeFactory scopes)</code></td><td>первичный
+          конструктор: DI передаёт singleton-соединение и фабрику scope</td></tr>
+        <tr><td><code>: BackgroundService</code></td><td>базовый класс фонового сервиса ASP.NET: хост вызывает
+          <code>ExecuteAsync</code> при старте и отменяет токен при остановке</td></tr>
+        <tr><td><code>CreateChannelAsync(cancellationToken: ct)</code></td><td>канал создаётся один раз; токен
+          прерывает открытие, если приложение останавливают</td></tr>
+        <tr><td><code>BasicQosAsync(0, prefetchCount: 10, global: false)</code></td><td>потребитель держит не
+          больше 10 неподтверждённых сообщений (разбор аргументов — выше)</td></tr>
+        <tr><td><code>scopes.CreateScope()</code></td><td>новый DI-scope на каждое сообщение: <code>DbContext</code>
+          и другие scoped-сервисы нельзя держать в singleton-потребителе</td></tr>
+        <tr><td><code>GetRequiredService&lt;OrderHandler&gt;()</code></td><td>получить scoped-обработчик из этого
+          scope</td></tr>
+        <tr><td><code>BasicAckAsync</code> / <code>BasicNackAsync</code></td><td>оба исхода обработки обязательны:
+          иначе сообщение останется неподтверждённым</td></tr>
+        <tr><td><code>BasicConsumeAsync(..., cancellationToken: ct)</code></td><td>подписка на очередь; токен
+          позволяет отменить её при остановке</td></tr>
+        <tr><td><code>Task.Delay(Timeout.Infinite, ct)</code></td><td>не даёт <code>ExecuteAsync</code>
+          завершиться: иначе хост решит, что сервис закончил работу</td></tr>
+      </tbody>
+    </table>
+
     <ul>
       <li><strong>Скоуп на сообщение.</strong> <code>DbContext</code> и другие scoped-сервисы нельзя держать в
         singleton-потребителе: на каждое сообщение — свой <code>IServiceScope</code>.</li>

@@ -39,17 +39,18 @@
     </table>
     <p>Проверено на перезапуске брокера. До рестарта было семь очередей, после — две:</p>
     <div class="codewrap">
-      <pre><code class="language-text"># до:  rabbitmqctl list_queues name durable messages
-q.durable       true    2
-q.transient     false   2
-orders.new      true    0
+      <pre><code class="language-text"># колонки: name — имя очереди, durable — переживёт ли рестарт, messages — сколько сообщений лежит
+# до рестарта:
+q.durable       true    2       # durable-очередь, 2 сообщения
+q.transient     false   2       # не-durable: исчезнет вместе с сообщениями
+orders.new      true    0       # durable, пустая
 q.dlq           false   1
 q.ttl           false   0
 q.payments      false   0
 q.requeue       false   0
 
-# после рестарта:
-q.durable       true    0      &lt;- очередь выжила, сообщения — нет
+# после рестарта брокера:
+q.durable       true    0       &lt;- очередь выжила, сообщения — нет: их публиковали без Persistent
 orders.new      true    0</code></pre>
     </div>
     <p>Два вывода, и второй важнее первого:</p>
@@ -71,20 +72,37 @@ orders.new      true    0</code></pre>
       очереди аргументом <code>x-message-ttl</code>. Проверено: сообщение с <code>Expiration = "1000"</code> в
       очереди без потребителей через две секунды исчезло:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">await ch.QueueDeclareAsync("q.ttl", durable: false, exclusive: false, autoDelete: false);
+      <pre><code class="language-csharp">await ch.QueueDeclareAsync("q.ttl", durable: false, exclusive: false, autoDelete: false); // очередь без потребителей
 
-var props = new BasicProperties { Expiration = "1000", ContentType = "application/json" };
-await ch.BasicPublishAsync("", "q.ttl", mandatory: false, basicProperties: props,
-                           body: Encoding.UTF8.GetBytes("{\"id\":8}"));
+var props = new BasicProperties { Expiration = "1000", ContentType = "application/json" }; // TTL 1000 мс — строкой
+await ch.BasicPublishAsync("", "q.ttl", mandatory: false, basicProperties: props,        // в очередь через default exchange
+                           body: Encoding.UTF8.GetBytes("{\"id\":8}"));                  // тело сообщения
 
-await Task.Delay(2000);
+await Task.Delay(2000);                                    // ждём дольше TTL: две секунды против одной
 
-var passive = await ch.QueueDeclarePassiveAsync("q.ttl");
-var got     = await ch.BasicGetAsync("q.ttl", autoAck: true);
-Console.WriteLine($"messages={passive.MessageCount} get={(got is null ? "null" : "…")}");
+var passive = await ch.QueueDeclarePassiveAsync("q.ttl");  // passive: спросить очередь, не создавая её
+var got     = await ch.BasicGetAsync("q.ttl", autoAck: true); // забрать одно сообщение, сразу подтвердив
+Console.WriteLine($"messages={passive.MessageCount} get={(got is null ? "null" : "…")}"); // messages=0 get=null
 
 // messages=0 get=null</code></pre>
     </div>
+    <p>Что означает каждый элемент:</p>
+    <table>
+      <thead><tr><th>Элемент</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>Expiration = "1000"</code></td><td>TTL <em>сообщения</em> в миллисекундах. В AMQP это
+          строковое поле, поэтому число берут в кавычки. Нет свойства — сообщение не устаревает</td></tr>
+        <tr><td><code>x-message-ttl</code></td><td>то же самое, но как аргумент <em>очереди</em>: применяется ко
+          всем сообщениям, которые в неё попали. Задаётся в <code>arguments</code> при объявлении</td></tr>
+        <tr><td><code>Task.Delay(2000)</code></td><td>пауза, чтобы TTL успел истечь: 2000 мс больше, чем
+          1000 мс</td></tr>
+        <tr><td><code>QueueDeclarePassiveAsync</code></td><td>passive-проверка: очередь не создаётся, а
+          возвращается её состояние — <code>MessageCount</code> и <code>ConsumerCount</code></td></tr>
+        <tr><td><code>BasicGetAsync(queue, autoAck: true)</code></td><td>синхронно забрать одно сообщение;
+          <code>autoAck: true</code> — сразу подтвердить. Если сообщений нет, вернётся <code>null</code></td></tr>
+      </tbody>
+    </table>
+
     <p>Зачем это нужно: сообщение, которое пролежало в очереди час, обычно уже бессмысленно — заказ отменён,
       цена изменилась. TTL превращает «вечно растущую очередь» в «очередь с осмысленным горизонтом».</p>
     <h2>Dead-letter: куда девать неудачное</h2>
@@ -97,22 +115,24 @@ Console.WriteLine($"messages={passive.MessageCount} get={(got is null ? "null" :
     </ul>
     <div class="codewrap">
       <pre><code class="language-csharp">// 1) обменник для «отказных» сообщений и очередь для них
-await ch.ExchangeDeclareAsync("ex.dlx", ExchangeType.Fanout, durable: false, autoDelete: false);
-await ch.QueueDeclareAsync("q.dlq", durable: false, exclusive: false, autoDelete: false);
-await ch.QueueBindAsync("q.dlq", "ex.dlx", routingKey: "");
+await ch.ExchangeDeclareAsync("ex.dlx", ExchangeType.Fanout, durable: false, autoDelete: false); // fanout: отдаст всем привязанным
+await ch.QueueDeclareAsync("q.dlq", durable: false, exclusive: false, autoDelete: false);       // очередь разбора
+await ch.QueueBindAsync("q.dlq", "ex.dlx", routingKey: "");                                     // у fanout ключ не важен
 
 // 2) рабочая очередь знает, куда отправлять отказы
-var queueArgs = new Dictionary&lt;string, object?&gt; { ["x-dead-letter-exchange"] = "ex.dlx" };
-await ch.QueueDeclareAsync("q.payments", durable: false, exclusive: false, autoDelete: false,
-                           arguments: queueArgs);
+var queueArgs = new Dictionary&lt;string, object?&gt; { ["x-dead-letter-exchange"] = "ex.dlx" };      // аргумент очереди
+await ch.QueueDeclareAsync("q.payments", durable: false, exclusive: false, autoDelete: false,   // рабочая очередь
+                           arguments: queueArgs);                                                // со ссылкой на DLX
 
 // 3) сообщение и отказ без возврата в очередь
-await ch.BasicPublishAsync("", "q.payments", Encoding.UTF8.GetBytes("{\"id\":7}"));
+await ch.BasicPublishAsync("", "q.payments", Encoding.UTF8.GetBytes("{\"id\":7}"));             // кладём в рабочую очередь
 
-consumer.ReceivedAsync += async (_, ea) =&gt;
+var paymentsConsumer = new AsyncEventingBasicConsumer(ch);                                       // отдельный подписчик для рабочей очереди
+paymentsConsumer.ReceivedAsync += async (_, ea) =&gt;                                              // обработчик (см. главу 3)
 {
-    await ch.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
-};</code></pre>
+    await ch.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);                    // false: не в очередь, а в DLX
+};
+await ch.BasicConsumeAsync("q.payments", autoAck: false, paymentsConsumer);                      // подписка на рабочую очередь</code></pre>
     </div>
     <div class="codewrap">
       <pre><code class="language-text">payments got {"id":7}, nack(requeue: false)
@@ -120,6 +140,20 @@ after nack: payments=0 dlq=1</code></pre>
     </div>
     <p>Сообщение ушло из рабочей очереди и появилось в <code>q.dlq</code>. Дальше с ним можно делать что угодно:
       разбирать вручную, отправлять в архив или возвращать в работу по расписанию.</p>
+    <p>Аргументы очереди, которые управляют этим механизмом:</p>
+    <table>
+      <thead><tr><th>Аргумент</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>x-dead-letter-exchange</code></td><td>имя обменника, куда перенаправлять «мёртвое»
+          сообщение. Без него <code>nack(requeue: false)</code> просто удалит сообщение</td></tr>
+        <tr><td><code>x-dead-letter-routing-key</code></td><td>с каким routing key отправлять в DLX; если не
+          задан — сохраняется исходный ключ сообщения</td></tr>
+        <tr><td><code>x-message-ttl</code></td><td>TTL всех сообщений очереди: истёк — сообщение уходит в
+          DLX</td></tr>
+        <tr><td><code>x-max-length</code></td><td>лимит числа сообщений в очереди: вытесненные тоже уходят в
+          DLX</td></tr>
+      </tbody>
+    </table>
     <div class="box note">
       <span class="t">DLX не «копирует», а переносит</span>
       <p>После срабатывания DLX сообщение существует только в очереди-приёмнике: в исходной очереди его больше
@@ -139,6 +173,19 @@ after nack: payments=0 dlq=1</code></pre>
 
 после N попыток: q.orders ──nack──▶ ex.failed ──▶ q.orders.failed (DLQ для разбора)</code></pre>
     </div>
+    <p>По шагам:</p>
+    <ol>
+      <li><strong>Отказ.</strong> Обработчик отвечает <code>nack</code>, и рабочая очередь отправляет сообщение в
+        свой <code>x-dead-letter-exchange</code> — <code>ex.retry</code>.</li>
+      <li><strong>Задержка.</strong> Сообщение лежит в <code>q.orders.retry</code>, у которой нет потребителей;
+        <code>x-message-ttl = 5s</code> отсчитывает время.</li>
+      <li><strong>Возврат.</strong> По истечении TTL сообщение «умирает» и уходит в DLX уже этой очереди —
+        <code>ex.dlx</code>, а он кладёт его обратно в <code>q.orders</code>.</li>
+      <li><strong>Лимит попыток.</strong> Если в заголовке <code>x-attempts</code> уже N, обработчик отправляет
+        сообщение в <code>ex.failed</code> вместо <code>ex.retry</code> — и оно остаётся в
+        <code>q.orders.failed</code> для разбора.</li>
+    </ol>
+
     <ul>
       <li><strong>Номер попытки</strong> хранят в заголовке (<code>x-attempts</code>) или в теле; по нему решают,
         вернуть сообщение в рабочую очередь или отправить в DLQ.</li>

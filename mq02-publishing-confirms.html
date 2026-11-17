@@ -55,41 +55,80 @@
       <code>BasicPublishAsync</code> свойства идут <strong>после</strong> флага <code>mandatory</code>.
       Считаем, что <code>ch</code> — канал из главы 1. Вызов либо без свойств вообще, либо так:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var props = new BasicProperties
+      <pre><code class="language-csharp">var props = new BasicProperties           // свойства сообщения — отдельный объект, тело передаётся отдельно
 {
-    Persistent  = true,
-    ContentType = "application/json",
-    MessageId   = Guid.NewGuid().ToString("N"),
-    Headers     = new Dictionary&lt;string, object?&gt; { ["schema"] = 2 },
+    Persistent  = true,                   // просить брокера записать на диск (работает вместе с durable-очередью)
+    ContentType = "application/json",     // подсказка потребителю, чем разбирать тело
+    MessageId   = Guid.NewGuid().ToString("N"),   // "N" — 32 hex-символа без дефисов: ключ для дедупликации
+    Headers     = new Dictionary&lt;string, object?&gt; { ["schema"] = 2 },  // свои пары «ключ — значение»
 };
 
 await ch.BasicPublishAsync(
-    exchange: "orders",
-    routingKey: "order.created",
-    mandatory: true,                  // обязательно явно, если передаёте свойства
-    basicProperties: props,
-    body: Encoding.UTF8.GetBytes("{\"id\":42}"));</code></pre>
+    exchange: "orders",                   // имя обменника ("" — default exchange, глава 1)
+    routingKey: "order.created",          // адрес сообщения: с ним сравниваются ключи привязок
+    mandatory: true,                      // вернуть сообщение, если ни одна очередь не подошла
+    basicProperties: props,               // объект со свойствами выше
+    body: Encoding.UTF8.GetBytes("{\"id\":42}"));   // тело — байты; строка сначала кодируется в UTF-8</code></pre>
     </div>
+    <p>Что означает каждое свойство и аргумент:</p>
+    <table>
+      <thead><tr><th>Что</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>Persistent = true</code></td><td>просит брокера записать сообщение на диск. Само по себе
+          ничего не гарантирует: нужна ещё <code>durable</code>-очередь, а что запись действительно
+          произошла — подтверждает confirm</td></tr>
+        <tr><td><code>ContentType</code></td><td>MIME-тип тела; потребитель по нему решает, чем
+          десериализовать</td></tr>
+        <tr><td><code>MessageId</code></td><td>идентификатор сообщения. <code>Guid.ToString("N")</code> —
+          32 hex-символа без дефисов; по нему делают дедупликацию и трассировку</td></tr>
+        <tr><td><code>Headers</code></td><td>произвольные пары «ключ — значение»; потребитель видит их в
+          <code>ea.BasicProperties.Headers</code>. Значения — простые типы: строка, число, байты</td></tr>
+        <tr><td><code>exchange</code>, <code>routingKey</code></td><td>куда и с каким адресом публикуем
+          (разобрано в главе 1)</td></tr>
+        <tr><td><code>mandatory</code></td><td>при передаче свойств его нужно указать явно: иначе сообщение без
+          подходящей привязки исчезнет молча</td></tr>
+        <tr><td><code>basicProperties</code></td><td>объект <code>BasicProperties</code>; порядок аргументов —
+          <code>exchange, routingKey, mandatory, basicProperties, body</code></td></tr>
+        <tr><td><code>body</code></td><td><code>ReadOnlyMemory&lt;byte&gt;</code>: строку превращают через
+          <code>Encoding.UTF8.GetBytes</code></td></tr>
+      </tbody>
+    </table>
     <h2>Publisher confirms: «брокер принял»</h2>
     <p>Публикация по AMQP асинхронная: <code>BasicPublishAsync</code> без подтверждений возвращается сразу после
       записи в сокет. Брокер при этом мог не принять сообщение — например, не найти обменник. Включается
       подтверждение на уровне канала:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">var opts = new CreateChannelOptions(
-    publisherConfirmationsEnabled: true,
-    publisherConfirmationTrackingEnabled: true);
+    publisherConfirmationsEnabled: true,          // включить на канале режим подтверждений (confirm.select)
+    publisherConfirmationTrackingEnabled: true);  // BasicPublishAsync должен дождаться ответа брокера
 
-await using var ch = await conn.CreateChannelAsync(opts);</code></pre>
+await using var ch = await conn.CreateChannelAsync(opts);   // канал с этими настройками; await using закроет его</code></pre>
     </div>
+    <table>
+      <thead><tr><th>Параметр</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>publisherConfirmationsEnabled</code></td><td>брокер подтверждает каждую публикацию
+          (<code>basic.ack</code>) или сообщает об отказе (<code>basic.nack</code>)</td></tr>
+        <tr><td><code>publisherConfirmationTrackingEnabled</code></td><td>связывает подтверждение с конкретным
+          вызовом: <code>BasicPublishAsync</code> не вернётся, пока ответ не пришёл. При <code>false</code>
+          подтверждения тоже идут, но вызов не ждёт их</td></tr>
+        <tr><td>оба аргумента</td><td>у конструктора <code>CreateChannelOptions</code> нет значений по
+          умолчанию: если передаёте объект, укажите оба. Обычный канал создают без аргументов:
+          <code>CreateChannelAsync()</code></td></tr>
+        <tr><td><code>await using</code></td><td>канал закроется при выходе из области видимости — вместе с ним
+          уходят его подписки и неподтверждённые публикации</td></tr>
+      </tbody>
+    </table>
+
     <p>Теперь <code>await BasicPublishAsync(...)</code> ждёт подтверждения от брокера. Проверено на двух
       сценариях:</p>
     <div class="codewrap">
-      <pre><code class="language-text">confirm channel: True
-published to existing exchange: ok
+      <pre><code class="language-text">confirm channel: True                      # канал открыт, режим подтверждений включён
+published to existing exchange: ok         # confirm пришёл: брокер принял сообщение
 
 missing exchange -&gt; AlreadyClosedException: Already closed: The AMQP operation was interrupted:
 AMQP close-reason, initiated by Peer, code=404, text='NOT_FOUND - no exchange
-'no.such.exchange' in vhost '/''</code></pre>
+'no.such.exchange' in vhost '/''           # 404: канал закрыт брокером, а не «сообщение не ушло»</code></pre>
     </div>
     <ul>
       <li><strong>Существующий обменник</strong> — подтверждение пришло, вызов завершился успешно.</li>
@@ -111,22 +150,56 @@ AMQP close-reason, initiated by Peer, code=404, text='NOT_FOUND - no exchange
       нет. По умолчанию такое сообщение <strong>молча выбрасывается</strong>. Флаг <code>mandatory: true</code>
       заставляет брокера вернуть его событием <code>BasicReturnAsync</code>:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// props — объект BasicProperties из предыдущего примера
-await ch.ExchangeDeclareAsync("ex.noroute", ExchangeType.Direct, durable: false, autoDelete: false);
+      <pre><code class="language-csharp">// using RabbitMQ.Client.Exceptions;   — здесь живёт PublishReturnException
+// props — объект BasicProperties из предыдущего примера
+await ch.ExchangeDeclareAsync("ex.noroute", ExchangeType.Direct, durable: false, autoDelete: false); // обменник без привязок
 
-ch.BasicReturnAsync += (_, ea) =&gt;
+ch.BasicReturnAsync += (_, ea) =&gt;                 // событие: брокер возвращает сообщение
 {
-    Console.WriteLine($"returned: reply={ea.ReplyText} exchange={ea.Exchange} rk={ea.RoutingKey}");
-    return Task.CompletedTask;
+    Console.WriteLine($"returned: reply={ea.ReplyText} exchange={ea.Exchange} rk={ea.RoutingKey}"); // reply=NO_ROUTE
+    return Task.CompletedTask;                    // обработчик асинхронный: возвращаем готовую задачу
 };
 
-await ch.BasicPublishAsync("ex.noroute", "no.binding", mandatory: true,
-    basicProperties: props, body: Encoding.UTF8.GetBytes("{\"id\":9}"));
+try
+{
+    await ch.BasicPublishAsync("ex.noroute", "no.binding", mandatory: true,   // mandatory: вернуть, если маршрута нет
+        basicProperties: props, body: Encoding.UTF8.GetBytes("{\"id\":9}"));
+}
+catch (PublishReturnException e)                  // канал с tracking: возврат приходит ещё и исключением
+{
+    Console.WriteLine($"publish returned: {e.Message}"); // 312 NO_ROUTE Exchange: ex.noroute Routing Key: no.binding
+}
 
 // returned: reply=NO_ROUTE exchange=ex.noroute rk=no.binding</code></pre>
     </div>
     <p><code>NO_ROUTE</code> — это и есть «сообщение не попало ни в одну очередь». Без <code>mandatory</code>
       вы об этом не узнаете: ни ошибки, ни возврата, сообщение просто исчезло.</p>
+    <p>Что лежит в событии возврата (<code>BasicReturnEventArgs</code>) и что означают аргументы:</p>
+    <table>
+      <thead><tr><th>Поле / аргумент</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>ReplyCode</code></td><td>числовой код причины: <code>312</code> — маршрута нет
+          (<code>NO_ROUTE</code>)</td></tr>
+        <tr><td><code>ReplyText</code></td><td>текст причины: <code>NO_ROUTE</code></td></tr>
+        <tr><td><code>Exchange</code>, <code>RoutingKey</code></td><td>куда и с каким адресом публиковали —
+          по ним видно, какая привязка не сработала</td></tr>
+        <tr><td><code>BasicProperties</code>, <code>Body</code></td><td>свойства и тело возвращённого
+          сообщения: его можно переотправить или сохранить</td></tr>
+        <tr><td><code>mandatory: true</code></td><td>у <code>BasicPublishAsync</code> — «верни сообщение,
+          если очередь не нашлась». При <code>false</code> сообщение выбрасывается молча</td></tr>
+        <tr><td><code>PublishReturnException</code></td><td>исключение клиента 7.x: возникает, когда на канале
+          включён <code>publisherConfirmationTrackingEnabled</code> и брокер вернул сообщение</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">В 7.x возврат приходит дважды: событием и исключением</span>
+      <p>Проверено на канале с подтверждениями и tracking. Сначала срабатывает
+        <code>BasicReturnAsync</code>, затем <code>BasicPublishAsync</code> бросает
+        <code>PublishReturnException</code> с текстом
+        <code>312 NO_ROUTE Exchange: ex.noroute Routing Key: no.binding</code>. Если tracking выключен (или канал
+        создан без подтверждений), вызов завершается успешно и остаётся только событие. Поэтому обработчик
+        возврата нужен в любом случае, а <code>try/catch</code> — если вы ждёте подтверждения.</p>
+    </div>
     <div class="box warn">
       <span class="t">Подтверждение не спасает от потери адресата</span>
       <p>Confirm отвечает на вопрос «брокер принял сообщение?», а не «сообщение дошло до очереди?». Поэтому
@@ -144,15 +217,16 @@ await ch.BasicPublishAsync("ex.noroute", "no.binding", mandatory: true,
       бизнес-данные, а отдельный воркер публикует его с подтверждениями и помечает отправленным
       (подробно — в .NET-разделе, глава про Outbox и идемпотентность).</p>
     <div class="codewrap">
-      <pre><code class="language-text">BEGIN;
-  INSERT INTO orders …;
-  INSERT INTO outbox (type, payload) VALUES ('order.created', …);
-COMMIT;                          -- бизнес-данные и намерение отправить — атомарно
+      <pre><code class="language-text">BEGIN;                                         -- одна транзакция на бизнес-запись и намерение отправить
+  INSERT INTO orders …;                        -- бизнес-данные
+  INSERT INTO outbox (type, payload) VALUES ('order.created', …);  -- сообщение как строка таблицы
+COMMIT;                                        -- либо видны оба INSERT, либо ни одного
 
--- отдельно, воркер:
+-- отдельно, воркер в другом процессе:
 --   SELECT … FROM outbox WHERE status = 'new' FOR UPDATE SKIP LOCKED
---   → publish с confirm
---   → UPDATE outbox SET status = 'sent'</code></pre>
+--        ^ берём пачку «новых» и пропускаем строки, которые уже захватил другой воркер
+--   → publish с confirm                         -- подтверждение = «брокер принял»
+--   → UPDATE outbox SET status = 'sent'         -- помечаем только после confirm</code></pre>
     </div>
     <p>Confirm здесь нужен, чтобы понять, когда можно ставить <code>sent</code>: без него воркер не знает,
       принял ли брокер сообщение, и вынужден либо дублировать, либо помечать отправленным «на веру».</p>
@@ -170,6 +244,10 @@ confirm: NOT received -&gt; TaskCanceledException   &lt;- с confirm: ждём �
     <p>Второй случай — тот же publish, но на канале с подтверждениями и таймаутом 3 секунды. Это лучший аргумент
       за confirms: без них перегрузка брокера выглядит как нормальная работа, пока очередь не начнёт «непонятно
       почему» пустеть.</p>
+    <p>Деталь, проверенная отдельно: <code>TaskCanceledException</code> означает «подтверждение не пришло», а не
+      «сообщение не отправлено». Оба сообщения остались в буфере клиента и ушли в брокер после снятия alarm —
+      в прогоне очередь содержала ровно 2 сообщения. Значит повтор после таймаута даст дубль, и обработчик
+      должен быть идемпотентным (глава 3).</p>
 
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
@@ -178,7 +256,8 @@ confirm: NOT received -&gt; TaskCanceledException   &lt;- с confirm: ждём �
         <li><strong>Свойства передаются после <code>mandatory</code></strong>:
           <code>BasicPublishAsync(exchange, routingKey, mandatory, basicProperties, body)</code>.</li>
         <li><strong>Confirm = «брокер принял»</strong>, а не «сообщение в очереди»; для адресата нужен
-          <code>mandatory</code> + обработчик <code>BasicReturnAsync</code>.</li>
+          <code>mandatory</code> + обработчик <code>BasicReturnAsync</code> (с tracking возврат приходит ещё и
+          исключением <code>PublishReturnException</code>).</li>
         <li><strong>При alarm публикация без confirm «успешна»</strong> — перегрузка видна только по таймауту
           подтверждения.</li>
         <li><strong>Persistent + durable + confirm</strong> — минимальный набор, чтобы сообщение переживало
