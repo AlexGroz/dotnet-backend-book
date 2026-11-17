@@ -47,6 +47,89 @@ await db.StringIncrementAsync("hits", 5);    // INCRBY hits 5 → 1 + 5 = 6
 Console.WriteLine($"after incr: {await db.StringGetAsync("hits")}");   // GET hits
 // after incr: 6</code></pre>
     </div>
+    <p>А что будет, если в тот же ключ положить не число? Проверено теми же вызовами (продолжение программы):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// SET hits один — Redis не проверяет, что именно вы кладёте: это просто строка
+await db.StringSetAsync("hits", "один");
+try { await db.StringIncrementAsync("hits"); }          // INCR hits
+catch (RedisServerException e) { Console.WriteLine($"word:   {e.Message}"); }
+// word:   ERR value is not an integer or out of range
+
+// SET hits 2.75 — double уезжает в Redis строкой "2.75"
+await db.StringSetAsync("hits", 2.75);
+Console.WriteLine($"stored double: [{await db.StringGetAsync("hits")}]");
+// stored double: [2.75]
+try { await db.StringIncrementAsync("hits"); }          // INCR hits — снова ошибка: это не целое
+catch (RedisServerException e) { Console.WriteLine($"double: {e.Message}"); }
+// double: ERR value is not an integer or out of range
+
+// INCRBYFLOAT hits 0.5 — вот так дробное считается;
+// перегрузка StringIncrementAsync с параметром double уходит именно этой командой
+Console.WriteLine($"incrbyfloat: {await db.StringIncrementAsync("hits", 0.5)}");
+// incrbyfloat: 3.25
+
+// SET hits 1: bool клиент кодирует как "1"/"0", а не как "true"/"false"
+await db.StringSetAsync("hits", true);
+Console.WriteLine($"bool: [{await db.StringGetAsync("hits")}] incr -> {await db.StringIncrementAsync("hits")}");
+// bool: [1] incr -> 2
+
+// INCR по ключу, который держит хеш, а не строку, — отдельная ошибка
+await db.HashSetAsync("user:1", "name", "Алексей");     // HSET user:1 name Алексей
+try { await db.StringIncrementAsync("user:1"); }
+catch (RedisServerException e) { Console.WriteLine($"hash:   {e.Message}"); }
+// hash:   WRONGTYPE Operation against a key holding the wrong kind of value</code></pre>
+    </div>
+    <p>Причина в том, что <code>INCR</code> — не «сложение вообще», а <strong>разбор строки в 64-битное целое</strong>
+      (<code>long</code>) и запись результата обратно десятичными цифрами. Типа у значения нет: Redis хранит
+      байты, а смысл им придаёт команда. Это видно по самому ключу: <code>TYPE hits</code> → <code>string</code>
+      (не «integer»), а <code>OBJECT ENCODING hits</code> → <code>int</code> — внутренняя компактная кодировка
+      для маленьких чисел; после <code>INCR</code> она остаётся <code>int</code>, а у положенного нами
+      <code>"2.75"</code> — <code>embstr</code>. Для команд кодировка не важна, для разбора — важна: строка
+      должна целиком читаться как целое. Отсюда четыре следствия:</p>
+    <ul>
+      <li><strong>Слово числом не станет.</strong> <code>INCR</code> отвечает
+        <code>ERR value is not an integer or out of range</code>, в .NET это
+        <code>RedisServerException</code>; команда не выполнена, значение осталось прежним
+        (<code>один</code> так и лежит в ключе).</li>
+      <li><strong>Дробное число — тоже.</strong> <code>2.75</code> хранится строкой <code>"2.75"</code>, и
+        <code>INCR</code> её не разбирает. Для дробей есть <code>INCRBYFLOAT</code> — в клиенте перегрузка
+        <code>StringIncrementAsync(key, 0.5)</code> с параметром <code>double</code>: она вернула
+        <code>3.25</code>. Для денег всё равно надёжнее хранить целые копейки и считать
+        <code>INCRBY</code>.</li>
+      <li><strong><code>bool</code> приезжает числом.</strong> Клиент кодирует <code>true</code> как
+        <code>"1"</code>, <code>false</code> как <code>"0"</code> — поэтому <code>INCR</code> после
+        <code>true</code> дал <code>2</code>. Это кодировка клиента, а не «понимание bool» сервером: строка
+        <code>"true"</code>, положенная через <code>redis-cli</code>, даёт ошибку.</li>
+      <li><strong>Разбор строгий, а не «почти числовой».</strong> Пробелы, <code>+5</code>, <code>0x10</code>,
+        ведущие нули и переполнение <code>long</code> — всё это отдельные отказы (таблица ниже). При этом
+        <code>INCR</code> не сбрасывает TTL: <code>SET hits 1 EX 100</code> → <code>TTL 100</code> →
+        <code>INCR</code> → значение <code>2</code>, <code>TTL</code> по-прежнему <code>100</code>.</li>
+    </ul>
+    <table>
+      <thead><tr><th>Что лежит в <code>hits</code></th><th><code>INCR hits</code></th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td><code>0</code>, <code>-5</code>, <code>42</code></td>
+          <td>работает: <code>1</code>, <code>-4</code>, <code>43</code></td><td>целое в десятичном виде</td></tr>
+        <tr><td>ключа нет</td><td>создаёт ключ со значением <code>1</code></td>
+          <td><code>INCR</code> на отсутствующем ключе = <code>0 + 1</code></td></tr>
+        <tr><td><code>007</code></td><td><code>ERR value is not an integer or out of range</code></td>
+          <td>ведущие нули не допускаются</td></tr>
+        <tr><td><code>" 1"</code> (с пробелом), <code>+5</code>, <code>0x10</code></td>
+          <td>та же ошибка</td><td>никаких «почти чисел»</td></tr>
+        <tr><td><code>1.5</code>, <code>2.75</code></td><td>та же ошибка</td>
+          <td>дробное — только <code>INCRBYFLOAT</code></td></tr>
+        <tr><td><code>один</code>, <code>true</code> (строкой), JSON</td><td>та же ошибка</td>
+          <td>не целое число</td></tr>
+        <tr><td><code>9223372036854775807</code></td>
+          <td><code>ERR increment or decrement would overflow</code></td><td>предел <code>long</code></td></tr>
+        <tr><td>хеш, список, множество</td>
+          <td><code>WRONGTYPE Operation against a key holding the wrong kind of value</code></td>
+          <td><code>INCR</code> работает только со строкой</td></tr>
+      </tbody>
+    </table>
+    <p>Практический вывод: <strong>«счётчик» и «просто строка» — один и тот же тип</strong>; всё зависит от
+      того, что в ключ положили. Если ключ мог достаться от старого кода или из JSON, ошибку <code>INCR</code>
+      нужно обрабатывать либо нормализовать значение перед первым инкрементом.</p>
     <ul>
       <li><strong>Когда:</strong> кэш ответа, счётчик, distributed-флаг, «ключ-значение с TTL».</li>
       <li><strong>Не когда:</strong> нужно менять одно поле большого объекта — это <code>hash</code>, иначе
@@ -84,6 +167,32 @@ Console.WriteLine($"hincrby visits={visits}");
       <li><strong>Сложность:</strong> <code>HSET</code>/<code>HGET</code>/<code>HINCRBY</code> — O(1),
         <code>HGETALL</code> — O(N) по числу полей.</li>
     </ul>
+
+    <div class="box note">
+      <span class="t">Откуда у <code>e</code> берутся <code>Name</code> и <code>Value</code></span>
+      <p>Компилятор знает о них из <strong>типа, который возвращает метод</strong>. Вот объявление из сборки
+        <code>StackExchange.Redis</code> 2.8.58 (получено рефлексией, не по памяти):
+        <code>HashGetAllAsync(RedisKey key, CommandFlags flags) → Task&lt;HashEntry[]&gt;</code>. Значит
+        <code>all</code> — это массив <code>HashEntry</code>. В выражении <code>all.Select(e =&gt; …)</code>
+        параметр <code>e</code> получает тип <code>HashEntry</code> по выводу типов, и дальше действует обычное
+        правило C#: у значения доступны ровно те члены, что объявлены в его типе.</p>
+      <p>Что объявлено в <code>HashEntry</code> (тоже из рефлексии): это <strong>struct</strong>
+        (<code>isValueType = True</code>) с двумя свойствами типа <code>RedisValue</code> — <code>Name</code>
+        и <code>Value</code> — и единственным публичным конструктором
+        <code>HashEntry(RedisValue name, RedisValue value)</code>. Есть ещё свойство <code>Key</code>, но оно
+        помечено <code>[Obsolete("Please use Name")]</code> — это старый алиас, использовать не надо.</p>
+      <p>Теперь про <code>new HashEntry("name", "Алексей")</code>: это <em>вызов конструктора</em>, а не
+        «объявление полей». Каждый вызов создаёт одно значение-пару; два ваших вызова — две пары, которые уедут
+        одной командой <code>HSET user:1 name Алексей plan pro</code>. Слова «name» и «plan» здесь —
+        <em>данные</em> (имена полей хеша), а <code>Name</code>/<code>Value</code> — <em>члены типа</em>, через
+        которые программа эти данные читает. Одно и то же слово в двух ролях — отсюда и ощущение, что поля
+        «откуда-то взялись».</p>
+      <p>Проверка: если написать <code>e.Title</code>, сборка падает с
+        <code>error CS1061: 'HashEntry' does not contain a definition for 'Title'</code>. Список доступных
+        членов задаёт тип, а не то, что вы указывали при создании значения. Что <code>HashEntry</code> —
+        структура, а не класс, тоже не случайность: массив пар тогда лежит одним блоком значений, без отдельного
+        объекта на каждую пару.</p>
+    </div>
     <h2>Список: <code>list</code></h2>
     <p>Двусторонняя очередь: <code>LPUSH</code>/<code>RPUSH</code> с одного конца, <code>LPOP</code>/<code>RPOP</code>
       с другого. Из неё получается и стек, и очередь. Главное — <strong>блокирующее чтение</strong>: клиент ждёт
@@ -100,8 +209,45 @@ Console.WriteLine($"lpop:   {await db.ListLeftPopAsync("q")}");
 
 // LLEN q — сколько элементов осталось
 Console.WriteLine($"length: {await db.ListLengthAsync("q")}");
-// length: 1</code></pre>
+// length: 1
+
+// RPUSH q task-3 — добавить СЛЕДУЮЩИЙ элемент: та же команда, но с одним значением.
+// Перегрузка здесь принимает RedisValue, а не массив; возвращает она новую длину списка
+var lenAfter = await db.ListRightPushAsync("q", "task-3");
+Console.WriteLine($"pushed task-3, length: {lenAfter}");
+// pushed task-3, length: 2
+
+// RPUSH q task-4 task-5 — а можно снова пачкой, массивом (отдельной перегрузкой)
+await db.ListRightPushAsync("q", new RedisValue[] { "task-4", "task-5" });
+
+// LRANGE q 0 -1 — что лежит в очереди сейчас: 0 — первый элемент, -1 — последний
+Console.WriteLine($"q: {string.Join(", ", await db.ListRangeAsync("q"))}");
+// q: task-2, task-3, task-4, task-5
+
+// LPUSH q task-0 — тот же список, но с ДРУГОГО конца (левого): элемент встал первым
+await db.ListLeftPushAsync("q", "task-0");
+Console.WriteLine($"after lpush task-0: {string.Join(", ", await db.ListRangeAsync("q"))}");
+// after lpush task-0: task-0, task-2, task-3, task-4, task-5</code></pre>
     </div>
+    <p>Итого добавить элемент можно тремя способами — это <code>RPUSH</code> с одним значением, <code>RPUSH</code>
+      с массивом и <code>LPUSH</code> с другого конца:</p>
+    <table>
+      <thead><tr><th>C#</th><th>Команда</th><th>Результат</th></tr></thead>
+      <tbody>
+        <tr><td><code>ListRightPushAsync("q", "task-3")</code></td><td><code>RPUSH q task-3</code></td>
+          <td>один элемент в правый конец, возвращает новую длину (<code>2</code>)</td></tr>
+        <tr><td><code>ListRightPushAsync("q", new RedisValue[] { … })</code></td>
+          <td><code>RPUSH q task-4 task-5</code></td><td>несколько элементов одной командой, длина
+          <code>4</code></td></tr>
+        <tr><td><code>ListLeftPushAsync("q", "task-0")</code></td><td><code>LPUSH q task-0</code></td>
+          <td>в левый конец — элемент становится первым</td></tr>
+      </tbody>
+    </table>
+    <p>Массива в параметрах «через запятую» у метода нет: пачка передаётся именно <code>RedisValue[]</code>.
+      Зато обратно метод возвращает <code>long</code> — новую длину списка, поэтому <code>LLEN</code> после
+      вставки вызывать не нужно. И обратите внимание на порядок: <code>RPUSH</code> добавляет в конец, а
+      <code>LPOP</code> забирает из начала — это и есть очередь «первым пришёл, первым ушёл» из первой части
+      примера.</p>
     <p>Блокирующий вариант в Redis — команда <code>BLPOP</code>. Тонкость, которая ломает половину примеров из
       интернета: <strong>в <code>StackExchange.Redis</code> 2.8 у <code>IDatabase</code> нет типизированного
       <code>ListLeftPop(key, timeout)</code></strong> — есть только неблокирующий вариант и вариант с
@@ -231,6 +377,71 @@ alice
     <p>Вес — <em>число с плавающей точкой</em>, а не обязательно «очки»: часто туда кладут метку времени,
       и тогда получается очередь с приоритетом по времени (следующий пример). Элемент уникален: повторный
       <code>ZADD</code> с тем же именем не добавит второй, а <em>заменит</em> вес.</p>
+
+    <h3>Ничьи: что будет, если у двух элементов одинаковый вес</h3>
+    <p>Равные веса — обычное дело (у двух игроков по 30 очков). Порядок внутри такой группы задаёт
+      <strong>имя элемента</strong>, побайтово, а не порядок вставки: Redis его просто не хранит. Проверено на
+      том же <code>board</code>, к которому добавили <code>dave</code> с весом <code>30</code>, как у
+      <code>bob</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ZADD board 30 dave — вес тот же, что у bob: получается ничья
+await db.SortedSetAddAsync("board", "dave", 30);
+
+// ZRANGE board 0 -1 WITHSCORES — по возрастанию веса; внутри равных весов — по возрастанию имени
+var asc = await db.SortedSetRangeByRankWithScoresAsync("board", 0, -1);
+Console.WriteLine($"zrange:    {string.Join(", ", asc.Select(x => $"{x.Element}={x.Score}"))}");
+// zrange:    carol=20, alice=25, bob=30, dave=30
+
+// ZREVRANGE board 0 -1 WITHSCORES — по убыванию веса; внутри ничьей — по УБЫВАНИЮ имени
+var desc = await db.SortedSetRangeByRankWithScoresAsync("board", 0, -1, Order.Descending);
+Console.WriteLine($"zrevrange: {string.Join(", ", desc.Select(x => $"{x.Element}={x.Score}"))}");
+// zrevrange: dave=30, bob=30, alice=25, carol=20
+
+// ZRANK / ZREVRANK — позиции в этих двух порядках у ничьей разные
+Console.WriteLine($"rank bob={await db.SortedSetRankAsync("board", "bob")} dave={await db.SortedSetRankAsync("board", "dave")}");
+// rank bob=2 dave=3
+Console.WriteLine($"revrank bob={await db.SortedSetRankAsync("board", "bob", Order.Descending)} dave={await db.SortedSetRankAsync("board", "dave", Order.Descending)}");
+// revrank bob=1 dave=0
+
+// Топ-2 после ничьей: dave и bob (по 30), carol с 20 из топ-2 выпал
+var top2 = await db.SortedSetRangeByRankWithScoresAsync("board", 0, 1, Order.Descending);
+Console.WriteLine($"top2 now: {string.Join(", ", top2.Select(x => $"{x.Element}={x.Score}"))}");
+// top2 now: dave=30, bob=30
+
+// ZADD board 30 bob — повторный ZADD того же элемента не создаёт дубликат
+await db.SortedSetAddAsync("board", "bob", 30);
+Console.WriteLine($"length after zadd bob 30 again: {await db.SortedSetLengthAsync("board")}");
+// length after zadd bob 30 again: 4
+
+// ZADD board 30 Zoe — ещё одна ничья: 'Z' = 0x5A, 'b' = 0x62, значит Zoe идёт РАНЬШЕ bob
+await db.SortedSetAddAsync("board", "Zoe", 30);
+var tie = await db.SortedSetRangeByScoreWithScoresAsync("board", 30, 30);
+Console.WriteLine($"ties 30: {string.Join(", ", tie.Select(x => $"{x.Element}={x.Score}"))}");
+// ties 30: Zoe=30, bob=30, dave=30
+
+top2 = await db.SortedSetRangeByRankWithScoresAsync("board", 0, 1, Order.Descending);
+Console.WriteLine($"top2 with Zoe: {string.Join(", ", top2.Select(x => $"{x.Element}={x.Score}"))}");
+// top2 with Zoe: dave=30, bob=30</code></pre>
+    </div>
+    <ul>
+      <li><strong>Ничья разрешается именем, а не временем вставки.</strong> <code>dave</code> добавлен позже
+        <code>bob</code> и с тем же весом — в <code>ZRANGE</code> он стоит после него, но не потому, что
+        «пришёл вторым».</li>
+      <li><strong>В <code>ZREVRANGE</code> порядок ничьей переворачивается</strong> вместе с весом: было
+        <code>bob, dave</code>, стало <code>dave, bob</code>. Поэтому и ранги разные:
+        <code>ZRANK bob=2, dave=3</code>, а <code>ZREVRANK bob=1, dave=0</code>.</li>
+      <li><strong>Сравнение побайтовое</strong> (<code>'Z' = 0x5A &lt; 'b' = 0x62</code>): <code>Zoe</code>
+        оказывается первой в группе с весом 30. Это не «алфавитный порядок по локали», а сравнение имён как
+        строк байтов — важно для смешанного регистра и не-ASCII имён.</li>
+      <li><strong>Топ-N при ничьих зависит от имён, но результат детерминирован:</strong> после добавления
+        <code>Zoe</code> топ-2 — <code>dave</code> и <code>bob</code>, а не <code>Zoe</code>: в обратном
+        порядке <code>dave</code> и <code>bob</code> стоят раньше <code>Zoe</code>.</li>
+      <li><strong>Повторный <code>ZADD</code> — не дубликат:</strong> длина осталась <code>4</code>, у
+        <code>bob</code> просто ещё раз записан вес <code>30</code>.</li>
+    </ul>
+    <p>Если «кто первый при равных очках» важно по смыслу (кто раньше набрал те же 30), одного веса
+      недостаточно: Redis не хранит порядок вставки. Тогда вес делают уникальным (например, составным) или
+      держат порядок отдельно — иначе место в топе будет решать имя.</p>
     <p>Второе применение — <strong>лимит запросов</strong> («не больше N за минуту»): элементы — запросы,
       вес — метка времени, а количество считается по диапазону:</p>
     <div class="codewrap">
