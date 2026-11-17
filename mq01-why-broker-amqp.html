@@ -41,43 +41,309 @@
 
     <h2>Модель AMQP 0-9-1: обменник, привязка, очередь</h2>
     <p>RabbitMQ работает по протоколу <strong>AMQP 0-9-1</strong>. В нём producer <em>не пишет в очередь
-      напрямую</em>: он публикует сообщение в <strong>exchange</strong> (обменник), а тот по
-      <strong>binding</strong> (привязке) решает, в какие очереди его положить.</p>
-    <div class="codewrap">
-      <pre><code class="language-text">producer ──publish(routing key)──▶ exchange ──binding──▶ queue ──consume──▶ consumer
-                                      │
-                                      └─ тип решает, кому достанется сообщение
-
-direct:  routing key = ключ привязки       (order.new → order.new)
-topic:   шаблон с * и #                    (order.* → order.new, order.paid)
-fanout:  всем привязанным очередям          (игнорирует routing key)
-headers: по значениям заголовков</code></pre>
-    </div>
+      напрямую</em>: он публикует сообщение в <strong>exchange</strong> (обменник) и указывает
+      <strong>routing key</strong> — «адрес на конверте». Кому достанется сообщение, решают две вещи
+      <em>вместе</em>:</p>
     <ul>
-      <li><strong>Очередь — это буфер</strong>, у неё есть имя, durability и аргументы (TTL, dead-letter,
-        лимит длины). Сообщения хранятся в ней, пока их не подтвердят.</li>
-      <li><strong>Обменник — это правило маршрутизации.</strong> Если ни одна привязка не подошла, сообщение
-        <em>отбрасывается</em> (об этом ниже — флаг <code>mandatory</code>).</li>
-      <li><strong>Default exchange</strong> — пустая строка <code>""</code>: у него автоматически есть привязки
-        ко всем очередям по их именам. Поэтому <code>publish(exchange: "", routingKey: "payments")</code>
-        кладёт сообщение прямо в очередь <code>payments</code>.</li>
+      <li><strong>Тип обменника — это правило сравнения.</strong> Тип определяет, как routing key сообщения
+        сопоставляется с привязками: <code>direct</code> требует точного совпадения, <code>topic</code> —
+        совпадения с шаблоном, <code>fanout</code> не сравнивает ничего, <code>headers</code> смотрит на
+        заголовки сообщения.</li>
+      <li><strong>Привязки (bindings) — это участники сравнения.</strong> Каждая привязка говорит: «очередь
+        X хочет сообщения из этого обменника с таким-то ключом». Без привязок обменник не отправит
+        сообщение ни в одну очередь — каким бы ни был его тип.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-text">producer ──publish(routing key, заголовки)──▶ exchange ──binding──▶ queue ──consume──▶ consumer
+                                                │
+        тип обменника — КАК сравнивать routing key с привязками
+        привязки      — КАКИЕ очереди и с какими ключами участвуют в сравнении</code></pre>
+    </div>
+    <p>«Обменник решил по привязке» и «тип решил» — это одна и та же операция с двух сторон: тип — правило,
+      привязки — данные для этого правила. Поэтому обменник не «знает» очереди заранее: он перебирает свои
+      привязки и применяет к каждой правило своего типа.</p>
+    <ul>
+      <li><strong>Очередь (queue) — это буфер.</strong> У неё есть имя, durability и аргументы (TTL,
+        dead-letter, лимит длины). Сообщения лежат в ней, пока их не подтвердят.</li>
+      <li><strong>Обменник (exchange) — это сортировочный пункт.</strong> Сам он сообщения не хранит: он
+        сравнивает routing key с привязками и раскладывает копии по очередям. Если ни одна привязка не
+        подошла, сообщение <em>отбрасывается</em> (как это заметить — флаг <code>mandatory</code>, глава 2).</li>
+      <li><strong>Привязка (binding) — это запись «очередь + ключ».</strong> Она создаётся отдельно
+        (<code>QueueBindAsync</code>), у неё есть ключ привязки (для <code>direct</code> и
+        <code>topic</code>) или аргументы с заголовками (для <code>headers</code>).</li>
       <li><strong>Consumer</strong> подписывается на очередь и получает сообщения по мере готовности; сколько
         он держит «в работе» одновременно — регулирует <code>prefetch</code> (глава 3).</li>
     </ul>
+
+    <h3>Четыре типа: чем они отличаются</h3>
+    <p>Разница только в правиле сравнения. Возьмём routing key <code>order.created</code> и посмотрим, что
+      сделает с ним каждый тип:</p>
+    <table>
+      <thead><tr><th>Тип</th><th>Что сравнивает</th><th>Пример привязки</th><th>Что дойдёт</th></tr></thead>
+      <tbody>
+        <tr><td><code>direct</code></td>
+          <td>routing key и ключ привязки должны совпасть <em>точно</em>, символ в символ</td>
+          <td>ключ <code>order.created</code></td>
+          <td><code>order.created</code> — да; <code>order.created.eu</code> — нет</td></tr>
+        <tr><td><code>topic</code></td>
+          <td>routing key проверяется по шаблону: <code>*</code> — ровно одно слово,
+            <code>#</code> — ноль и более слов; слова разделены точкой</td>
+          <td><code>order.*</code> и <code>order.#</code></td>
+          <td><code>order.created</code> — оба; <code>order.created.eu</code> — только
+            <code>order.#</code>; <code>order</code> — только <code>order.#</code></td></tr>
+        <tr><td><code>fanout</code></td>
+          <td>ничего: сообщение получают <em>все</em> очереди, привязанные к обменнику</td>
+          <td>любой ключ — он игнорируется</td>
+          <td>все привязанные очереди, независимо от routing key</td></tr>
+        <tr><td><code>headers</code></td>
+          <td>заголовки сообщения и аргументы привязки: <code>x-match=all</code> — должны совпасть все
+            пары, <code>x-match=any</code> — хотя бы одна</td>
+          <td><code>x-match=all</code>, <code>format=pdf</code>, <code>type=report</code></td>
+          <td>сообщения, у которых в заголовках есть нужные пары</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Слова и точки в <code>topic</code></span>
+      <p>Ключ режется на слова по точке: <code>order.created.eu</code> — три слова. <code>order.*</code>
+        совпадёт с двумя словами, но не с тремя и не с одним; <code>order.#</code> совпадёт и с
+        <code>order</code>, и с <code>order.created.eu</code>. Шаблон работает только целым словом: в
+        <code>order.*.eu</code> звёздочка — отдельное слово, а не часть слова.</p>
+    </div>
+    <h3>Проверка: один и тот же routing key в четырёх типах</h3>
+    <p>Программа создаёт по обменнику каждого типа, привязывает к ним очереди и печатает глубину очередей
+      после каждой публикации (консольный проект .NET 8 с включёнными неявными <code>using</code>; проверено
+      на RabbitMQ 3.13.7, клиент <code>RabbitMQ.Client</code> 7.2.2):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using System.Text;                                                  // Encoding.UTF8.GetBytes
+using RabbitMQ.Client;                                              // ConnectionFactory, IChannel, ExchangeType
+
+var factory = new ConnectionFactory { HostName = "localhost" };      // порт 5672 и guest/guest — по умолчанию
+await using var conn = await factory.CreateConnectionAsync();       // TCP-соединение с брокером
+await using var ch = await conn.CreateChannelAsync();               // канал: в нём живут объявления и публикации
+
+async Task&lt;uint&gt; Depth(string q) =&gt;                                // сколько сообщений в очереди
+    (await ch.QueueDeclarePassiveAsync(q)).MessageCount;            // passive: не создаёт, а только спрашивает
+
+async Task Publish(string ex, string rk, string body)               // публикация с паузой
+{
+    await ch.BasicPublishAsync(ex, rk, Encoding.UTF8.GetBytes(body)); // exchange, routing key, тело
+    await Task.Delay(200);                                          // без publisher confirms публикация асинхронна
+}
+
+// ---- direct: ключ сообщения и ключ привязки должны совпасть точно
+await ch.ExchangeDeclareAsync("ex.direct", ExchangeType.Direct, durable: false, autoDelete: false); // обменник; durable=false — до перезапуска
+await ch.QueueDeclareAsync("q.d.created", durable: false, exclusive: false, autoDelete: false);     // очередь для order.created
+await ch.QueueDeclareAsync("q.d.paid", durable: false, exclusive: false, autoDelete: false);        // очередь для order.paid
+await ch.QueueBindAsync("q.d.created", "ex.direct", "order.created"); // привязка: обменник ex.direct → очередь q.d.created, ключ order.created
+await ch.QueueBindAsync("q.d.paid", "ex.direct", "order.paid");       // вторая привязка: тот же обменник, другой ключ
+await Publish("ex.direct", "order.created", "1");                     // routing key совпал с первой привязкой
+Console.WriteLine($"direct order.created    -> created={await Depth("q.d.created")} paid={await Depth("q.d.paid")}");
+await Publish("ex.direct", "order.created.eu", "1");                  // не совпал ни с одной привязкой
+Console.WriteLine($"direct order.created.eu -> created={await Depth("q.d.created")} paid={await Depth("q.d.paid")}");
+
+// ---- topic: ключ проверяется по шаблону, * — одно слово, # — ноль и более
+await ch.ExchangeDeclareAsync("ex.topic", ExchangeType.Topic, durable: false, autoDelete: false);   // обменник topic
+await ch.QueueDeclareAsync("q.t.star", durable: false, exclusive: false, autoDelete: false);        // очередь под шаблон order.*
+await ch.QueueDeclareAsync("q.t.hash", durable: false, exclusive: false, autoDelete: false);        // очередь под шаблон order.#
+await ch.QueueBindAsync("q.t.star", "ex.topic", "order.*");           // ключ привязки — шаблон «order и ровно одно слово»
+await ch.QueueBindAsync("q.t.hash", "ex.topic", "order.#");           // ключ привязки — шаблон «order и сколько угодно слов»
+await Publish("ex.topic", "order.created", "1");                      // два слова: подходят оба шаблона
+Console.WriteLine($"topic  order.created    -> star={await Depth("q.t.star")} hash={await Depth("q.t.hash")}");
+await Publish("ex.topic", "order.created.eu", "1");                   // три слова: подходит только order.#
+Console.WriteLine($"topic  order.created.eu -> star={await Depth("q.t.star")} hash={await Depth("q.t.hash")}");
+await Publish("ex.topic", "order", "1");                              // одно слово: # допускает ноль слов после order
+Console.WriteLine($"topic  order            -> star={await Depth("q.t.star")} hash={await Depth("q.t.hash")}");
+
+// ---- fanout: ключи не сравниваются вообще
+await ch.ExchangeDeclareAsync("ex.fanout", ExchangeType.Fanout, durable: false, autoDelete: false); // обменник fanout
+await ch.QueueDeclareAsync("q.f.one", durable: false, exclusive: false, autoDelete: false);         // первая очередь
+await ch.QueueDeclareAsync("q.f.two", durable: false, exclusive: false, autoDelete: false);         // вторая очередь
+await ch.QueueBindAsync("q.f.one", "ex.fanout", "");                  // ключ привязки пустой — и это нормально
+await ch.QueueBindAsync("q.f.two", "ex.fanout", "ignored.key");       // можно написать что угодно: fanout его не смотрит
+await Publish("ex.fanout", "any.key", "1");                           // получат обе очереди
+Console.WriteLine($"fanout any.key          -> one={await Depth("q.f.one")} two={await Depth("q.f.two")}");
+
+// ---- headers: сравниваются заголовки сообщения и аргументы привязки
+await ch.ExchangeDeclareAsync("ex.headers", ExchangeType.Headers, durable: false, autoDelete: false); // обменник headers
+await ch.QueueDeclareAsync("q.h.all", durable: false, exclusive: false, autoDelete: false);           // очередь «все пары»
+await ch.QueueDeclareAsync("q.h.any", durable: false, exclusive: false, autoDelete: false);           // очередь «любая пара»
+await ch.QueueBindAsync("q.h.all", "ex.headers", "", new Dictionary&lt;string, object?&gt;   // привязка с аргументами
+{
+    ["x-match"] = "all", ["format"] = "pdf", ["type"] = "report",     // нужны оба заголовка и x-match=all
+});
+await ch.QueueBindAsync("q.h.any", "ex.headers", "", new Dictionary&lt;string, object?&gt;   // вторая привязка
+{
+    ["x-match"] = "any", ["format"] = "pdf", ["type"] = "report",     // достаточно одного совпадения
+});
+
+async Task PublishHeaders(Dictionary&lt;string, object?&gt; h)              // публикация с заголовками
+{
+    var props = new BasicProperties { Headers = h };                  // заголовки живут в свойствах сообщения
+    await ch.BasicPublishAsync("ex.headers", "", mandatory: false, basicProperties: props, body: Encoding.UTF8.GetBytes("1"));
+    await Task.Delay(200);                                            // пауза, чтобы брокер разложил сообщение
+    Console.WriteLine($"headers {string.Join(",", h.Select(kv =&gt; $"{kv.Key}={kv.Value}"))} -&gt; all={await Depth("q.h.all")} any={await Depth("q.h.any")}");
+}
+
+await PublishHeaders(new() { ["format"] = "pdf" });                   // all: не хватает type, any: хватает format
+await PublishHeaders(new() { ["format"] = "pdf", ["type"] = "report" }); // all: обе пары на месте
+await PublishHeaders(new() { ["format"] = "csv", ["type"] = "report" }); // all: format не тот, any: type совпал</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">direct order.created    -&gt; created=1 paid=0
+direct order.created.eu -&gt; created=1 paid=0
+topic  order.created    -&gt; star=1 hash=1
+topic  order.created.eu -&gt; star=1 hash=2
+topic  order            -&gt; star=1 hash=3
+fanout any.key          -&gt; one=1 two=1
+headers format=pdf -&gt; all=0 any=1
+headers format=pdf,type=report -&gt; all=1 any=2
+headers format=csv,type=report -&gt; all=1 any=3</code></pre>
+    </div>
+    <p>Что видно в выводе:</p>
+    <ul>
+      <li><strong><code>direct</code></strong> — <code>order.created</code> попало только в свою очередь, а
+        <code>order.created.eu</code> не совпало ни с одним ключом: <code>created=1 paid=0</code> не
+        изменилось, сообщение исчезло.</li>
+      <li><strong><code>topic</code></strong> — <code>order.*</code> поймал два слова, но не три
+        (<code>star=1</code>), а <code>order.#</code> поймал и <code>order.created.eu</code>, и даже
+        <code>order</code> без хвоста (<code>hash=3</code>).</li>
+      <li><strong><code>fanout</code></strong> — ключи привязок <code>""</code> и <code>ignored.key</code>
+        ни на что не повлияли: сообщение с ключом <code>any.key</code> получили обе очереди.</li>
+      <li><strong><code>headers</code></strong> — <code>x-match=all</code> требует все пары (с одним
+        заголовком очередь осталась пустой), <code>x-match=any</code> — хотя бы одну.</li>
+    </ul>
+
+    <h3>Default exchange: обменник с пустым именем</h3>
+    <p>Обменник с именем <code>""</code> — не «без обменника» и не сокращение: это настоящий обменник,
+      который существует в каждом vhost с момента его создания. У него тип <code>direct</code> и
+      <code>durable: true</code>, и у него <em>уже есть</em> привязка к каждой очереди — с ключом, равным
+      имени очереди. Поэтому публикация с пустым именем обменника попадает прямо в очередь:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await ch.QueueDeclareAsync("payments", durable: false, exclusive: false, autoDelete: false); // объявляем очередь payments
+await ch.BasicPublishAsync("", "payments", Encoding.UTF8.GetBytes("hello"));                 // exchange "", routing key = имя очереди
+await Task.Delay(300);                                                                       // даём брокеру разложить сообщение
+var q = await ch.QueueDeclarePassiveAsync("payments");                                       // спрашиваем состояние очереди
+Console.WriteLine($"payments depth after publish to \"\": {q.MessageCount}");                // 1</code></pre>
+    </div>
+    <p>Теперь посмотрим на брокер со стороны: в списке обменников он последний — с пустым именем, а в списке
+      привязок появляется строка с пустым <code>source_name</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec rmq3 rabbitmqctl list_exchanges name type
+# Listing exchanges for vhost / ...
+# name                type
+# amq.direct          direct
+# amq.topic           topic
+# amq.headers         headers
+# amq.fanout          fanout
+# amq.rabbitmq.trace  topic
+# amq.match           headers
+#                     direct      &lt;- пустое имя: это и есть default exchange
+
+docker exec rmq3 rabbitmqctl list_bindings source_name destination_name routing_key
+# Listing bindings for vhost /...
+# source_name  destination_name  routing_key
+#              payments          payments    &lt;- неявная привязка: из "" в очередь payments по ключу payments
+
+docker exec rmq3 rabbitmqctl list_queues name messages
+# name      messages
+# payments  1</code></pre>
+    </div>
+
+    <p>Объявить его, привязать к нему очередь или удалить его нельзя: сервер отвечает
+      <code>403 ACCESS_REFUSED</code> и закрывает канал, в котором была команда. Это касается и
+      «безобидной» проверки <code>ExchangeDeclarePassiveAsync("")</code> — она падает так же:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">try
+{
+    await ch.QueueBindAsync("payments", "", "payments");   // попытка привязать очередь к default exchange
+}
+catch (Exception e)
+{
+    Console.WriteLine(e.Message);
+    // ... code=403, text='ACCESS_REFUSED - operation not permitted on the default exchange'
+    Console.WriteLine($"channel open: {ch.IsOpen}");       // False: канал уже закрыт брокером
+}</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Тихая потеря на default exchange</span>
+      <p>Если routing key не совпал с именем ни одной очереди, ошибки не будет: сообщение исчезнет, а канал
+        останется открытым (проверено: <code>publish("", "no-such-queue", ...)</code> →
+        <code>open=True</code>). Заметить потерю можно только флагом <code>mandatory: true</code> — тогда
+        брокер вернёт сообщение с кодом <code>312 NO_ROUTE</code> (глава 2).</p>
+    </div>
+    <p>Default exchange удобен там, где маршрут — «ровно одна очередь с известным именем». Как только нужна
+      копия в несколько очередей или фильтрация по шаблону, объявляют свой обменник: default exchange
+      больше ничего не умеет.</p>
+
     <h2>Запуск и первая проверка</h2>
     <p>Для локальной работы — официальный образ с панелью управления (проверено на 3.13.7, Erlang/OTP 26):</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker run --rm -d --name rmq3 -p 5672:5672 -p 15672:15672 rabbitmq:3-management-alpine
+      <pre><code class="language-bash"># образ rabbitmq:3-management-alpine = RabbitMQ 3.x + плагин веб-панели, на Alpine Linux
+# ключи docker run:
+#   --rm          удалить контейнер после остановки (данные внутри пропадут)
+#   -d            запустить в фоне; без -d терминал займут логи брокера
+#   --name rmq3   имя контейнера — по нему работают docker exec и docker rm
+#   -p 5672:5672      пробросить порт AMQP (host:container) — сюда подключается .NET
+#   -p 15672:15672    пробросить порт веб-панели: http://localhost:15672
+docker run --rm -d --name rmq3 -p 5672:5672 -p 15672:15672 rabbitmq:3-management-alpine
 
-# 5672  — AMQP (сюда подключается приложение)
-# 15672 — веб-панель: http://localhost:15672 (guest / guest, только с localhost)
+# брокер стартует 10-20 секунд; команда ждёт, пока узел будет готов
+docker exec rmq3 rabbitmqctl await_startup
+# Still booting, will check again in 10 seconds...   &lt;- пока брокер не готов
+# (когда готов — команда завершается без вывода)
 
+# ping — «узел жив?»; -q оставляет только результат (без служебных строк)
 docker exec rmq3 rabbitmq-diagnostics -q ping
 # Ping succeeded
 
+# версия RabbitMQ внутри контейнера
 docker exec rmq3 rabbitmqctl version
-# 3.13.7</code></pre>
+# 3.13.7
+
+# обменники: name — имя, type — тип; строка с пустым именем в конце — default exchange
+docker exec rmq3 rabbitmqctl list_exchanges name type
+
+# очереди: name — имя, messages — сколько сообщений лежит прямо сейчас
+docker exec rmq3 rabbitmqctl list_queues name messages
+
+# привязки: source_name — обменник, destination_name — очередь, routing_key — ключ привязки
+docker exec rmq3 rabbitmqctl list_bindings source_name destination_name routing_key</code></pre>
     </div>
+    <table>
+      <thead><tr><th>Что</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>docker run</code></td><td>создать и запустить контейнер из образа</td></tr>
+        <tr><td><code>--rm</code></td><td>удалить контейнер, когда он остановится: удобно для опытов,
+          но всё, что было внутри, исчезнет</td></tr>
+        <tr><td><code>-d</code> (detach)</td><td>не занимать терминал: контейнер работает в фоне</td></tr>
+        <tr><td><code>--name rmq3</code></td><td>имя контейнера вместо случайного; используется во всех
+          следующих <code>docker exec</code></td></tr>
+        <tr><td><code>-p 5672:5672</code></td><td>публикация порта: левое число — порт на хосте, правое —
+          порт внутри контейнера. 5672 — протокол AMQP</td></tr>
+        <tr><td><code>-p 15672:15672</code></td><td>порт веб-панели управления</td></tr>
+        <tr><td><code>rabbitmq:3-management-alpine</code></td><td>имя образа и тег: RabbitMQ 3.x с плагином
+          <code>management</code> на Alpine Linux</td></tr>
+      </tbody>
+    </table>
+    <table>
+      <thead><tr><th>Команда</th><th>Что делает</th></tr></thead>
+      <tbody>
+        <tr><td><code>docker exec rmq3 …</code></td><td>выполнить команду внутри уже запущенного
+          контейнера <code>rmq3</code></td></tr>
+        <tr><td><code>rabbitmqctl await_startup</code></td><td>дождаться полной готовности узла; нужна,
+          потому что контейнер стартует быстрее, чем брокер начинает принимать команды</td></tr>
+        <tr><td><code>rabbitmq-diagnostics -q ping</code></td><td>проверка, что узел отвечает;
+          <code>-q</code> (quiet) — печатать только результат</td></tr>
+        <tr><td><code>rabbitmqctl version</code></td><td>версия RabbitMQ</td></tr>
+        <tr><td><code>rabbitmqctl list_exchanges</code></td><td>список обменников; после имени команды
+          перечисляются <em>колонки</em>, которые нужно показать (<code>name</code>, <code>type</code>,
+          <code>durable</code> и т.д.)</td></tr>
+        <tr><td><code>rabbitmqctl list_queues</code></td><td>список очередей и их свойств; колонка
+          <code>messages</code> — текущая глубина</td></tr>
+        <tr><td><code>rabbitmqctl list_bindings</code></td><td>список привязок: кто куда и по какому ключу
+          маршрутизирует</td></tr>
+      </tbody>
+    </table>
     <div class="box warn">
       <span class="t"><code>guest/guest</code> — только для локальной машины</span>
       <p>Учётная запись <code>guest</code> по умолчанию может подключаться только с самого узла RabbitMQ.
@@ -90,42 +356,42 @@ docker exec rmq3 rabbitmqctl version
       через <code>await</code>, публикация и подтверждения тоже. Ниже — полный цикл: объявить обменник,
       очередь и привязку, отправить сообщение и принять его с подтверждением.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">using System.Text;
-using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
+      <pre><code class="language-csharp">using System.Text;                                             // Encoding.UTF8.GetBytes
+using RabbitMQ.Client;                                         // ConnectionFactory, IChannel, ExchangeType
+using RabbitMQ.Client.Events;                                  // AsyncEventingBasicConsumer, BasicDeliverEventArgs
 
-var factory = new ConnectionFactory
+var factory = new ConnectionFactory                            // объект с настройками подключения
 {
-    HostName = "localhost", Port = 5672, UserName = "guest", Password = "guest",
+    HostName = "localhost", Port = 5672,                       // адрес и порт AMQP (не 15672 — это панель)
+    UserName = "guest", Password = "guest",                    // логин и пароль по умолчанию
 };
 
-await using var conn = await factory.CreateConnectionAsync();
-await using var ch   = await conn.CreateChannelAsync();
+await using var conn = await factory.CreateConnectionAsync();   // TCP-соединение; await using закроет его в конце
+await using var ch   = await conn.CreateChannelAsync();         // канал: через него идут объявления и публикации
 
-Console.WriteLine($"connected: {conn.IsOpen}, channel: {ch.IsOpen}");
+Console.WriteLine($"connected: {conn.IsOpen}, channel: {ch.IsOpen}"); // connected: True, channel: True
 
-// обменник topic + очередь + привязка по шаблону
-await ch.ExchangeDeclareAsync("orders", ExchangeType.Topic, durable: true);
-await ch.QueueDeclareAsync("orders.new", durable: true, exclusive: false, autoDelete: false);
-await ch.QueueBindAsync("orders.new", "orders", "order.created");
+// объявления идемпотентны: если объект уже есть с теми же параметрами, ошибки не будет
+await ch.ExchangeDeclareAsync("orders", ExchangeType.Topic, durable: true);    // обменник orders, правило topic, переживает рестарт
+await ch.QueueDeclareAsync("orders.new", durable: true, exclusive: false, autoDelete: false); // очередь orders.new, тоже durable
+await ch.QueueBindAsync("orders.new", "orders", "order.created");              // привязка: orders -> orders.new по ключу order.created
 
-// публикация: exchange, routing key, тело
-var body = Encoding.UTF8.GetBytes("{\"id\":42}");
-await ch.BasicPublishAsync("orders", "order.created", body);
+var body = Encoding.UTF8.GetBytes("{\"id\":42}");               // тело сообщения — массив байт, не строка
+await ch.BasicPublishAsync("orders", "order.created", body);     // публикация: exchange, routing key, тело
+Console.WriteLine($"published {body.Length} bytes");             // published 9 bytes
 
-// подписка: подтверждаем вручную, после обработки
-var consumer = new AsyncEventingBasicConsumer(ch);
-consumer.ReceivedAsync += async (_, ea) =&gt;
+var consumer = new AsyncEventingBasicConsumer(ch);              // потребитель, привязанный к каналу
+consumer.ReceivedAsync += async (_, ea) =&gt;                      // обработчик каждой доставки
 {
-    Console.WriteLine($"received: {Encoding.UTF8.GetString(ea.Body.Span)} tag={ea.DeliveryTag}");
-    await ch.BasicAckAsync(ea.DeliveryTag, false);
+    Console.WriteLine($"received: {Encoding.UTF8.GetString(ea.Body.Span)} tag={ea.DeliveryTag}"); // тело и номер доставки
+    await ch.BasicAckAsync(ea.DeliveryTag, false);               // подтверждаем: false — только это сообщение
 };
 
-await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer);
-await Task.Delay(1500);
+await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer); // подписка с ручными подтверждениями
+await Task.Delay(1500);                                         // даём consumer время обработать сообщение
 
-var q = await ch.QueueDeclarePassiveAsync("orders.new");
-Console.WriteLine($"messages in queue: {q.MessageCount}");</code></pre>
+var q = await ch.QueueDeclarePassiveAsync("orders.new");         // passive: очередь не создаётся, а спрашивается
+Console.WriteLine($"messages in queue: {q.MessageCount}");       // messages in queue: 0</code></pre>
     </div>
     <div class="codewrap">
       <pre><code class="language-text">connected: True, channel: True
@@ -135,6 +401,9 @@ messages in queue: 0</code></pre>
     </div>
     <p>Разбор вывода:</p>
     <ul>
+      <li><strong><code>connected: True, channel: True</code></strong> — соединение с брокером и канал
+        открыты; <code>published 9 bytes</code> — длина тела в байтах (строка <code>{"id":42}</code> — это
+        9 символов).</li>
       <li><strong><code>BasicAckAsync</code> убрал сообщение из очереди</strong> — поэтому
         <code>MessageCount</code> равен нулю. Если не подтверждать, сообщение останется в очереди и будет
         доставлено снова (глава 3).</li>
@@ -143,6 +412,63 @@ messages in queue: 0</code></pre>
       <li><strong><code>QueueDeclarePassiveAsync</code> не создаёт очередь, а спрашивает</strong> её состояние
         (в том числе число сообщений) и падает, если очереди нет — удобно для проверок в тестах.</li>
     </ul>
+    <p>Теперь те же строки по аргументам — что означает каждый параметр вызова:</p>
+    <table>
+      <thead><tr><th>Вызов и аргумент</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>ExchangeDeclareAsync("orders", …)</code></td><td>имя обменника; создать, если его ещё
+          нет</td></tr>
+        <tr><td><code>ExchangeType.Topic</code></td><td>тип — правило сравнения routing key с привязками
+          (см. таблицу выше)</td></tr>
+        <tr><td><code>durable: true</code> (обменник)</td><td>обменник переживёт перезапуск брокера;
+          <code>false</code> — исчезнет при рестарте</td></tr>
+        <tr><td><code>autoDelete</code> (обменник, по умолчанию <code>false</code>)</td><td>удалить
+          обменник, когда от него отвяжется последняя очередь</td></tr>
+        <tr><td><code>QueueDeclareAsync("orders.new", …)</code></td><td>имя очереди; создать, если её ещё
+          нет</td></tr>
+        <tr><td><code>durable: true</code> (очередь)</td><td>сама очередь переживёт рестарт; сообщения —
+          только если публиковать их с <code>persistent: true</code></td></tr>
+        <tr><td><code>exclusive: false</code></td><td>не привязывать очередь к соединению. <code>true</code>
+          — очередь видна только своему соединению и исчезает, когда оно закрывается (так делают временные
+          очереди для ответов)</td></tr>
+        <tr><td><code>autoDelete: false</code> (очередь)</td><td>не удалять очередь после того, как от неё
+          отпишется последний consumer; <code>true</code> — удалить</td></tr>
+        <tr><td><code>QueueBindAsync(queue, exchange, routingKey)</code></td><td>кто получает; от кого; по
+          какому ключу. У <code>fanout</code> ключ игнорируется, у <code>headers</code> условия задаются в
+          <code>arguments</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Умолчания клиента для очереди: <code>exclusive: true</code>, <code>autoDelete: true</code></span>
+      <p>В <code>IChannelExtensions</code> у <code>QueueDeclareAsync</code> параметры по умолчанию такие:
+        <code>durable: false</code>, <code>exclusive: true</code>, <code>autoDelete: true</code>. То есть
+        вызов <code>QueueDeclareAsync("orders.new")</code> создаст очередь, которая исчезнет вместе с
+        соединением: <code>rabbitmqctl list_queues name durable auto_delete exclusive</code> показывает
+        <code>false true true</code>, а после закрытия соединения очереди уже нет. Повторное объявление той
+        же очереди с другими флагами падает с <code>405 RESOURCE_LOCKED</code>. Поэтому флаги в примере
+        выше заданы явно.</p>
+    </div>
+    <table>
+      <thead><tr><th>Вызов и аргумент</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>BasicPublishAsync(exchange, routingKey, body)</code></td><td>куда публикуем
+          (<code>""</code> — default exchange); адрес сообщения; тело в байтах</td></tr>
+        <tr><td><code>mandatory</code> (не указан, значит <code>false</code>)</td><td><code>true</code> —
+          вернуть сообщение, если ни одна очередь не подошла; <code>false</code> — молча выбросить
+          (глава 2)</td></tr>
+        <tr><td><code>basicProperties</code> (не указан)</td><td>свойства сообщения: заголовки,
+          <code>persistent</code>, <code>contentType</code>, <code>correlationId</code> (глава 2)</td></tr>
+        <tr><td><code>BasicConsumeAsync(queue, autoAck, consumer)</code></td><td>откуда читаем;
+          <code>autoAck: false</code> — подтверждать вручную после обработки (<code>true</code> — брокер
+          считает сообщение доставленным сразу, ещё до обработки); обработчик</td></tr>
+        <tr><td><code>BasicAckAsync(deliveryTag, multiple)</code></td><td>номер доставки из
+          <code>ea.DeliveryTag</code>; <code>multiple: false</code> — подтвердить только его,
+          <code>true</code> — все доставки до него включительно</td></tr>
+        <tr><td><code>QueueDeclarePassiveAsync(queue)</code></td><td>проверка: ничего не создаёт, возвращает
+          <code>QueueDeclareOk</code> с <code>MessageCount</code> и <code>ConsumerCount</code>; падает,
+          если очереди нет</td></tr>
+      </tbody>
+    </table>
 
     <h2>RabbitMQ, Kafka и список Redis: что выбрать</h2>
     <table>
@@ -165,13 +491,18 @@ messages in queue: 0</code></pre>
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
       <ul>
-        <li><strong>Producer публикует в exchange, а не в очередь</strong>; exchange по binding решает, куда
-          положить сообщение.</li>
-        <li><strong>Типы exchange:</strong> <code>direct</code> (точный ключ), <code>topic</code> (шаблон),
-          <code>fanout</code> (всем), <code>headers</code> (по заголовкам); пустой <code>""</code> — default
-          exchange по имени очереди.</li>
+        <li><strong>Producer публикует в exchange, а не в очередь</strong>; маршрут определяют <em>две</em>
+          вещи: тип обменника (правило сравнения) и привязки (какие очереди и с какими ключами).</li>
+        <li><strong>Типы exchange:</strong> <code>direct</code> (точный ключ), <code>topic</code>
+          (<code>*</code> — одно слово, <code>#</code> — ноль и более), <code>fanout</code> (всем
+          привязанным, ключ игнорируется), <code>headers</code> (<code>x-match=all</code> /
+          <code>any</code>).</li>
+        <li><strong>Пустой <code>""</code> — это default exchange:</strong> существует всегда, тип
+          <code>direct</code>, неявная привязка к каждой очереди по её имени; объявить, привязать или
+          удалить его нельзя (<code>403 ACCESS_REFUSED</code>).</li>
         <li><strong>Сообщение без подходящей привязки исчезает</strong>, если не выставлен
-          <code>mandatory</code> (глава 2).</li>
+          <code>mandatory</code> (глава 2); на default exchange это происходит при несовпадении ключа с
+          именем очереди.</li>
         <li><strong>Подтверждение (<code>BasicAck</code>) удаляет сообщение</strong>; без него оно вернётся
           другому потребителю.</li>
       </ul>
