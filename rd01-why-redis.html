@@ -146,10 +146,71 @@ docker exec redis7 redis-cli info server | grep -E 'redis_version|redis_mode'
       <li><code>--rm</code> в <code>docker run</code> — контейнер удалится сам, когда его остановят:
         <code>docker stop redis7</code>. Без <code>--rm</code> он остался бы в списке
         <code>docker ps -a</code>.</li>
-      <li>Порт занят (<code>port is already allocated</code>) — значит на <code>6379</code> уже слушает
-        другой Redis. Тогда либо переиспользуйте его, либо пробросьте другой порт:
-        <code>-p 6380:6379</code> (тогда и в строке подключения будет <code>localhost:6380</code>).</li>
+      <li>Порт занят (<code>port is already allocated</code>) — значит <code>6379</code> на хосте уже
+        слушает кто-то другой: контейнер с прошлого запуска или нативный <code>redis-server</code>. Что с этим
+        делать — ниже во врезке, потому что «переиспользовать» и «пробросить» — <em>разные</em> решения.</li>
     </ul>
+
+    <div class="box note">
+      <span class="t">Порт занят: «переиспользовать» и «пробросить» — в чём разница</span>
+      <p>Сначала что вообще происходит. <code>-p 6379:6379</code> — это просьба к Docker занять порт
+        <strong>хоста</strong> 6379 и передавать всё, что на него пришло, в порт 6379 <strong>контейнера</strong>.
+        Порт у машины один, поэтому второй такой контейнер не запустится — вот настоящий текст ошибки:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">docker run --rm -d --name redis8 -p 6379:6379 redis:7-alpine
+# docker: Error response from daemon: failed to set up container networking: driver failed
+# programming external connectivity on endpoint redis8 (34d1bba1a4f06ab5f4840b775734058f...
+# ): Bind for 0.0.0.0:6379 failed: port is already allocated
+# (в терминале это одна длинная строка — здесь она перенесена для читаемости)
+
+# кто именно занял порт — два разных способа посмотреть
+docker ps --filter publish=6379 --format '{{.Names}} {{.Ports}}'
+# redis7 0.0.0.0:6379->6379/tcp, [::]:6379->6379/tcp     ← контейнер, который его пробросил
+ss -ltn | grep 6379
+# LISTEN 0 4096 0.0.0.0:6379 0.0.0.0:*                   ← порт слушает кто-то на хосте (IPv4)
+# LISTEN 0 4096   [::]:6379   [::]:*                     ← и по IPv6 тоже</code></pre>
+      </div>
+      <p><strong>1. Переиспользовать</strong> — не запускать второй Redis, а подключиться к тому, который уже
+        слушает <code>localhost:6379</code>. Строка подключения не меняется вообще. Годится, когда это ваш
+        сервер и вы понимаете, что в нём лежит. Проверить, что там, — те же команды, что выше:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">docker exec redis7 redis-cli info server | grep redis_version
+# redis_version:7.4.12      ← версия может быть другой, и часть чисел в книге не совпадёт
+docker exec redis7 redis-cli dbsize
+# 4                        ← в базе уже есть ключи: это чьи-то данные, не пустой сервер</code></pre>
+      </div>
+      <p>Риск ровно один: это <em>не</em> «пустой сервер для примеров». <code>FLUSHALL</code> и
+        <code>FLUSHDB</code> (а также <code>DEL</code> по совпавшему имени) удалят ключи того проекта, который
+        пишет сюда же, — восстанавливать их будет он, а не вы.</p>
+      <p><strong>2. Пробросить другой порт</strong> — запустить свой Redis, но выставить его не на порт 6379
+        хоста, а на свободный, например 6380: <code>-p 6380:6379</code>. Читается так: «порт <strong>6380
+        хоста</strong> → порт <strong>6379 контейнера</strong>». Внутри контейнера Redis по-прежнему слушает
+        6379 — флаг <code>-p</code> ничего не меняет в самом сервере, он только перекладывает трафик. Меняется
+        единственное: адрес, по которому к серверу обращаются <em>снаружи</em>.</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">docker run --rm -d --name redis8 -p 6380:6379 redis:7-alpine
+docker port redis8
+# 6379/tcp -> 0.0.0.0:6380        ← «порт контейнера 6379 опубликован как 6380 хоста»
+# 6379/tcp -> [::]:6380
+ss -ltn | grep -E ':6379|:6380'
+# LISTEN 0 4096 0.0.0.0:6380 ...  ← на хосте два РАЗНЫХ порта, конфликта нет
+# LISTEN 0 4096 0.0.0.0:6379 ...
+# LISTEN 0 4096   [::]:6380 ...
+# LISTEN 0 4096   [::]:6379 ...
+docker exec redis8 redis-cli ping
+# PONG                            ← внутри контейнера всё тот же порт 6379</code></pre>
+      </div>
+      <p>Следствие: строка подключения <em>с хоста</em> теперь <code>localhost:6380</code> —
+        <code>ConnectionMultiplexer.Connect("localhost:6380")</code>, <code>redis-cli -p 6380</code>. Все примеры
+        книги далее используют <code>localhost:6379</code>; если вы выбрали 6380, подставьте свой адрес — на
+        команды и их вывод это не влияет.</p>
+      <p><strong>А если приложение тоже будет в контейнере?</strong> Тогда <code>-p</code> вообще не нужен:
+        контейнеры в одной сети (compose) обращаются друг к другу по <strong>имени сервиса и внутреннему
+        порту</strong> — <code>redis:6379</code>, а не <code>localhost:6380</code>. Проброс нужен только для
+        доступа <em>с хоста</em>: <code>redis-cli</code>, браузер, <code>dotnet run</code>. Как из этого собирается
+        целый проект из нескольких контейнеров — <a href="dk18-full-stack.html">Docker, глава 18</a>
+        «Факультатив: весь проект целиком».</p>
+    </div>
 
     <h2>Как с ним говорят из .NET</h2>
     <p>Уровней два, и путать их не стоит:</p>
@@ -161,6 +222,68 @@ docker exec redis7 redis-cli info server | grep -E 'redis_version|redis_mode'
       <li><strong><code>IDistributedCache</code></strong> — абстракция .NET поверх любого распределённого кэша
         (<code>AddStackExchangeRedisCache</code>): только «положить/взять байты по ключу с временем жизни».
         Удобно, когда кэш нужен именно как кэш, а не как структура данных.</li>
+    </ul>
+    <p>Ставятся оба уровня как обычные NuGet-пакеты — из папки проекта (там, где лежит <code>.csproj</code>),
+      командой <code>dotnet add package</code>. Вот реальный вывод для веб-проекта на .NET 8:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># «родной» клиент: все структуры, TTL, NX, пайплайны
+dotnet add package StackExchange.Redis
+# info : PackageReference for package 'StackExchange.Redis' version '3.4.35' added
+#        to file '/tmp/ktest/ktest.csproj'.
+
+# реализация распределённого кэша поверх Redis: метод AddStackExchangeRedisCache
+dotnet add package Microsoft.Extensions.Caching.StackExchangeRedis --version 8.0.5
+# info : PackageReference for package 'Microsoft.Extensions.Caching.StackExchangeRedis'
+#        version '8.0.5' added to file '/tmp/ktest/ktest.csproj'.</code></pre>
+    </div>
+    <p>Команда делает две вещи: дописывает в <code>.csproj</code> строку <code>&lt;PackageReference …/&gt;</code>
+      и сразу выполняет <code>restore</code> — скачивает пакет в локальный кэш <code>~/.nuget/packages</code>,
+      чтобы компилятор его видел. Файл проекта после этого выглядит так:</p>
+    <div class="codewrap">
+      <pre><code class="language-xml">&lt;Project Sdk="Microsoft.NET.Sdk.Web"&gt;
+
+  &lt;PropertyGroup&gt;
+    &lt;TargetFramework&gt;net8.0&lt;/TargetFramework&gt;
+    &lt;Nullable&gt;enable&lt;/Nullable&gt;
+    &lt;ImplicitUsings&gt;enable&lt;/ImplicitUsings&gt;
+  &lt;/PropertyGroup&gt;
+
+  &lt;ItemGroup&gt;
+    &lt;PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="8.0.5" /&gt;
+    &lt;PackageReference Include="StackExchange.Redis" Version="3.4.35" /&gt;
+  &lt;/ItemGroup&gt;
+
+&lt;/Project&gt;</code></pre>
+    </div>
+    <p>Второй вариант — те же строки руками в <code>.csproj</code> и <code>dotnet restore</code>; в Visual Studio
+      это окно «Manage NuGet Packages». Результат одинаковый: <code>PackageReference</code> в файле проекта и
+      есть «зависимость»; отдельной «установки в систему» у NuGet нет.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># что на самом деле оказалось в проекте, включая зависимости зависимостей
+dotnet list package --include-transitive
+#    > Microsoft.Extensions.Caching.StackExchangeRedis      8.0.5       8.0.5
+#    > StackExchange.Redis                                  3.4.35      3.4.35
+#    > Microsoft.Extensions.Caching.Abstractions                  8.0.0
+#    > RESPite                                                    3.4.35</code></pre>
+    </div>
+    <p>Отсюда видно, почему сам <code>IDistributedCache</code> ставить не нужно: интерфейс живёт в
+      <code>Microsoft.Extensions.Caching.Abstractions</code>, и пакет <code>…Caching.StackExchangeRedis</code>
+      притягивает его сам (в версии 8.0.5 он же тянет <code>StackExchange.Redis</code> 2.7.27 — если вы явно
+      поставили 3.x, победит более новая). Обратное неверно: <code>StackExchange.Redis</code> — самостоятельный
+      клиент, к ASP.NET Core не привязан и подходит консольному приложению и воркеру.</p>
+    <ul>
+      <li><strong>Зафиксировать версию:</strong>
+        <code>dotnet add package StackExchange.Redis --version 2.8.58</code> — в <code>.csproj</code> появится
+        <code>Version="2.8.58"</code> (проверено). Все выводы книги сняты на 2.8.58; на 3.x те же методы
+        (<code>StringSetAsync</code>, <code>When.NotExists</code>, <code>KeyTimeToLiveAsync</code>), но
+        фиксировать версию стоит: иначе сборка меняется от машины к машине.</li>
+      <li><strong>Ветка <code>Microsoft.Extensions.*</code> совпадает с версией .NET:</strong> для
+        <code>net8.0</code> берут <code>8.0.x</code>. Более новая (например, <code>11.0.0</code>) на
+        <code>net8.0</code> тоже восстанавливается и собирается без ошибок — но в проект приезжают абстракции
+        новее платформы, и это лишний повод держаться своей ветки.</li>
+      <li><strong>После <code>git clone</code> пакетов ни у кого нет:</strong> <code>dotnet restore</code> (или
+        неявный restore при <code>build</code>/<code>run</code>) скачивает их заново по <code>.csproj</code>.
+        Поэтому <code>bin/</code>, <code>obj/</code> и <code>~/.nuget/packages</code> в репозиторий не кладут.</li>
     </ul>
     <p>Обе линии разбираются дальше: подключение и команды — глава 2, структуры данных — глава 3,
       кэширование как паттерн — глава 4, память и эксплуатация — глава 5.</p>

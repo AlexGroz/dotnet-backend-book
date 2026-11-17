@@ -39,7 +39,8 @@
         кладут данные БД.</li>
     </ul>
     <p>Порядок чтения: главы 1–3 — как это устроено, 4–7 — что писать руками (команды, Dockerfile,
-      кэш сборки, multi-stage), 8–17 — то, что нужно на работе. В главах 2–7 <strong>каждая строка команд и
+      кэш сборки, multi-stage), 8–17 — то, что нужно на работе, 18 — факультатив: весь проект целиком
+      (API + PostgreSQL + Redis + RabbitMQ в одном compose). В главах 2–7 <strong>каждая строка команд и
       каждый флаг прокомментированы</strong>:
       если что-то непонятно в коде — читайте комментарии над строкой.</p>
   </div>
@@ -103,6 +104,11 @@
     <a href="dk15-delivery-cicd-k8s.html"><span class="n">Глава 15</span><span class="t">Поставка: CI/CD, теги и граница с Kubernetes</span><span class="d"><span class="tag core">основная</span>Сборка в пайплайне, <code>latest</code> и digest, что Docker уже не делает</span></a>
     <a href="dk16-diagnostics.html"><span class="n">Глава 16</span><span class="t">Диагностика: OOMKilled, коды выхода, inspect</span><span class="d"><span class="tag core">основная</span>Контейнер не стартует или умер — алгоритм разбора по шагам</span></a>
     <a href="dk17-interview.html"><span class="n">Глава 17</span><span class="t">Как отвечать на интервью по Docker</span><span class="d"><span class="tag core">основная</span>Двадцать вопросов с короткими ответами и структура ответа</span></a>
+  </div>
+
+  <div class="toc-part">Docker · Часть V · Факультатив</div>
+  <div class="toc">
+    <a href="dk18-full-stack.html"><span class="n">Глава 18</span><span class="t">Факультатив: весь проект целиком — API, PostgreSQL, Redis и RabbitMQ</span><span class="d"><span class="tag lead">факультатив</span>Четыре сервиса в четырёх контейнерах, compose-файл построчно, реальный запуск и граница с Kubernetes</span></a>
   </div>
 
   <p style="color:var(--muted);font-size:14px;margin-top:34px">

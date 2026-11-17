@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 18 · Факультатив: весь проект целиком</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="docker.html">← Оглавление</a>
+  <span class="booktitle">Docker и контейнеры</span>
+  <a href="index.html">Все разделы →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Docker · Часть V · Факультатив</div>
+    <h1>Глава 18. Факультатив: весь проект целиком — API, PostgreSQL, Redis и RabbitMQ</h1>
+    <p class="sublead">Четыре сервиса в четырёх контейнерах: один compose-файл, реальный запуск и граница
+      с Kubernetes</p>
+    <p><span class="tag lead">факультатив</span></p>
+
+    <h2>Вопрос, с которого всё начинается</h2>
+    <p>В книге по Redis мы подняли <em>один</em> контейнер (<code>redis:7-alpine</code>), в книге по RabbitMQ —
+      второй. И тут возникает естественный вопрос: а как из этого собирается <strong>целый проект</strong>?
+      Наше .NET-приложение — тоже в контейнере? PostgreSQL? И главное: это четыре отдельных контейнера или
+      <em>один общий</em>, внутри которого всё запущено?</p>
+    <p>Короткий ответ: <strong>каждый процесс — в своём контейнере</strong>, а связывает их один файл
+      <code>compose.yaml</code> и одна команда <code>docker compose up -d --build</code>. Ниже — полный
+      рабочий пример на четыре сервиса, все выводы в главе сняты с реального запуска:</p>
+    <table>
+      <thead><tr><th>Сервис</th><th>Образ</th><th>Кто собирает</th><th>Что делает</th></tr></thead>
+      <tbody>
+        <tr><td>API на .NET 8</td><td>свой, из <code>./api/Dockerfile</code></td><td>вы</td>
+          <td>обрабатывает HTTP-запросы, ходит в остальные три</td></tr>
+        <tr><td>PostgreSQL 16</td><td><code>postgres:16-alpine</code></td><td>вендоры</td>
+          <td>постоянные данные, том <code>pgdata</code></td></tr>
+        <tr><td>Redis 7</td><td><code>redis:7-alpine</code></td><td>вендоры</td>
+          <td>общий счётчик и кэш, том не нужен</td></tr>
+        <tr><td>RabbitMQ 3.13</td><td><code>rabbitmq:3-management-alpine</code></td><td>вендоры</td>
+          <td>очереди, веб-консоль на 15672, том <code>mqdata</code></td></tr>
+      </tbody>
+    </table>
+    <p>Формулировка, которую стоит держать в голове: <strong>контейнер — это упаковка для одного главного
+      процесса</strong>. Не «маленькая виртуалка, куда можно поставить что угодно», а способ доставить один
+      процесс с его файлами и запустить его изолированно. Отсюда всё остальное в этой главе.</p>
+    <h2>Почему порознь, а не всё в одном контейнере</h2>
+    <p>Шесть причин, каждая из которых на практике оказывается важнее, чем кажется на старте:</p>
+    <ul>
+      <li><strong>Разные жизненные циклы.</strong> API пересобирается на каждый коммит, PostgreSQL живёт
+        годами, Redis можно перезапустить в любой момент. В одном контейнере любое действие означает
+        перезапуск всех.</li>
+      <li><strong>Масштабирование по отдельности.</strong> Реплик API нужно три, Redis — одна, PostgreSQL —
+        одна с репликой. Один контейнер масштабируется только целиком (и утащит за собой базу).</li>
+      <li><strong>Падение одного не должно ронять остальные.</strong> Упавший процесс в общем контейнере — это
+        остановленный контейнер: <code>docker ps</code> покажет, что «сервис умер», но не скажет, что именно
+        упало.</li>
+      <li><strong>Healthcheck и логи — по сервису.</strong> В примере ниже <code>docker compose ps</code>
+        показывает <code>healthy</code> отдельно у каждого: видно, что <em>именно</em> не поднялось.</li>
+      <li><strong>Обновления безопасности.</strong> Вендор выпустил патч Redis — вы меняете тег образа и
+        перезапускаете один контейнер, не пересобирая приложение.</li>
+      <li><strong>Права и лимиты.</strong> API работает под non-root и со своим лимитом памяти, PostgreSQL — со
+        своим пользователем и своим лимитом. В общем контейнере это невозможно.</li>
+    </ul>
+
+    <div class="box warn">
+      <span class="t">«А если всё-таки сложить всё в один контейнер?»</span>
+      <p>Технически возможно: <code>entrypoint</code>-скрипт или супервизор (<code>supervisord</code>,
+        <code>s6-overlay</code>) запускает PostgreSQL, Redis, RabbitMQ и <code>dotnet api.dll</code> в одном
+        контейнере. Так иногда делают демо-стенды и старые «монолитные» образы.</p>
+      <p>Цена: супервизор должен сам перезапускать упавшие процессы (Docker этого не умеет — он следит только за
+        PID 1); healthcheck один на всех, поэтому «контейнер healthy» ничего не говорит о базе; обновить Redis
+        нельзя без пересборки образа; образ весит как все четыре вместе; логи четырёх процессов перемешаны в
+        одном потоке; лимит памяти общий, и OOMKilled убивает сразу всё; при масштабировании API вы получаете
+        вторую копию базы.</p>
+      <p>Отдельный случай — <strong>sidecar</strong> в Kubernetes: несколько контейнеров в одном поде делят сеть
+        и диск, но это вспомогательные процессы (прокси, агент сбора логов), а не «всё приложение в одном
+        месте».</p>
+    </div>
+
+    <h2>Три способа собрать один и тот же проект</h2>
+    <p>Файлы у всех трёх одинаковые — различается только то, где исполняется код:</p>
+    <table>
+      <thead><tr><th>Режим</th><th>Что в контейнерах</th><th>Команда</th><th>Когда</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Инфраструктура в Docker,<br>код на хосте</strong></td>
+          <td>только PostgreSQL, Redis, RabbitMQ</td>
+          <td><code>docker compose up -d db redis rabbit</code> (плюс override с портами, см. ниже), затем
+            <code>dotnet run</code></td>
+          <td>каждый день: правите код, перезапуск за секунды, отладка в IDE</td>
+        </tr>
+        <tr>
+          <td><strong>Всё в Docker</strong></td>
+          <td>все четыре, включая ваш API</td>
+          <td><code>docker compose up -d --build</code></td>
+          <td>проверка образа и настроек «как в проде», прогон e2e, демо</td>
+        </tr>
+        <tr>
+          <td><strong>Прод</strong></td>
+          <td>ваш API; база, кэш и брокер — обычно managed-сервисы</td>
+          <td>Kubernetes / App Service (глава 15)</td>
+          <td>боевая эксплуатация</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Разница между первым и вторым режимом — только в <em>адресах</em>: если код на хосте, он ходит на
+      <code>localhost:5432</code>, <code>localhost:6379</code>, <code>localhost:5672</code>; если код в
+      контейнере — на <code>db:5432</code>, <code>redis:6379</code>, <code>rabbit:5672</code>. Код при этом не
+      меняется вообще — адреса приходят из конфигурации (глава 10).</p>
+
+    <h2>Как выглядит проект в репозитории</h2>
+    <p>Четыре файла и папка — этого достаточно, чтобы поднять весь стек:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">shop/
+├─ compose.yaml          ← описание стека: 4 сервиса, 2 тома, 1 сеть
+└─ api/
+   ├─ api.csproj         ← зависимости: Npgsql, StackExchange.Redis, RabbitMQ.Client
+   ├─ Program.cs         ← код API (ниже)
+   ├─ Dockerfile         ← как собрать образ API
+   └─ .dockerignore      ← bin/ и obj/ не отправлять в контекст сборки</code></pre>
+    </div>
+    <p>Фронтенд, фоновый воркер, второй сервис — всё это добавляется такими же блоками в
+      <code>compose.yaml</code>: сервис <code>web</code> со своим <code>build</code>, сервис
+      <code>worker</code> с тем же образом и другим <code>command</code>. Один <code>docker compose up</code>
+      поднимает весь проект; на проде ту же роль играет Kubernetes (глава 15).</p>
+
+    <h2>Код API: три зависимости и один <code>/health</code></h2>
+    <p>Ничего специфического для Docker здесь нет — обычное минимальное API на .NET 8. Оно нужно, чтобы
+      проверить, что контейнеры видят друг друга:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using Npgsql;
+using RabbitMQ.Client;
+using StackExchange.Redis;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// три адреса приходят из окружения: ConnectionStrings__Postgres / __Redis / __Rabbit
+// (двойное подчёркивание = двоеточие, то есть ConnectionStrings:Postgres)
+var pg    = builder.Configuration.GetConnectionString("Postgres")!;
+var redis = builder.Configuration.GetConnectionString("Redis")!;
+var amqp  = builder.Configuration.GetConnectionString("Rabbit")!;
+
+var app = builder.Build();
+
+// один ConnectionMultiplexer на процесс — как в главе 2 книги по Redis;
+// адрес redis:6379 разрешается через DNS Docker, поэтому сервис обязан быть healthy
+using var mux = await ConnectionMultiplexer.ConnectAsync(redis);
+
+app.MapGet("/", () => "api is up");
+
+// общий счётчик: значение живёт в Redis, а не в памяти процесса,
+// поэтому одинаков для всех реплик API (а вот после down без тома он обнулится — см. ниже)
+app.MapGet("/counter", async () =>
+    $"counter = {await mux.GetDatabase().StringIncrementAsync("api:counter")}");
+
+// /health проверяет все три зависимости: этот же адрес опрашивает healthcheck в compose
+app.MapGet("/health", async () =>
+{
+    var ping = await mux.GetDatabase().PingAsync();
+
+    string postgres;
+    try
+    {
+        await using var conn = new NpgsqlConnection(pg);
+        await conn.OpenAsync();          // реальное TCP-подключение к db:5432
+        postgres = "ok";
+    }
+    catch (Exception e) { postgres = e.GetType().Name; }
+
+    string rabbit;
+    try
+    {
+        var factory = new ConnectionFactory { Uri = new Uri(amqp) };
+        await using var conn = await factory.CreateConnectionAsync();   // rabbit:5672
+        rabbit = "ok";
+    }
+    catch (Exception e) { rabbit = e.GetType().Name; }
+
+    return Results.Ok(new
+    {
+        redis = $"{ping.TotalMilliseconds:F1} ms",
+        postgres,
+        rabbitmq = rabbit
+    });
+});
+
+app.Run();</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>GetConnectionString</code> читает <code>ConnectionStrings:*</code></strong> — в
+        контейнере это переменные окружения <code>ConnectionStrings__Postgres</code> и т. д. Ничего не
+        захардкожено: тот же образ работает и с <code>db:5432</code> в compose, и с настоящей базой в проде.</li>
+      <li><strong>Ошибки не пробрасываются, а возвращаются в JSON</strong> — чтобы <code>/health</code> отвечал
+        даже когда база лежит, и было видно, <em>что</em> именно недоступно.</li>
+      <li><strong>Счётчик в Redis, а не в поле класса</strong> — иначе у каждой реплики API был бы свой
+        счётчик. Ровно поэтому Redis и появляется в проекте.</li>
+    </ul>
+
+    <h2>Dockerfile: две стадии вместо одной</h2>
+    <p>Собирать образ для API на 4 файла принято так: сначала собрать <em>в</em> контейнере с SDK, затем
+      положить результат в контейнер с рантаймом. Итоговый образ не содержит ни компилятора, ни исходников:</p>
+    <div class="codewrap">
+      <pre><code class="language-dockerfile"># стадия 1: сборка — здесь есть dotnet SDK (1.03 ГБ), но этот образ в результат не попадёт
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS build
+WORKDIR /src
+# сначала только csproj: слой с restore переиспользуется, пока не менялись пакеты
+COPY api.csproj ./
+RUN dotnet restore
+COPY . .
+RUN dotnet publish -c Release -o /out --no-restore
+
+# стадия 2: запуск — только рантайм ASP.NET Core (160 МБ), без SDK и без исходников
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine
+WORKDIR /app
+COPY --from=build /out .
+USER $APP_UID
+EXPOSE 8080
+ENTRYPOINT ["dotnet", "api.dll"]</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>COPY api.csproj ./</code> до <code>COPY . .</code></strong> — приём из главы 6: пока не
+        менялся список пакетов, слой <code>dotnet restore</code> берётся из кэша, и пересборка занимает
+        секунды.</li>
+      <li><strong><code>USER $APP_UID</code></strong> — образ <code>aspnet</code> определяет переменную
+        <code>APP_UID</code> (в проверке — <code>1654</code>): контейнер запускается не от root.</li>
+      <li><strong>Порт 8080 — не флаг, а настройка образа:</strong> в <code>aspnet:8.0</code> задано
+        <code>ASPNETCORE_HTTP_PORTS=8080</code>, поэтому <code>app.Run()</code> без настроек слушает 8080
+        (глава 13).</li>
+      <li><strong>Разница в размере — реальная:</strong> SDK-образ 1.03 ГБ, итоговый <code>shop-api</code> —
+        <strong>166 МБ</strong>. Именно поэтому multi-stage не «оптимизация на потом», а норма (глава 7).</li>
+    </ul>
+    <p><code>.dockerignore</code> в этой папке — две строки, и обе важны: без них в контекст сборки приедут
+      результаты вашей локальной сборки, и <code>COPY . .</code> положит в образ <code>bin/</code> с
+      <code>obj/</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">bin/
+obj/</code></pre>
+    </div>
+
+    <h2>compose.yaml: четыре сервиса построчно</h2>
+    <p>Этот файл лежит в корне проекта и целиком заменяет четыре команды <code>docker run</code> с десятком
+      флагов у каждой. Комментарии — прямо в нём:</p>
+    <div class="codewrap">
+      <pre><code class="language-yaml">name: shop        # префикс имён: контейнеры станут shop-api-1, shop-db-1, сеть shop_default
+
+services:
+  # 1. наше приложение: не образ из реестра, а сборка из ./api по его Dockerfile
+  api:
+    build: ./api                     # docker compose сам вызовет docker build
+    ports:
+      - "8080:8080"                  # единственный публикуемый наружу порт: host 8080 → api 8080
+    environment:
+      # __ превращается в : — это ConnectionStrings:Postgres для IConfiguration
+      ConnectionStrings__Postgres: Host=db;Database=app;Username=app;Password=secret
+      ConnectionStrings__Redis: redis:6379
+      ConnectionStrings__Rabbit: amqp://app:secret@rabbit:5672
+    depends_on:                      # ждать не «запуска», а готовности (healthcheck ниже)
+      db:     { condition: service_healthy }
+      redis:  { condition: service_healthy }
+      rabbit: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 2. база: официальный образ, своя переменная с паролем и том для файлов
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app             # создаётся при первом старте (пустой том)
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: app
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # данные ВНЕ контейнера
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]   # готовность базы, а не «процесс жив»
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # 3. кэш: порт наружу не публикуем — он нужен только api внутри сети
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # 4. брокер: 15672 публикуем, чтобы открыть веб-консоль в браузере
+  rabbit:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: app     # вместо гостя по умолчанию — свой пользователь
+      RABBITMQ_DEFAULT_PASS: secret
+    volumes:
+      - mqdata:/var/lib/rabbitmq     # очереди и пользователи переживают пересоздание
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:          # объявленные тома: Docker создаёт их при первом up
+  pgdata:
+  mqdata:</code></pre>
+    </div>
+
+    <table>
+      <thead><tr><th>Ключ</th><th>Что делает</th><th>Что будет без него</th></tr></thead>
+      <tbody>
+        <tr><td><code>build</code> / <code>image</code></td><td>либо собрать из папки, либо взять готовый
+          образ из реестра</td><td>сервиса не существует</td></tr>
+        <tr><td><code>ports</code></td><td>опубликовать порт на хосте: <code>host:контейнер</code></td>
+          <td>снаружи не достучаться, внутри сети — всё работает</td></tr>
+        <tr><td><code>environment</code></td><td>переменные окружения процесса, <code>__</code> = <code>:</code>
+          в конфигурации .NET</td><td>API не знает адресов и падает на старте</td></tr>
+        <tr><td><code>volumes</code></td><td>папка вне контейнера для данных</td><td>данные исчезнут вместе с
+          контейнером (<code>down</code>)</td></tr>
+        <tr><td><code>depends_on</code></td><td>порядок старта и ожидание готовности</td><td>API попробует
+          подключиться к ещё не поднятой базе</td></tr>
+        <tr><td><code>healthcheck</code></td><td>как проверить, что сервис <em>работает</em>, а не просто
+          запущен</td><td><code>depends_on: service_healthy</code> не с чем работать, статус всегда
+          «up»</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Почему <code>condition: service_healthy</code>, а не просто <code>depends_on</code></h3>
+    <p>Без условия compose гарантирует только <em>порядок запуска</em>: контейнер <code>db</code> создан раньше
+      <code>api</code>. Но PostgreSQL после старта процесса ещё секунды инициализирует кластер и принимает не
+      все подключения. С условием compose ждёт, пока healthcheck не станет <code>healthy</code>, и лишь потом
+      стартует зависимый сервис — это видно в реальном логе запуска (фрагмент, порядок строк сохранён):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Container shop-redis-1 Started
+Container shop-redis-1 Waiting        ← ждём healthcheck redis
+Container shop-db-1 Waiting           ← и базы
+Container shop-rabbit-1 Waiting       ← и брокера
+Container shop-redis-1 Healthy        ← только теперь
+Container shop-db-1 Healthy
+Container shop-rabbit-1 Healthy
+Container shop-api-1 Starting         ← и только после этого — api
+Container shop-api-1 Started</code></pre>
+    </div>
+    <p>Отсюда практическое правило: <strong>healthcheck есть у всех, кто нужен другим</strong>. Если его нет,
+      <code>service_healthy</code> работать не будет, и придётся либо добавлять проверку, либо жить с гонкой на
+      старте.</p>
+
+    <h3>Имена и порты: <code>localhost</code> против <code>db</code></h3>
+    <p>Compose создаёт сеть <code>shop_default</code> и подключает к ней все четыре контейнера. Внутри неё
+      каждый сервис доступен <strong>по своему имени из файла</strong> и <strong>внутреннему порту</strong>:
+      <code>db:5432</code>, <code>redis:6379</code>, <code>rabbit:5672</code>. Поэтому в
+      <code>environment</code> у API стоят именно такие адреса.</p>
+    <div class="box warn">
+      <span class="t">Главная ловушка новичка: <code>localhost</code> внутри контейнера — это сам контейнер</span>
+      <p>Если в строке подключения написать <code>Host=localhost;Port=5432</code>, API будет искать базу
+        <em>в своём</em> контейнере — и не найдёт: там только <code>dotnet</code>. Ошибка выглядит как
+        <code>NpgsqlException: Failed to connect</code> или <code>RedisConnectionException</code>, хотя база
+        жива и <code>docker compose ps</code> показывает <code>healthy</code>.</p>
+      <p>Правило: <strong>внутри контейнера — имя сервиса</strong> (<code>db</code>, <code>redis</code>),
+        <strong>с хоста — <code>localhost</code> и опубликованный порт</strong>. Публиковать порт
+        (<code>ports</code>) при этом нужно только ради доступа с хоста: базе и Redis в этой схеме он не нужен.
+      </p>
+    </div>
+
+    <h2>Запуск: одна команда на весь проект</h2>
+    <p>Из корня проекта (там, где <code>compose.yaml</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># --build — пересобрать образ api перед запуском; -d — в фоне
+docker compose up -d --build
+# (BuildKit печатает каждый шаг; ниже — только значимые строки)
+#12 [build 4/6] RUN dotnet restore
+#12 28.59   Restored /src/api.csproj (in 27.54 sec).     ← пакеты скачались внутри контейнера
+#13 [build 5/6] COPY . .
+#14 [build 6/6] RUN dotnet publish -c Release -o /out --no-restore
+#14 3.927   api -> /src/bin/Release/net8.0/api.dll
+#15 [stage-1 3/3] COPY --from=build /out .              ← в итоговый образ попал только результат
+ Container shop-redis-1 Healthy
+ Container shop-db-1 Healthy
+ Container shop-rabbit-1 Healthy
+ Container shop-api-1 Started                            ← api стартовал последним, как задумано</code></pre>
+    </div>
+    <p>Что получилось — <code>docker compose ps</code> (реальный вывод; для ширины страницы убраны колонки
+      <code>COMMAND</code> и <code>CREATED</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">NAME            IMAGE                          SERVICE   STATUS                   PORTS
+shop-api-1      shop-api                       api       Up 3 minutes (healthy)   0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+shop-db-1       postgres:16-alpine             db        Up 3 minutes (healthy)   5432/tcp
+shop-rabbit-1   rabbitmq:3-management-alpine   rabbit    Up 3 minutes (healthy)   4369/tcp, 5671-5672/tcp, 15671/tcp, 15691-15692/tcp, 25672/tcp, 0.0.0.0:15672->15672/tcp, [::]:15672->15672/tcp
+shop-redis-1    redis:7-alpine                 redis     Up 3 minutes (healthy)   6379/tcp</code></pre>
+    </div>
+    <p>Колонка <code>PORTS</code> читается так: у <code>api</code> и <code>rabbit</code> слева от стрелки есть
+      <code>0.0.0.0:…</code> — порт опубликован на хост, снаружи видно. У <code>db</code> и <code>redis</code>
+      записано просто <code>5432/tcp</code> и <code>6379/tcp</code>: порт открыт <em>только внутри сети</em>
+      контейнеров, что для базы и кэша правильно.</p>
+    <p>Теперь три запроса — они и есть проверка, что собран именно <em>проект</em>, а не четыре отдельных
+      контейнера:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">curl -s localhost:8080/health
+# {"redis":"0.4 ms","postgres":"ok","rabbitmq":"ok"}     ← все три зависимости отвечают
+
+curl -s localhost:8080/
+# api is up
+
+curl -s localhost:8080/counter    # первый запрос
+# counter = 1
+curl -s localhost:8080/counter    # второй
+# counter = 2                     ← значение растёт в Redis, а не в памяти процесса</code></pre>
+    </div>
+    <p>Логи — по сервису, а не «всё в кучу»: <code>docker compose logs api</code>,
+      <code>docker compose logs -f db</code> (потоком), <code>docker compose logs --tail 50 rabbit</code>.</p>
+    <div class="box note">
+      <span class="t">Что в логах API выглядит страшно, но не является ошибкой</span>
+      <p>В <code>docker compose logs api</code> после старта появляются две строки:</p>
+      <pre><code class="language-text">Cannot load library libgssapi_krb5.so.2
+Error: Error loading shared library libgssapi_krb5.so.2: No such file or directory</code></pre>
+      <p>Это Npgsql при первом подключении проверяет, есть ли в системе библиотека Kerberos (GSSAPI): в
+        <code>alpine</code>-образе её нет. Проверено отдельной программой, которая подключается <em>только</em> к
+        PostgreSQL: те же две строки и сразу за ними <code>pg ok: 1</code>. Подключение по логину и паролю от
+        этого не страдает — <code>/health</code> в тот же момент отвечает <code>"postgres":"ok"</code>. Если
+        сообщение мешает, поставьте пакет <code>krb5-libs</code> в свой образ или используйте не-alpine
+        базу.</p>
+    </div>
+
+    <h2>Как убедиться, что внутри действительно четыре разных сервиса</h2>
+    <p>Три команды, по одной на каждую инфраструктурную зависимость (<code>-T</code> отключает TTY — нужно для
+      скриптов и копирования вывода):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># Redis: что в нём лежит после двух /counter
+docker compose exec -T redis redis-cli keys '*'
+# api:counter
+docker compose exec -T redis redis-cli get api:counter
+# 2
+
+# PostgreSQL: версия движка и наша таблица
+docker compose exec -T db psql -U app -d app -tAc 'select version();'
+# PostgreSQL 16.15 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+
+# RabbitMQ: пользователи брокера
+docker compose exec -T rabbit rabbitmqctl list_users
+# Listing users ...
+# user  tags
+# app   [administrator]</code></pre>
+    </div>
+    <p>Ещё два места, куда стоит заглянуть: веб-консоль брокера <code>http://localhost:15672</code> (логин
+      <code>app</code> / <code>secret</code>) и <code>docker compose images</code> — видно, что образы
+      <em>разные</em>, и API среди них самый маленький (вывод сокращён: убраны ID, платформа и дата):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">CONTAINER           REPOSITORY          TAG                   SIZE
+shop-api-1          shop-api            latest                166MB
+shop-db-1           postgres            16-alpine             419MB
+shop-rabbit-1       rabbitmq            3-management-alpine   275MB
+shop-redis-1        redis               7-alpine              58MB</code></pre>
+    </div>
+
+    <h2>Тома: что переживает <code>down</code>, а что нет</h2>
+    <p>Данные базы лежат на томе <code>pgdata</code>, то есть <em>вне</em> контейнера. Проверка на живом стенде:
+      создаём таблицу, полностью останавливаем и удаляем стек, поднимаем заново:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker compose exec -T db psql -U app -d app -c 'create table items(id int primary key, name text);
+insert into items values (1, $$Молоток$$);'
+# CREATE TABLE
+# INSERT 0 1
+
+docker compose down          # контейнеры и сеть удалены, тома остались
+docker compose up -d         # без --build: образ уже есть
+docker compose exec -T db psql -U app -d app -tAc 'select * from items'
+# 1|Молоток                  ← строка на месте: она была на томе, а не в контейнере
+
+docker compose exec -T redis redis-cli dbsize
+# 0                         ← а Redis без тома пуст: счётчик api:counter пропал
+curl -s localhost:8080/counter
+# counter = 1               ← нумерация началась заново</code></pre>
+    </div>
+    <p>Это не случайность, а решение: <strong>база и брокер хранят состояние, кэш — нет</strong>. Если дать
+      Redis том, он «выживет» пересоздание, но это уже не кэш, а хранилище с обязательствами по
+      персистентности (книга по Redis, глава 5).</p>
+    <div class="box warn">
+      <span class="t"><code>down</code> и <code>down -v</code> — разница в одну букву и в ваши данные</span>
+      <p><code>docker compose down</code> удаляет контейнеры и сеть, <em>тома сохраняет</em>.
+        <code>docker compose down -v</code> удаляет и тома: PostgreSQL стартует с пустым кластером, RabbitMQ —
+        с пустыми очередями. На проде это выглядит как «мы случайно стёрли базу», поэтому команду с
+        <code>-v</code> выполняют осознанно и только на локальном стенде.</p>
+      <p>И наоборот: <code>docker compose ps</code> ничего не покажет про данные — «healthy» говорит о процессе,
+        а не о том, что в базе.</p>
+    </div>
+
+    <h2>Пользователь и пароль: как это ломается на практике</h2>
+    <p>Пароль должен совпадать <strong>в двух местах</strong>: в переменных брокера
+      (<code>RABBITMQ_DEFAULT_USER/PASS</code>) и в строке подключения у API. Проверка «а что если не
+      совпадёт»: меняем одну строку в <code>environment</code> у <code>api</code> на
+      <code>amqp://guest:guest@rabbit:5672</code> и пересоздаём сервис:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker compose up -d api            # compose увидел изменение environment и пересоздал контейнер
+curl -s localhost:8080/health
+# {"redis":"0.5 ms","postgres":"ok","rabbitmq":"BrokerUnreachableException"}
+#                                     ↑ Redis и база живы, брокер — нет
+
+docker compose logs rabbit | grep -i refused
+# [error] PLAIN login refused: user 'guest' - invalid credentials</code></pre>
+    </div>
+    <p>Причина в том, что <code>RABBITMQ_DEFAULT_USER: app</code> <em>заменяет</em> пользователя по умолчанию:
+      пользователя <code>guest</code> в этом брокере просто нет. Обратите внимание на важное: <strong>API при
+      этом запустился</strong>, <code>docker compose ps</code> покажет его <code>healthy</code> только потому,
+      что healthcheck смотрит на <code>/health</code>, а тот возвращает 200 с описанием проблемы. Если бы
+      <code>/health</code> падал, compose держал бы контейнер в статусе <code>unhealthy</code> — и это
+      правильное поведение: сервис работает частично, и ему нельзя давать трафик.</p>
+    <div class="box note">
+      <span class="t">По умолчанию в RabbitMQ гость ограничен localhost, но не в этом образе</span>
+      <p>Классическое правило RabbitMQ — пользователь <code>guest</code> может подключаться только с
+        <code>localhost</code>. В образе <code>rabbitmq:3-management-alpine</code> ограничение снято
+        (<code>loopback_users = []</code>, проверено <code>rabbitmq-diagnostics environment</code>): добавленный
+        руками <code>guest</code> подключается из другого контейнера без ошибок. Вывод практический: не
+        полагайтесь на «гостя по умолчанию» ни в одном окружении — создавайте своего пользователя с паролем.</p>
+    </div>
+    <p>Пароли в <code>compose.yaml</code> — нормально только для локального стенда. В git они попадают вместе с
+      файлом, поэтому для настоящих окружений берут <code>env_file</code> вне репозитория, секреты CI или
+      менеджер секретов (глава 10).</p>
+
+    <h2>Реплики: что меняется, когда API становится три</h2>
+    <p>В compose можно попросить несколько экземпляров одного сервиса:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker compose up -d --scale api=2
+# Container shop-api-2 Error response from daemon: failed to set up container networking:
+# Bind for 0.0.0.0:8080 failed: port is already allocated</code></pre>
+    </div>
+    <p>Ошибка ожидаемая: <code>ports: "8080:8080"</code> требует <em>один</em> порт хоста на все реплики. В
+      compose это решают так: у сервиса убирают <code>ports</code> (реплики становятся доступны только по имени
+      <code>api</code> внутри сети), а перед ними ставят reverse-proxy — <code>nginx</code>,
+      <code>traefik</code> или <code>caddy</code>, который слушает 80/443 и распределяет запросы по репликам.
+      Здесь начинается граница возможностей compose: полноценные реплики, rolling update и перепланирование на
+      другую машину — это Kubernetes (глава 15).</p>
+    <p>И главное, что видно на этом примере: <strong>реплики не должны хранить состояние в памяти</strong>.
+      Счётчик в Redis у всех трёх экземпляров один и тот же — именно для этого он там и лежит.</p>
+
+    <h2>Режим разработки: код на хосте, инфраструктура в контейнерах</h2>
+    <p>Так работают каждый день: править код и перезапускать его за секунды, не пересобирая образ. Но здесь
+      появляется то, чего не было раньше: <strong>порты баз нужно опубликовать</strong>, иначе с хоста до них
+      не достучаться. Вместо правки основного файла делают override — compose автоматически склеивает
+      <code>compose.yaml</code> и <code>compose.override.yaml</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-yaml"># compose.override.yaml — только то, что нужно для разработки; файл подхватывается автоматически
+# (если в нём личные настройки — его не коммитят, в .gitignore)
+services:
+  db:
+    ports: ["5432:5432"]     # host 5432 → контейнер 5432
+  redis:
+    ports: ["6379:6379"]
+  rabbit:
+    ports: ["5672:5672"]     # сам AMQP, консоль 15672 уже опубликована в основном файле</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker compose up -d db redis rabbit      # только инфраструктура, без api
+ss -ltn | grep -E ':5432|:6379|:5672'
+# LISTEN 0 4096 0.0.0.0:5672 ...
+# LISTEN 0 4096 0.0.0.0:6379 ...
+# LISTEN 0 4096 0.0.0.0:5432 ...
+
+# тот же код, но на хосте; --no-launch-profile — чтобы ASPNETCORE_URLS не перебивался launchSettings.json
+ConnectionStrings__Postgres='Host=localhost;Port=5432;Database=app;Username=app;Password=secret' \
+ConnectionStrings__Redis='localhost:6379' \
+ConnectionStrings__Rabbit='amqp://app:secret@localhost:5672' \
+ASPNETCORE_URLS='http://localhost:5099' \
+dotnet run -c Release --no-launch-profile
+# info: Now listening on: http://localhost:5099
+
+curl -s localhost:5099/health
+# {"redis":"1.2 ms","postgres":"ok","rabbitmq":"ok"}
+curl -s localhost:5099/counter
+# counter = 2          ← счётчик ПРОДОЛЖИЛСЯ: в Redis уже лежало 1 от контейнерного API
+curl -s localhost:5099/counter
+# counter = 3</code></pre>
+    </div>
+    <p>Две вещи, которые здесь стоит заметить. Во-первых, <strong>состояние общее</strong>: приложение в
+      контейнере и приложение на хосте — два разных процесса, но счётчик у них один, потому что он в Redis; в
+      этом и смысл внешнего хранилища. Во-вторых, <strong>адреса — единственное, что отличается</strong>:
+      <code>localhost:6379</code> с хоста и <code>redis:6379</code> из контейнера. Код и Dockerfile те же.</p>
+    <div class="box tip">
+      <span class="t">Мелкая, но частая заминка</span>
+      <p><code>dotnet run</code> без <code>--no-launch-profile</code> берёт порт из
+        <code>Properties/launchSettings.json</code> и игнорирует <code>ASPNETCORE_URLS</code> — в проверке
+        приложение поднялось на 5169 вместо заданного 5099. В контейнере <code>launchSettings.json</code> не
+        используется вообще, поэтому там такой путаницы нет.</p>
+    </div>
+
+    <h2>Прод: те же четыре сервиса, но другими инструментами</h2>
+    <p>Compose — инструмент одной машины и ручного запуска. На проде каждый сервис живёт своей жизнью:</p>
+    <table>
+      <thead><tr><th>В compose</th><th>В Kubernetes</th><th>Или managed-сервис</th></tr></thead>
+      <tbody>
+        <tr><td><code>api</code>: <code>build</code> + <code>ports</code></td>
+          <td>Deployment (3 реплики) + Service + Ingress</td>
+          <td>App Service, Cloud Run, ECS</td></tr>
+        <tr><td><code>db</code> + том <code>pgdata</code></td>
+          <td>StatefulSet + PVC</td>
+          <td>RDS, Cloud SQL, Azure Database</td></tr>
+        <tr><td><code>redis</code></td><td>Deployment/StatefulSet</td>
+          <td>ElastiCache, Memorystore</td></tr>
+        <tr><td><code>rabbit</code> + том <code>mqdata</code></td><td>StatefulSet</td>
+          <td>CloudAMQP, Amazon MQ</td></tr>
+        <tr><td><code>depends_on</code> + healthcheck</td><td>readiness/liveness probes</td>
+          <td>—</td></tr>
+        <tr><td>имена сервисов в сети</td><td>DNS Service</td>
+          <td>строка подключения из конфигурации</td></tr>
+      </tbody>
+    </table>
+    <p>Чего compose не умеет и почему его не берут на прод: нет rolling update, нет перепланирования контейнера
+      на другую машину при падении хоста, нет автомасштабирования, нет нормального хранения секретов, всё
+      привязано к одному демону Docker. Граница проходит ровно здесь: <strong>локально и в CI — compose,
+      в эксплуатации — оркестратор или managed-сервисы</strong> (глава 15).</p>
+    <p>Важно, что <em>ваш</em> образ при этом не меняется: тот же <code>shop-api:latest</code> (точнее, образ с
+      тегом-версией или digest) запускается и в compose, и в Kubernetes. Меняются только адреса в конфигурации —
+      поэтому глава 10 про переменные окружения важнее, чем кажется.</p>
+
+    <h2>А если Docker не хочется совсем?</h2>
+    <p>Проект остаётся тем же: <strong>ваш код не зависит от того, где запущены сервисы</strong> — только от
+      адресов в конфигурации. Варианты без Docker:</p>
+    <ul>
+      <li><strong>Нативные сервисы на машине разработчика:</strong> PostgreSQL из установщика, Redis из
+        <code>apt</code>/<code>brew</code>, RabbitMQ из пакета; <code>dotnet run</code> подключается к
+        <code>localhost</code>. Работает, но версии и настройки у всех свои, а «у меня не воспроизводится»
+        становится нормой.</li>
+      <li><strong>Один сервер с ручной установкой</strong> (или виртуалка) — так делали до контейнеров; обновления
+        и бэкапы целиком на вас.</li>
+      <li><strong>CI:</strong> сервисы всё равно нужны для тестов. В GitHub Actions это блок
+        <code>services:</code> (он поднимает те же контейнеры), в GitLab CI — <code>services</code> в job.
+        Docker там есть даже в проектах, которые «локально без Docker».</li>
+      <li><strong>Managed-сервисы в облаке</strong> прямо во время разработки: дороже, но максимально близко к
+        проду и без локального администрирования.</li>
+    </ul>
+    <p>Поэтому Docker в этой книге — не религия, а способ получить <em>одинаковое</em> окружение: тот же образ
+      базы, та же версия Redis, тот же брокер, что в CI и у коллеги.</p>
+
+    <h2>Типичные поломки этого стека</h2>
+    <table>
+      <thead><tr><th>Симптом</th><th>Причина</th><th>Что делать</th></tr></thead>
+      <tbody>
+        <tr><td><code>port is already allocated</code></td><td>порт хоста занят другим контейнером или
+          сервисом</td><td>сменить левую часть: <code>"8081:8080"</code>; кто занял —
+          <code>docker ps --filter publish=8080</code></td></tr>
+        <tr><td><code>RedisConnectionException</code> / <code>Failed to connect</code> сразу после
+          <code>up</code></td><td>API стартовал раньше зависимостей</td><td>healthcheck +
+          <code>depends_on: condition: service_healthy</code></td></tr>
+        <tr><td>то же, но зависимости <code>healthy</code></td><td>в строке подключения
+          <code>localhost</code></td><td>адрес — имя сервиса: <code>db</code>, <code>redis</code></td></tr>
+        <tr><td>изменили <code>compose.yaml</code>, ничего не поменялось</td><td><code>up -d</code> не
+          пересобирает образ</td><td><code>docker compose up -d --build</code></td></tr>
+        <tr><td>данные исчезли</td><td>был <code>down -v</code> или у сервиса нет тома</td>
+          <td>том для БД и брокера, память для кэша</td></tr>
+        <tr><td><code>rabbitmq: BrokerUnreachableException</code></td><td>логин/пароль брокера не совпадает с
+          <code>environment</code></td><td>сверить обе строки; причина — в
+          <code>docker compose logs rabbit</code></td></tr>
+        <tr><td>образ весит гигабайт</td><td>сборка в один stage с SDK</td><td>multi-stage (глава 7): здесь
+          1.03 ГБ → 166 МБ</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Один процесс — один контейнер.</strong> API, PostgreSQL, Redis и RabbitMQ — четыре
+          контейнера, даже если запускаются одной командой.</li>
+        <li><strong>Связывает их <code>compose.yaml</code>:</strong> <code>build</code>/<code>image</code>,
+          <code>environment</code>, <code>volumes</code>, <code>depends_on</code> с
+          <code>condition: service_healthy</code>.</li>
+        <li><strong>Внутри сети — имя сервиса и внутренний порт</strong> (<code>db:5432</code>,
+          <code>redis:6379</code>); <code>ports</code> нужны только для доступа с хоста.</li>
+        <li><strong>Данные — на томах, кэш — в памяти.</strong> <code>down</code> тома сохраняет,
+          <code>down -v</code> — удаляет.</li>
+        <li><strong>Код не зависит от окружения:</strong> различаются только адреса, и они приходят из
+          конфигурации. Поэтому тот же образ идёт в compose, CI и Kubernetes.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="dk17-interview.html">← <span class="sp">Глава 17. Как отвечать на интервью по Docker</span></a>
+      <a href="docker.html"><span class="sp">Оглавление раздела</span> →</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+
