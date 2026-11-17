@@ -128,7 +128,7 @@ docker exec redis7 redis-cli info memory
 
 # 2) войти в оболочку redis-cli и вводить команды там — уже без «redis-cli» и без «docker»
 docker exec -it redis7 redis-cli
-127.0.0.1:6379> info keyspace     # приглашение «127.0.0.1:6379>» = вы внутри redis-cli
+127.0.0.1:6379> info memory     # приглашение «127.0.0.1:6379>» = вы внутри redis-cli
 127.0.0.1:6379> quit              # выход
 
 # 3) если redis-cli установлен на хосте, а порт опубликован (-p 6379:6379 из главы 1)
@@ -216,9 +216,10 @@ lazyfreed_objects:0</code></pre>
         <tr><td><code>maxmemory_policy</code></td><td><code>allkeys-lru</code></td><td>Что сервер делает при
           достижении лимита — та самая политика из таблицы выше.</td></tr>
         <tr><td><code>mem_fragmentation_ratio</code></td><td><code>2.87</code></td><td>Отношение
-          <em>rss / used_memory</em>: ОС отдала процессу 11.36 МБ, а данными занято 4 МБ. Больше 1.5 — память
-          «размазана»: после 20 000 записей и 10 536 вытеснений аллокатор держит освободившиеся страницы.
-          Меньше 1 — часть памяти ушла в swap, это ещё хуже.</td></tr>
+          <em>rss / used_memory</em>: ОС отдала процессу 11.36 МБ, а данными занято 4 МБ. Ориентир для рабочей
+          базы — <strong>примерно 1.0–1.5</strong>; больше 1.5 — память «размазана» (после 20 000 записей и
+          10 536 вытеснений аллокатор держит освободившиеся страницы), меньше 1 — часть памяти ушла в swap, это
+          хуже. Почему на маленькой базе значение ничего не значит и что с ним делать — ниже.</td></tr>
         <tr><td><code>mem_allocator</code></td><td><code>jemalloc-5.3.0</code></td><td>Аллокатор, которым
           собран сервер: от него и зависит фрагментация.</td></tr>
         <tr><td><code>active_defrag_running</code></td><td><code>0</code></td><td>Идёт ли сейчас активная
@@ -228,6 +229,88 @@ lazyfreed_objects:0</code></pre>
           вернулась.</td></tr>
       </tbody>
     </table>
+
+    <h3>Что считать нормальным <code>mem_fragmentation_ratio</code></h3>
+    <p>Сначала — что именно делится: <code>mem_fragmentation_ratio = used_memory_rss / used_memory</code>.
+      Ответ «чем ближе к 1, тем лучше» верен, но бесполезен без второй половины: <strong>на маленькой базе
+      метрика ничего не значит</strong>. Замеры на одном и том же сервере (Redis 7.4.12, jemalloc):</p>
+    <table>
+      <thead><tr><th>Состояние сервера</th><th><code>used_memory</code></th><th><code>rss</code></th>
+        <th><code>mem_fragmentation_ratio</code></th></tr></thead>
+      <tbody>
+        <tr><td>только запущен, данных нет</td><td>1.01M</td><td>9.0M</td><td><code>9.26</code></td></tr>
+        <tr><td>200 000 ключей по 100 байт (38 МБ данных)</td><td>38.15M</td><td>47.59M</td>
+          <td><code>1.25</code></td></tr>
+        <tr><td>сразу после удаления 190 000 ключей</td><td>3.16M</td><td>47.05M</td>
+          <td><code>15.07</code></td></tr>
+        <tr><td>те же данные через 30 секунд</td><td>3.16M</td><td>34.37M</td><td><code>11.01</code></td></tr>
+        <tr><td>лимит 4 МБ, идёт вытеснение</td><td>4.00M</td><td>11.36M</td><td><code>2.87</code></td></tr>
+      </tbody>
+    </table>
+    <p>Отсюда правила:</p>
+    <ul>
+      <li><strong>Смотрите на базу нормального размера.</strong> <code>9.26</code> на пустом сервере — не
+        фрагментация, а служебные аллокации процесса, которым не с чем сравниваться.</li>
+      <li><strong>Ориентир для рабочей базы — примерно 1.0–1.5.</strong> <code>1.25</code> на 38 МБ данных —
+        здоровое значение, и видно, из чего оно сложилось: <code>allocator_frag_ratio:1.01</code> (аллокатор почти
+        не теряет), <code>allocator_rss_ratio:1.17</code>, <code>rss_overhead_ratio:1.04</code>.</li>
+      <li><strong>Больше 1.5 — разбираться, а не паниковать.</strong> Полезно понять, какой компонент виноват:
+        <code>allocator_frag_ratio</code> — «мусор» внутри аллокатора, <code>allocator_rss_ratio</code> —
+        аллокатор держит освобождённые страницы, <code>rss_overhead_ratio</code> — накладные расходы вне
+        аллокатора (буферы, стек, сам процесс).</li>
+      <li><strong>Меньше 1 — плохо.</strong> RSS меньше «используемой» памяти значит, что часть страниц ушла в
+        swap: ответы начнут приходить за миллисекунды вместо микросекунд.</li>
+      <li><strong>Один замер обманывает.</strong> Сразу после массового удаления ratio взлетает до
+        <code>15.07</code>, а через 30 секунд jemalloc возвращает часть страниц — уже <code>11.01</code>
+        (<code>rss</code> 47.05M → 34.37M). Поэтому смотрят тренд и повторяют замер через полминуты, а не делают
+        вывод по одной точке.</li>
+    </ul>
+    <p>И важное: <code>11.01</code> и <code>2.87</code> в примерах — не «норма», а следствие того, что база после
+      удаления стала крошечной (3–4 МБ), а процесс держит память, рассчитанную на 38 МБ. На реальной нагрузке
+      держитесь диапазона 1.0–1.5 и реагируйте на устойчивый рост, а не на единичный всплеск.</p>
+
+    <h3>Если фрагментация устойчивая: <code>activedefrag</code></h3>
+    <p>У Redis есть активная дефрагментация: она переносит данные внутри страниц аллокатора и отдаёт лишние
+      страницы ОС. По умолчанию выключена, а пороги заданы так, чтобы не тратить CPU зря (значения из
+      <code>CONFIG GET 'active*'</code> на 7.4.12):</p>
+    <table>
+      <thead><tr><th>Параметр</th><th>По умолчанию</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>activedefrag</code></td><td><code>no</code></td><td>включена ли дефрагментация</td></tr>
+        <tr><td><code>active-defrag-ignore-bytes</code></td><td><code>104857600</code> (100 МБ)</td>
+          <td>меньше этого объёма «мусора» не начинать вообще</td></tr>
+        <tr><td><code>active-defrag-threshold-lower</code></td><td><code>10</code></td>
+          <td>начинать, когда фрагментация выше 10 %</td></tr>
+        <tr><td><code>active-defrag-threshold-upper</code></td><td><code>100</code></td>
+          <td>работать на полную, когда выше 100 %</td></tr>
+        <tr><td><code>active-defrag-cycle-min</code> / <code>-max</code></td><td><code>1</code> / <code>25</code></td>
+          <td>минимум и максимум CPU, который отдаётся дефрагментации, %</td></tr>
+        <tr><td><code>active-defrag-max-scan-fields</code></td><td><code>1000</code></td>
+          <td>сколько полей большого ключа просматривать за один проход</td></tr>
+      </tbody>
+    </table>
+    <p>Включение и проверка — реальный вывод:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">redis-cli config set activedefrag yes
+# OK
+redis-cli info memory | grep -E 'active_defrag_running|mem_fragmentation_ratio'
+# active_defrag_running:0
+# mem_fragmentation_ratio:3.79
+redis-cli info stats | grep -i defrag
+# active_defrag_hits:0
+# active_defrag_misses:0
+# total_active_defrag_time:0        ← не работала ни секунды</code></pre>
+    </div>
+    <p>Главное в этом выводе — не <code>activedefrag yes</code>, а счётчики. <strong>Включить флаг мало:</strong>
+      дефрагментация начнётся, только когда фрагментированных байт больше
+      <code>active-defrag-ignore-bytes</code> и отношение выше <code>active-defrag-threshold-lower</code>. Здесь
+      «мусора» было ~9 МБ при пороге 100 МБ, поэтому <code>active_defrag_running:0</code>, а
+      <code>total_active_defrag_time:0</code> прямо говорит, что она не запускалась. Кстати, падение ratio
+      <code>15.30 → 3.79</code> в этом прогоне произошло <em>не</em> из-за дефрагментации (её счётчики нулевые), а
+      потому что jemalloc сам вернул часть страниц через несколько секунд.</p>
+    <p>Проверять работу дефрагментации нужно именно по <code>active_defrag_hits</code> и
+      <code>total_active_defrag_time</code>: если они растут, а ratio падает — она делает своё дело. Если ratio
+      высокий, а счётчики стоят, — смотрите пороги (или фрагментация не там, где вы думаете).</p>
 
     <h3>2. <code>INFO stats</code> — счётчики: попадания, вытеснения, ошибки</h3>
     <p>Раздел <code>Stats</code> целиком — 64 строки накопительных счётчиков с момента старта сервера. Снято
@@ -305,8 +388,9 @@ acl_access_denied_channel:0</code></pre>
       <tbody>
         <tr><td><code>keyspace_hits</code> / <code>keyspace_misses</code></td><td><code>14</code> /
           <code>8</code></td><td>Сколько чтений попало в существующий ключ, а сколько вернуло
-          <code>nil</code>. Доля попаданий = 14 / (14 + 8) = <strong>64 %</strong> — это главная метрика
-          эффективности кэша.</td></tr>
+          <code>nil</code>. Доля попаданий = 14 / (14 + 8) = <strong>64 %</strong> — главная метрика
+          эффективности кэша. Здесь она низкая, потому что сервер использовали для экспериментов; что считать
+          нормой и почему суммарный счётчик обманчив — ниже.</td></tr>
         <tr><td><code>evicted_keys</code></td><td><code>10853</code></td><td>Сколько ключей сервер удалил сам,
           чтобы уложиться в <code>maxmemory</code>. Растёт постоянно — кэш не держит рабочий набор.</td></tr>
         <tr><td><code>expired_keys</code></td><td><code>2</code></td><td>Сколько ключей удалено по истечении
@@ -338,6 +422,56 @@ acl_access_denied_channel:0</code></pre>
     </table>
     <p>В примере с вытеснением счётчики выглядели так: <code>keyspace_hits:14</code>,
       <code>keyspace_misses:8</code> — 64 % попаданий на кэше, куда всё только что записали.</p>
+    <h3>Доля попаданий: что считать хорошей</h3>
+    <p>Сначала — как считается и что именно двигает счётчики (проверено на пустой базе, по одному вызову):</p>
+    <table>
+      <thead><tr><th>Что выполнили</th><th><code>keyspace_hits</code></th><th><code>keyspace_misses</code></th></tr></thead>
+      <tbody>
+        <tr><td><code>MSET k1 v1 k2 v2</code></td><td>не меняется</td><td>не меняется</td></tr>
+        <tr><td><code>GET k1</code> (ключ есть)</td><td>+1</td><td>—</td></tr>
+        <tr><td><code>GET nope</code> (ключа нет)</td><td>—</td><td>+1</td></tr>
+        <tr><td><code>EXISTS k1</code> / <code>EXISTS nope2</code></td><td>+1</td><td>+1</td></tr>
+        <tr><td><code>TTL k1</code> / <code>TTL nope3</code></td><td>+1</td><td>+1</td></tr>
+      </tbody>
+    </table>
+    <p>То есть счётчики двигают <strong>чтения по ключу</strong> (включая <code>EXISTS</code> и <code>TTL</code>),
+      а записи — нет. Два реальных прогона с разным результатом:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># прогон 1: 90 чтений по существующим ключам + 10 по отсутствующим
+docker exec -i ops sh -c 'redis-cli --pipe' < /tmp/gets1.txt     # 100 команд GET
+docker exec ops redis-cli info stats | grep -E 'keyspace_(hits|misses)'
+# keyspace_hits:90
+# keyspace_misses:10              ← 90 / (90 + 10) = 90 %
+
+# прогон 2: те же 100 чтений, но ключей нет вообще (после flushall)
+# keyspace_hits:0
+# keyspace_misses:100             ← 0 %</code></pre>
+    </div>
+    <p>Универсальной нормы нет: доля попаданий зависит от того, повторяются ли чтения, насколько короткий TTL и
+      хватает ли памяти. Рабочие ориентиры (это ориентиры, а не норматив):</p>
+    <ul>
+      <li><strong>Кэш справочных данных</strong>, который читают многократно (каталог, профили, настройки):
+        обычно <strong>90 % и выше</strong>. Прогон 1 — ровно этот случай.</li>
+      <li><strong>Кэш ответов с коротким TTL</strong> (секунды): 60–80 % — нормально, часть ключей истекает между
+        чтениями, и это не ошибка.</li>
+      <li><strong>Поток уникальных чтений</strong> (каждый запрос — новый ключ): <strong>0–20 %</strong>, и это
+        сразу видно по второму прогону: кэш почти не помогает.</li>
+    </ul>
+    <p>Если доля ниже ожидаемой, проверяйте по порядку:</p>
+    <ul>
+      <li><strong><code>evicted_keys</code></strong> — если он растёт, память выбрасывает ключи раньше TTL, и
+        промахи «не ваша вина» (лечится <code>maxmemory</code> или политикой).</li>
+      <li><strong>TTL против частоты чтений</strong> — при TTL 5 минут редко читаемый ключ истечёт между запросами
+        (глава 3).</li>
+      <li><strong>Негативный кэш</strong> — если приложение часто спрашивает то, чего нет (например, удалённые
+        записи), эти обращения всегда будут <code>misses</code>; иногда их кэшируют пустым значением.</li>
+      <li><strong>Инвалидацию</strong> — не сбрасываете ли ключ при каждой записи, хотя данные почти не меняются.
+      </li>
+    </ul>
+    <p>И главное: <code>keyspace_hits/misses</code> — <strong>глобальные счётчики по всем ключам сервера</strong>.
+      Если в одном Redis лежит и «горячий» справочник, и редкие админские выборки, средняя доля будет отражать
+      смесь и ничего не скажет про каждую задачу. Поэтому либо считайте дельту за окно (снимок до и после,
+      <code>CONFIG RESETSTAT</code> — ниже), либо разводите разные задачи по разным базам/инстансам.</p>
     <div class="box note">
       <span class="t">Накопительные счётчики против мгновенных значений</span>
       <p>В <code>Stats</code> почти всё — счётчики <em>за всё время с момента старта</em>: они только растут.
@@ -357,6 +491,8 @@ redis-cli info stats | grep -E 'rejected_connections|total_commands_processed'
     </div>
 
     <h3>3. <code>INFO keyspace</code> — сколько ключей и сколько из них с TTL</h3>
+    <p>Что такое TTL, как он задаётся и почему перезапись ключа его сбрасывает — глава 3; здесь важно, что
+      <code>INFO keyspace</code> показывает его последствия: сколько ключей со сроком и сколько им осталось.</p>
     <div class="codewrap">
       <pre><code class="language-bash">docker exec redis7 redis-cli info keyspace
 # Keyspace
@@ -377,10 +513,51 @@ db0:keys=9148,expires=1,avg_ttl=0,subexpiry=0</code></pre>
         <code>avg_ttl=599900</code>. Когда TTL-ключей много, значение стабильно: 200 ключей по
         <code>EX 600</code> дают <code>db0:keys=200,expires=200,avg_ttl=599819,subexpiry=0</code>.</li>
       <li><code>subexpiry=0</code> — сколько <em>полей хешей</em> имеют собственный TTL (команда
-        <code>HEXPIRE</code>, новое в Redis 7.4). Проверяется в две команды: <code>hset h:1 a 1 b 2</code> →
-        <code>subexpiry=0</code>; <code>hexpire h:1 100 fields 1 a</code> → <code>subexpiry=1</code> (у поля
-        <code>a</code> свой TTL 100 секунд, <code>hpttl h:1 fields 1 a</code> → <code>99857</code>).</li>
+        <code>HEXPIRE</code>, новое в Redis 7.4). Это не то же самое, что <code>expires</code>: TTL поля не
+        делает ключ истекающим. Ниже — как это получить руками, с разбором каждого аргумента.</li>
     </ul>
+    <p>Сначала — реальный вывод «до и после», потом разбор команд:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli hset h:1 name Алексей plan pro
+# 2                                  ← HSET вернул число СОЗДАННЫХ полей
+docker exec redis7 redis-cli info keyspace
+# db0:keys=1,expires=0,avg_ttl=0,subexpiry=0
+
+docker exec redis7 redis-cli hexpire h:1 100 fields 1 name
+# 1                                  ← TTL получило одно поле
+docker exec redis7 redis-cli info keyspace
+# db0:keys=1,expires=0,avg_ttl=0,subexpiry=1   ← ключ по-прежнему без TTL, но у поля он есть
+
+docker exec redis7 redis-cli hpttl h:1 fields 2 name plan
+# 99878                              ← у поля name осталось ~100 секунд (в мс)
+# -1                                 ← у поля plan TTL нет
+docker exec redis7 redis-cli ttl h:1
+# -1                                 ← у КЛЮЧА TTL нет: expires=0 это и означал</code></pre>
+    </div>
+    <p>Разбор команды <code>hexpire h:1 100 fields 1 name</code> — аргументы по порядку:</p>
+    <table>
+      <thead><tr><th>Аргумент</th><th>Что значит</th></tr></thead>
+      <tbody>
+        <tr><td><code>hexpire</code></td><td>команда «поставить TTL полю хеша» (парная к <code>hpttl</code>)</td></tr>
+        <tr><td><code>h:1</code></td><td>ключ-хеш, в котором лежат поля</td></tr>
+        <tr><td><code>100</code></td><td>срок жизни поля в <strong>секундах</strong>; есть
+          <code>HPEXPIRE</code> — то же в миллисекундах</td></tr>
+        <tr><td><code>FIELDS 1</code></td><td>«дальше будет <strong>1</strong> поле» — можно перечислить
+          несколько: <code>FIELDS 2 name plan</code></td></tr>
+        <tr><td><code>name</code></td><td>имя поля, которому ставим срок</td></tr>
+      </tbody>
+    </table>
+    <p>Аналогично <code>hpttl h:1 fields 2 name plan</code>: ключ <code>h:1</code>, <code>FIELDS 2</code> — два
+      поля, дальше сами поля; ответ — по одному числу на поле: миллисекунды до истечения, <code>-1</code> («TTL у
+      поля нет») или <code>-2</code> («поля нет»).</p>
+    <div class="box warn">
+      <span class="t">TTL поля — исключение, а не правило</span>
+      <p>В <code>INFO keyspace</code> поле с TTL видно только в <code>subexpiry</code>, а <code>keys</code>,
+        <code>expires</code> и <code>avg_ttl</code> не меняются: ключ целиком жив, пока живы его поля. Для кэша
+        это значит, что обычная схема «один ключ — один TTL» предсказуемее: инвалидация и мониторинг у неё
+        очевидны, а <code>HEXPIRE</code> стоит брать, когда срок действительно нужен отдельному полю (например,
+        «код подтверждения в профиле»).</p>
+    </div>
 
     <h3>4. <code>INFO clients</code> — подключения и те, кто ждёт</h3>
     <div class="codewrap">
@@ -474,8 +651,8 @@ rejected_connections:1</code></pre>
       <thead><tr><th>Механизм</th><th>Что делает</th><th>По умолчанию</th></tr></thead>
       <tbody>
         <tr><td><strong>RDB</strong></td><td>Периодический снимок всей базы в файл <code>dump.rdb</code></td>
-          <td>Включён: <code>save "3600 1 300 100 60 10000"</code> — снимок, если за 3600 с изменился хотя бы
-          1 ключ, за 300 с — 100, за 60 с — 10 000</td></tr>
+          <td>Включён: <code>save 3600 1 300 100 60 10000</code> — снимок, если за 3600 с изменился хотя бы
+            1 ключ, за 300 с — 100, за 60 с — 10 000</td></tr>
         <tr><td><strong>AOF</strong></td><td>Журнал команд, дописываемый на диск</td>
           <td>Выключен: <code>appendonly no</code></td></tr>
       </tbody>
@@ -485,10 +662,184 @@ rejected_connections:1</code></pre>
       терять», — нет.</p>
     <div class="box note">
       <span class="t">Как выбрать</span>
-      <p><strong>Чистый кэш:</strong> персистентность можно вообще отключить — после перезапуска кэш прогреется
-        сам. <strong>Очереди, локи, счётчики:</strong> включайте AOF (<code>appendonly yes</code>), иначе после
-        рестарта они исчезнут вместе с данными. И в любом случае реплика — не бэкап.</p>
+      <p><strong>Чистый кэш:</strong> персистентность можно отключить <em>целиком</em> — и RDB, и AOF; после
+        перезапуска кэш прогреется сам, но всё, что в нём было, исчезнет. <strong>Очереди, локи, счётчики:</strong>
+        включайте AOF (<code>appendonly yes</code>) — это единственный механизм, который переживает потерю
+        последнего снимка. И в любом случае реплика — не бэкап.</p>
     </div>
+
+    <h3>Как посмотреть, что включено</h3>
+    <p>Настройки — обычные параметры конфигурации, их видно теми же <code>CONFIG GET</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli config get save
+# save
+# 3600 1 300 100 60 10000        ← правило RDB: «за N секунд изменилось M ключей»
+docker exec redis7 redis-cli config get appendonly
+# appendonly
+# no                            ← AOF выключен
+docker exec redis7 redis-cli config get appendfsync
+# appendfsync
+# everysec                      ← как часто AOF сбрасывается на диск: always / everysec / no
+docker exec redis7 redis-cli config get dir
+# dir
+# /data                         ← куда пишутся файлы (в контейнере)
+docker exec redis7 redis-cli config get dbfilename
+# dbfilename
+# dump.rdb
+docker exec redis7 redis-cli config get appendfilename
+# appendfilename
+# appendonly.aof</code></pre>
+    </div>
+    <p>А состояние — в разделе <code>Persistence</code> у <code>INFO</code>. Вот реальный вывод (важные строки,
+      остальные — про фоновые операции):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli info persistence
+# loading:0                       ← сейчас файл не загружается
+# rdb_changes_since_last_save:3   ← столько изменений ещё не попало в снимок
+# rdb_bgsave_in_progress:0
+# rdb_last_save_time:1794916450   ← когда снимался последний снимок (unix-время)
+# rdb_last_bgsave_status:ok       ← последняя попытка снимка: ok / err
+# rdb_last_bgsave_time_sec:0
+# aof_enabled:0                   ← AOF выключен (совпадает с appendonly no)
+# aof_rewrite_in_progress:0
+# aof_last_bgrewrite_status:ok
+# aof_last_write_status:ok
+# aof_current_size:0</code></pre>
+    </div>
+
+    <h3>RDB: проверить, включить, отключить</h3>
+    <p>Снимок можно сделать по требованию — это и есть «проверить, что RDB работает»:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli set rdb:probe 1
+# OK
+docker exec redis7 redis-cli info persistence | grep rdb_changes_since_last_save
+# rdb_changes_since_last_save:4       ← четвёртое изменение ждёт снимка
+
+docker exec redis7 redis-cli bgsave
+# Background saving started           ← снимок в фоне (есть и SAVE — блокирующий, в проде не нужен)
+docker exec redis7 redis-cli lastsave
+# 1794916542                          ← unix-время последнего успешного снимка
+
+sleep 2
+docker exec redis7 redis-cli info persistence | grep -E 'rdb_changes_since_last_save|rdb_last_bgsave_status'
+# rdb_changes_since_last_save:0       ← всё попало в dump.rdb
+# rdb_last_bgsave_status:ok
+
+docker exec redis7 ls -l /data
+# total 4
+# -rw-------    1 redis    redis       99 Nov 17 12:22 dump.rdb   ← снимок на месте</code></pre>
+    </div>
+    <p>Отключить RDB — значит убрать все правила <code>save</code>; пустая строка означает «никогда»:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli config set save ""
+# OK
+docker exec redis7 redis-cli config get save
+# save
+#                               ← пусто: автоснимков больше не будет; BGSAVE по команде всё ещё работает
+docker exec redis7 redis-cli config rewrite
+# ERR The server is running without a config file
+# ↑ важный момент: CONFIG SET меняет только память процесса, на диск его кладёт CONFIG REWRITE,
+#   а для этого сервер должен быть запущен с файлом конфигурации</code></pre>
+    </div>
+    <p>Вывод из последней ошибки — практический: <strong><code>CONFIG SET</code> живёт до перезапуска</strong>. У
+      контейнера из главы 1 конфигурационного файла нет (процесс запущен без аргументов), поэтому «навсегда»
+      настройка задаётся либо в файле <code>redis.conf</code> (и монтируется в контейнер), либо аргументами
+      запуска. Отключить RDB на старте:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker run -d --name cache -p 6379:6379 redis:7-alpine redis-server --save "" --appendonly no
+docker exec cache redis-cli config get save
+# save
+#                               ← автоснимков нет
+docker exec cache redis-cli config get appendonly
+# appendonly
+# no</code></pre>
+    </div>
+    <p>В файле <code>redis.conf</code> те же две строки выглядят так: <code>save ""</code> и
+      <code>appendonly no</code>.</p>
+
+    <h3>AOF: включить, проверить, отключить</h3>
+    <p>Включение — одна команда. В Redis 7 журнал лежит не одним файлом, а каталогом
+      <code>appendonlydir</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec redis7 redis-cli config set appendonly yes
+# OK
+docker exec redis7 redis-cli info persistence | grep -E 'aof_(enabled|rewrites|current_size|last_write_status|last_bgrewrite_status)'
+# aof_enabled:1
+# aof_rewrites:1                    ← при включении сразу сделана первичная перезапись
+# aof_current_size:154              ← журнал уже пишется
+# aof_last_write_status:ok
+# aof_last_bgrewrite_status:ok
+
+docker exec redis7 ls -l /data
+# drwx------    2 redis    redis          100 Nov 17 11:56 appendonlydir
+# -rw-------    1 redis    redis          173 Nov 17 11:55 dump.rdb
+
+docker exec redis7 redis-cli bgrewriteaof
+# ERR Background append only file rewriting already in progress
+# ↑ если перезапись уже идёт, ответ именно такой — это не поломка</code></pre>
+    </div>
+    <p>Как часто журнал сбрасывается на диск, задаёт <code>appendfsync</code>:</p>
+    <table>
+      <thead><tr><th><code>appendfsync</code></th><th>Когда вызывается fsync</th><th>Сколько можно потерять</th></tr></thead>
+      <tbody>
+        <tr><td><code>always</code></td><td>после каждой записи</td><td>почти ничего, но каждая команда ждёт диск —
+          медленно</td></tr>
+        <tr><td><code>everysec</code> (по умолчанию)</td><td>раз в секунду</td><td>до ~1 секунды записей</td></tr>
+        <tr><td><code>no</code></td><td>когда решит ОС</td><td>больше секунды, объём непредсказуем</td></tr>
+      </tbody>
+    </table>
+    <p>Отключить — <code>config set appendonly no</code> (и, как и с RDB, это будет действовать до перезапуска;
+      постоянно — <code>appendonly no</code> в конфиге или <code>--appendonly no</code> в аргументах).</p>
+    <div class="box warn">
+      <span class="t">Проверка «на живом»: <code>CONFIG SET</code> не переживает рестарт</span>
+      <p>Реальный эксперимент: включили AOF, записали ключ, перезапустили контейнер. Ключ из снимка остался, ключ,
+        попавший только в AOF, — исчез:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">docker exec redis7 redis-cli set aof:probe 1
+# OK
+docker restart redis7
+docker exec redis7 redis-cli mget rdb:probe aof:probe
+# 1                                 ← rdb:probe был в последнем снимке
+#                                   ← aof:probe нет: AOF после рестарта выключен
+docker exec redis7 redis-cli config get appendonly
+# appendonly
+# no                                ← снова значение по умолчанию
+docker exec redis7 redis-cli info persistence | grep aof_enabled
+# aof_enabled:0                     ← файл AOF на диске остался, но его не читают</code></pre>
+      </div>
+      <p>Чтобы AOF работал по-настоящему, его включают при запуске:</p>
+      <div class="codewrap">
+        <pre><code class="language-bash">docker run -d --name redis-aof -p 6380:6379 redis:7-alpine redis-server --appendonly yes
+docker exec redis-aof redis-cli set aof:keep 42
+docker exec redis-aof redis-cli info persistence | grep -E 'aof_enabled|aof_current_size'
+# aof_enabled:1
+# aof_current_size:58
+docker restart redis-aof
+docker exec redis-aof redis-cli get aof:keep
+# 42                                ← значение восстановлено из AOF</code></pre>
+      </div>
+    </div>
+
+    <h3>Что теряется при разных настройках</h3>
+    <table>
+      <thead><tr><th>RDB</th><th>AOF</th><th>Что на диске</th><th>Что можно потерять</th></tr></thead>
+      <tbody>
+        <tr><td>включён (по умолчанию)</td><td>выключен</td><td><code>dump.rdb</code> по правилам
+          <code>save</code></td><td>всё после последнего снимка: при активной записи — до минуты, при редкой — до
+          часа (первое правило — 3600 с)</td></tr>
+        <tr><td>выключен</td><td>выключен</td><td>ничего</td><td>всё: после перезапуска база пустая</td></tr>
+        <tr><td>выключен</td><td>включён, <code>everysec</code></td><td><code>appendonlydir</code></td>
+          <td>до ~1 секунды</td></tr>
+        <tr><td>выключен</td><td>включён, <code>always</code></td><td><code>appendonlydir</code></td>
+          <td>практически ничего</td></tr>
+        <tr><td>включён</td><td>включён</td><td>оба файла</td><td>при старте загружается AOF — он полнее
+          снимка</td></tr>
+      </tbody>
+    </table>
+    <p>Отсюда практическое правило: <strong>«отключить персистентность» = выключить оба механизма</strong>
+      (<code>save ""</code> и <code>appendonly no</code>). Если выключить только AOF, RDB продолжит снимать базу
+      по расписанию — данные будут не «навсегда», но всё равно частично переживут перезапуск.</p>
+
     <h2>Отказоустойчивость: Sentinel и Cluster</h2>
     <p>Один Redis — это одна точка отказа: упал процесс или машина, и кэш исчез (а вместе с ним, возможно,
       локи и счётчики). Два способа это пережить:</p>
@@ -500,6 +851,150 @@ rejected_connections:1</code></pre>
         сам находит узел по ключу. Это про <em>горизонтальный масштаб</em>, а не только про отказ: один узел
         больше не обязан держать весь объём.</li>
     </ul>
+
+    <h3>Репликация: как проверить, что она работает</h3>
+    <p>Реплика — это обычный Redis, запущенный с указанием мастера. Проверка — тот же <code>INFO
+      replication</code> на обеих сторонах:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># на мастере
+docker exec m1 redis-cli info replication | grep -E '^role|connected_slaves'
+# role:master
+# connected_slaves:1                  ← реплика подключена
+
+# на реплике
+docker exec r1 redis-cli info replication | grep -E '^role|master_host|master_link_status'
+# role:slave
+# master_host:m1
+# master_link_status:up               ← данные синхронизированы
+
+# реплика только для чтения: запись в неё — ошибка
+docker exec r1 redis-cli set x 1
+# READONLY You can't write against a read only replica.</code></pre>
+    </div>
+
+    <h3>Sentinel: как запустить и проверить переключение</h3>
+    <p>Sentinel — отдельный процесс, который читает свой конфиг. Минимальный файл для одного мастера и одной
+      реплики:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">port 26379
+sentinel monitor mymaster 172.18.0.2 6379 1     # имя, адрес мастера, порт, кворум
+sentinel down-after-milliseconds mymaster 3000  # сколько молчания считать падением
+sentinel failover-timeout mymaster 10000
+sentinel parallel-syncs mymaster 1</code></pre>
+    </div>
+    <p>Запуск в Docker и проверка — реальные команды и вывод:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># мастер и реплика в одной сети
+docker network create sentnet
+docker run -d --name m1 --network sentnet redis:7-alpine
+MIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' m1)
+echo $MIP                             # 172.18.0.2 — этот адрес идёт в конфиг Sentinel
+docker run -d --name r1 --network sentnet redis:7-alpine redis-server --replicaof $MIP 6379
+
+# sentinel: конфиг создаём внутри контейнера и запускаем его с флагом --sentinel
+docker run -d --name s1 --network sentnet --user root redis:7-alpine sh -c \
+  "printf 'port 26379\n\
+sentinel monitor mymaster $MIP 6379 1\n\
+sentinel down-after-milliseconds mymaster 3000\n\
+sentinel failover-timeout mymaster 10000\n' > /tmp/sentinel.conf; exec redis-server /tmp/sentinel.conf --sentinel"
+
+docker exec s1 redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
+# 172.18.0.2
+# 6379                               ← кто сейчас мастер, по мнению Sentinel
+docker exec s1 redis-cli -p 26379 sentinel master mymaster | grep -A1 -E '^(flags|num-slaves|quorum)$'
+# flags
+# master
+# num-slaves
+# 1
+# quorum
+# 1</code></pre>
+    </div>
+    <p>Теперь проверка самого главного — переключения. Останавливаем мастер и опрашиваем Sentinel раз в секунду:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker stop m1
+# t=1s -> 172.18.0.2      ← Sentinel ещё считает мастером старый адрес
+# t=2s -> 172.18.0.2
+# t=3s -> 172.18.0.2
+# t=4s -> 172.18.0.3      ← повышенная реплика: новый мастер
+
+docker exec r1 redis-cli info replication | grep '^role'
+# role:master
+
+# вернули старый мастер — Sentinel переводит его в реплики нового
+docker start m1
+docker exec m1 redis-cli info replication | grep -E '^role|master_host|master_link_status'
+# role:slave
+# master_host:172.18.0.3
+# master_link_status:up</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Две ловушки Sentinel, на которые легко наступить</span>
+      <p><strong>Имена вместо адресов.</strong> По умолчанию Sentinel не разрешает hostname в конфиге: строка
+        <code>sentinel monitor mymaster m1 6379 1</code> даёт при старте
+        <code>Failed to resolve hostname 'm1'</code>. Нужна настройка <code>sentinel resolve-hostnames yes</code>
+        (тогда в <code>get-master-addr-by-name</code> вернётся IP, а не имя).</p>
+      <p><strong>Кворум и количество Sentinel.</strong> В примере один Sentinel и кворум 1 — этого достаточно для
+        демонстрации, но не для прода: при одном Sentinel его падение оставляет кластер без арбитра. В проде
+        поднимают три и более Sentinel на разных машинах.</p>
+    </div>
+
+    <h3>Cluster: как запустить и проверить</h3>
+    <p>Cluster — это режим самого Redis (<code>--cluster-enabled yes</code>), а не отдельный процесс. Для
+      проверки хватит трёх мастеров; в одном контейнере их удобно поднять на портах 7000–7002:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker run -d --name cl1 -p 7000-7002:7000-7002 redis:7-alpine sh -c \
+  'for p in 7000 7001 7002; do
+     redis-server --port $p --cluster-enabled yes --cluster-config-file nodes-$p.conf \
+                  --cluster-node-timeout 5000 --save "" --appendonly no --daemonize yes
+   done; sleep infinity'
+
+# создаём кластер: три мастера, без реплик (--cluster-replicas 0)
+docker exec cl1 redis-cli --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+  --cluster-replicas 0 --cluster-yes
+# M: f86d96… 127.0.0.1:7000   slots:[0-5460] (5461 slots) master
+# M: 069175… 127.0.0.1:7001   slots:[5461-10922] (5462 slots) master
+# M: 23786e… 127.0.0.1:7002   slots:[10923-16383] (5461 slots) master
+# [OK] All 16384 slots covered.      ← идентификаторы узлов сокращены</code></pre>
+    </div>
+    <p>Проверка состояния и того, как клиент находит ключ:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec cl1 redis-cli -p 7000 cluster info | head -7
+# cluster_state:ok
+# cluster_slots_assigned:16384
+# cluster_slots_ok:16384
+# cluster_slots_pfail:0
+# cluster_slots_fail:0
+# cluster_known_nodes:3
+# cluster_size:3
+
+docker exec cl1 redis-cli -p 7000 cluster keyslot foo
+# 12182                              ← слот, в который попадает ключ
+
+# без -c клиент переадресацию не выполняет, а сообщает, куда идти
+docker exec cl1 redis-cli -p 7000 set foo bar
+# MOVED 12182 127.0.0.1:7002
+# с -c redis-cli сам переходит на нужный узел
+docker exec cl1 redis-cli -c -p 7000 set foo bar
+# OK
+docker exec cl1 redis-cli -c -p 7001 get foo
+# bar</code></pre>
+    </div>
+    <p>Ключи одной сущности в Cluster должны попадать в один слот, иначе многошаговые команды падают. Проверено:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec cl1 redis-cli -c -p 7000 mget user1:a user1:b
+# CROSSSLOT Keys in request don't hash to the same slot
+
+docker exec cl1 redis-cli -p 7000 cluster keyslot user1:a     # 1888
+docker exec cl1 redis-cli -p 7000 cluster keyslot user1:b     # 14083   ← разные слоты
+
+# хеш-тег в фигурных скобках: слот считается по содержимому скобок
+docker exec cl1 redis-cli -p 7000 cluster keyslot '{user1}:a' # 8106
+docker exec cl1 redis-cli -p 7000 cluster keyslot '{user1}:b' # 8106    ← один слот
+docker exec cl1 redis-cli -c -p 7000 mget '{user1}:a' '{user1}:b'
+# 1
+# 2</code></pre>
+    </div>
+
     <p>Для приложения главное правило не меняется: <strong>потеря Redis не должна быть потерей данных</strong>.
       Если после падения кэша сервис не поднимается — значит, в Redis лежит то, что там лежать не должно.</p>
 
@@ -528,8 +1023,24 @@ rejected_connections:1</code></pre>
           вечные ключи); для данных «нельзя терять» — <code>noeviction</code> плюс персистентность.</li>
         <li><strong>RDB включён, AOF выключен</strong> — значит, свежие записи теряются при аварии; для очередей и
           счётчиков включайте AOF.</li>
+        <li><strong><code>mem_fragmentation_ratio</code> смотрят на базе нормального размера:</strong> ориентир
+          1.0–1.5, меньше 1 — swap, больше 1.5 — разбираться по компонентам
+          (<code>allocator_frag_ratio</code>, <code>allocator_rss_ratio</code>, <code>rss_overhead_ratio</code>);
+          один замер после массового удаления обманывает.</li>
+        <li><strong>Доля попаданий — не норматив, а зависимость от нагрузки:</strong> справочник с повторными
+          чтениями — 90 %+, короткий TTL — 60–80 %, поток уникальных ключей — 0–20 %. Счётчик глобальный и двигают
+          его чтения, а не записи.</li>
+        <li><strong>Проверяйте персистентность командами:</strong> <code>CONFIG GET save</code>,
+          <code>CONFIG GET appendonly</code>, <code>INFO persistence</code>, <code>BGSAVE</code> +
+          <code>LASTSAVE</code>. «Отключить персистентность» = <code>save ""</code> <em>и</em>
+          <code>appendonly no</code>; <code>CONFIG SET</code> живёт до перезапуска.</li>
+        <li><strong>Sentinel и Cluster проверяются теми же командами, что у клиента:</strong>
+          <code>sentinel get-master-addr-by-name</code> до и после падения мастера, <code>cluster info</code>,
+          <code>cluster keyslot</code> и ответ <code>MOVED</code> — по ним видно, что отказоустойчивость и
+          шардирование действительно работают.</li>
         <li><strong>Смотрите <code>keyspace_hits/misses</code> и <code>evicted_keys</code></strong>, а не только
-          «жив ли процесс».</li>
+          «жив ли процесс»: низкая доля попаданий при растущем <code>evicted_keys</code> означает, что памяти не
+          хватает рабочему набору.</li>
         <li><strong>Репликация и Cluster — про доступность и объём,</strong> а не про сохранность данных: истина
           должна оставаться в PostgreSQL.</li>
       </ul>
