@@ -23,8 +23,9 @@
     <p><span class="tag core">основная глава</span></p>
 
     <h2>Подписка и подтверждение</h2>
-    <p>Потребитель подписывается на очередь и получает сообщения по одному (по умолчанию). Ключевой выбор —
-      <strong><code>autoAck</code></strong>:</p>
+    <p><strong>Потребитель</strong> (consumer — здесь и дальше в книге: ваша программа, подключённая к брокеру,
+      а не человек-пользователь) подписывается на очередь и получает сообщения по одному (по умолчанию).
+      Ключевой выбор — <strong><code>autoAck</code></strong>:</p>
     <ul>
       <li><strong><code>autoAck: true</code></strong> — брокер считает сообщение доставленным сразу, ещё до
         обработки. Если процесс упадёт в обработчике, сообщение потеряно.</li>
@@ -32,17 +33,36 @@
         (<code>BasicAck</code>) после успешной обработки. Это единственный вариант, при котором падение
         потребителя не теряет работу.</li>
     </ul>
+    <p>Ниже — полная программа: подключение, канал, очередь, одно сообщение и потребитель, который его
+      обрабатывает. <code>HandleAsync</code> — <strong>ваш</strong> метод, в <code>RabbitMQ.Client</code>
+      такого нет: клиент отдаёт только байты тела, а что с ними делать, решает приложение. В листинге он
+      объявлен в конце файла как локальная функция:</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">// ch — канал (глава 1), ct — CancellationToken приложения,
-// HandleAsync — ваш обработчик сообщения
-var consumer = new AsyncEventingBasicConsumer(ch);       // подписчик, привязанный к каналу
+      <pre><code class="language-csharp">using System.Text;                                          // Encoding.UTF8.GetBytes / GetString
+using RabbitMQ.Client;                                      // ConnectionFactory, IChannel, BasicProperties
+using RabbitMQ.Client.Events;                               // BasicDeliverEventArgs — тип параметра ea
 
-consumer.ReceivedAsync += async (_, ea) =&gt;               // срабатывает на каждую доставку
+var factory = new ConnectionFactory { HostName = "localhost" };  // порт 5672 и guest/guest — по умолчанию
+await using var conn = await factory.CreateConnectionAsync();    // TCP-соединение с брокером
+await using var ch   = await conn.CreateChannelAsync();          // канал: в нём живут подписка и ack
+
+await ch.QueueDeclareAsync("q.consume", durable: false, exclusive: false, autoDelete: false); // очередь опыта
+await ch.QueuePurgeAsync("q.consume");                           // чистим остатки прошлых прогонов
+
+var props = new BasicProperties { MessageId = "m-1", ContentType = "application/json" }; // свойства (глава 2)
+await ch.BasicPublishAsync("", "q.consume", mandatory: false, basicProperties: props,
+    body: Encoding.UTF8.GetBytes("{\"id\":42}"));                 // публикуем в default exchange: routing key = имя очереди
+
+var consumer = new AsyncEventingBasicConsumer(ch);          // подписчик, привязанный к каналу
+
+consumer.ReceivedAsync += async (_, ea) =&gt;                  // срабатывает на каждую доставку; ea — параметры доставки
 {
     try
     {
-        await HandleAsync(ea.Body, ct);                  // бизнес-логика; ea.Body — ReadOnlyMemory&lt;byte&gt;
-        await ch.BasicAckAsync(ea.DeliveryTag, false);   // успех: подтвердить; false — только это сообщение
+        Console.WriteLine($"exchange='{ea.Exchange}' rk='{ea.RoutingKey}' redelivered={ea.Redelivered} " +
+                          $"tag={ea.DeliveryTag} msgid={ea.BasicProperties?.MessageId}"); // служебные поля доставки
+        await HandleAsync(ea.Body);                          // бизнес-логика: ваш метод, не часть клиента
+        await ch.BasicAckAsync(ea.DeliveryTag, false);       // успех: подтвердить; false — только это сообщение
     }
     catch (Exception)
     {
@@ -51,7 +71,18 @@ consumer.ReceivedAsync += async (_, ea) =&gt;               // срабатыв�
     }
 };
 
-await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer); // подписка: очередь, ручные ack, обработчик</code></pre>
+await ch.BasicConsumeAsync("q.consume", autoAck: false, consumer); // подписка: очередь, ручные ack, обработчик
+await Task.Delay(1000);                                      // ждём доставку, обработку и подтверждение
+
+static async Task HandleAsync(ReadOnlyMemory&lt;byte&gt; body)     // ВАШ метод: клиент отдаёт только байты
+{
+    await Task.Delay(10);                                    // имитация работы: запрос в БД, вызов API и т.п.
+    Console.WriteLine($"handler: {Encoding.UTF8.GetString(body.Span)}"); // тело — байты, декодируем в строку
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">exchange='' rk='q.consume' redelivered=False tag=1 msgid=m-1   # какой канал, ключ, номер доставки и MessageId
+handler: {"id":42}                                            # HandleAsync разобрал тело</code></pre>
     </div>
     <p>Что означает каждый элемент:</p>
     <table>
@@ -62,11 +93,17 @@ await ch.BasicConsumeAsync("orders.new", autoAck: false, consumer); // подп�
         <tr><td><code>ea.DeliveryTag</code></td><td>номер доставки в рамках канала — по нему сообщение
           подтверждают или отклоняют</td></tr>
         <tr><td><code>ea.Redelivered</code></td><td><code>true</code>, если брокер доставляет сообщение
-          повторно (после requeue или обрыва соединения)</td></tr>
+          повторно (после requeue или обрыва соединения). В выводе выше — <code>redelivered=False</code>:
+          сообщение пришло впервые</td></tr>
         <tr><td><code>ea.Exchange</code>, <code>ea.RoutingKey</code></td><td>как сообщение было
-          опубликовано — удобно для логов и маршрутизации ответа</td></tr>
+          опубликовано — удобно для логов и маршрутизации ответа. В выводе выше <code>exchange=''</code>
+          (пустая строка — default exchange, глава 1), <code>rk='q.consume'</code></td></tr>
         <tr><td><code>ea.BasicProperties</code></td><td>свойства из главы 2: <code>MessageId</code>,
-          <code>Headers</code>, <code>Persistent</code></td></tr>
+          <code>Headers</code>, <code>Persistent</code>. В выводе выше <code>msgid=m-1</code> — это
+          <code>MessageId</code>, который положил публикующий код</td></tr>
+        <tr><td><code>HandleAsync(ea.Body)</code></td><td>ваш обработчик, не метод клиента: получает байты тела
+          и делает с ними бизнес-логику. В примере выше он объявлен в конце файла как
+          <code>static async Task HandleAsync(ReadOnlyMemory&lt;byte&gt;)</code></td></tr>
         <tr><td><code>BasicAckAsync(deliveryTag, multiple)</code></td><td><code>multiple: false</code> —
           подтвердить только это сообщение; <code>true</code> — все доставки до него включительно</td></tr>
         <tr><td><code>BasicNackAsync(deliveryTag, multiple, requeue)</code></td><td><code>requeue: true</code>
@@ -150,9 +187,61 @@ q.requeue left=0                            # ack во второй раз уб�
       </tbody>
     </table>
 
+    <p>Код опыта: два потребителя на одной очереди, у A обработка 100 мс, у B — мгновенная. Опыт повторяется
+      дважды — с окном 1 и с окном 10. Подписка A идёт первой, поэтому именно ему брокер отдаёт первое
+      сообщение:</p>
     <div class="codewrap">
-      <pre><code class="language-text">prefetch=1/1, A slow:   A=1  B=9
-prefetch=10/10, A slow: A=0  B=10</code></pre>
+      <pre><code class="language-csharp">using System.Text;                                          // Encoding.UTF8.GetBytes
+using RabbitMQ.Client;                                      // ConnectionFactory, IChannel
+using RabbitMQ.Client.Events;                               // AsyncEventingBasicConsumer
+
+var factory = new ConnectionFactory { HostName = "localhost" };  // порт 5672 и guest/guest — по умолчанию
+
+foreach (var prefetch in new[] { 1, 10 })                   // два прогона: окно 1 и окно 10
+{
+    await using var conn = await factory.CreateConnectionAsync();  // своё соединение на прогон
+    await using var pub  = await conn.CreateChannelAsync();        // канал публикации
+    await pub.QueueDeclareAsync("q.prefetch", durable: false, exclusive: false, autoDelete: false); // очередь опыта
+    await pub.QueuePurgeAsync("q.prefetch");                       // чистим остатки прошлого прогона
+
+    for (int i = 1; i &lt;= 10; i++)                                  // 10 сообщений в очередь
+        await pub.BasicPublishAsync("", "q.prefetch", Encoding.UTF8.GetBytes($"job-{i}"));
+
+    int a = 0, b = 0;                                           // сколько сообщений обработал каждый
+    var done = new TaskCompletionSource();                      // сигнал «все 10 обработаны»
+    await using var chA = await conn.CreateChannelAsync();      // канал потребителя A
+    await using var chB = await conn.CreateChannelAsync();      // канал потребителя B
+    await chA.BasicQosAsync(0, (ushort)prefetch, false);        // окно A: столько неподтверждённых разрешено
+    await chB.BasicQosAsync(0, (ushort)prefetch, false);        // окно B: такое же
+
+    var consA = new AsyncEventingBasicConsumer(chA);            // A — медленный потребитель
+    consA.ReceivedAsync += async (_, ea) =&gt;
+    {
+        await Task.Delay(100);                                  // обработка 100 мс
+        Interlocked.Increment(ref a);                           // считаем сообщение на A
+        await chA.BasicAckAsync(ea.DeliveryTag, false);         // подтверждаем — окно освобождается
+        if (Volatile.Read(ref a) + Volatile.Read(ref b) == 10) done.TrySetResult(); // всё обработано?
+    };
+
+    var consB = new AsyncEventingBasicConsumer(chB);            // B — мгновенный потребитель
+    consB.ReceivedAsync += async (_, ea) =&gt;
+    {
+        Interlocked.Increment(ref b);                           // обработал сразу
+        await chB.BasicAckAsync(ea.DeliveryTag, false);         // подтверждаем
+        if (Volatile.Read(ref a) + Volatile.Read(ref b) == 10) done.TrySetResult();
+    };
+
+    await chA.BasicConsumeAsync("q.prefetch", autoAck: false, consA);  // A подписывается первым
+    await Task.Delay(50);                                       // A уже получил своё окно
+    await chB.BasicConsumeAsync("q.prefetch", autoAck: false, consB);  // затем подписывается B
+
+    await done.Task.WaitAsync(TimeSpan.FromSeconds(10));        // ждём, пока обработаются все 10
+    Console.WriteLine($"prefetch={prefetch}/{prefetch}, A slow: A={a} B={b}");  // кто сколько забрал
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">prefetch=1/1, A slow: A=1 B=9     # окно 1: A держит одно, остальные 9 уходят быстрому B
+prefetch=10/10, A slow: A=10 B=0  # окно 10: первый подключившийся забрал всю пачку, B простоял</code></pre>
     </div>
     <ul>
       <li><strong>С <code>prefetch = 1</code></strong> каждый потребитель держит одно сообщение: пока A занят,
@@ -180,10 +269,30 @@ prefetch=10/10, A slow: A=0  B=10</code></pre>
     </table>
     <p>Важно: <strong>одна очередь = одна работа</strong>. Если два разных сервиса подписаны на одну очередь,
       они будут <em>делить</em> сообщения, а не получать каждому. Для «каждому по копии» нужны разные очереди.</p>
+    <p>Кто может быть этими «несколькими потребителями» — это всегда отдельные подписки, у каждой свой вызов
+      <code>BasicConsumeAsync</code>:</p>
+    <ul>
+      <li><strong>в одном процессе</strong> — несколько каналов и по объекту
+        <code>AsyncEventingBasicConsumer</code> на каждом (в опыте с prefetch выше — именно так: A и B в одной
+        программе);</li>
+      <li><strong>несколько процессов на одной машине</strong> — например, два запущенных экземпляра одной и той
+        же консольной программы;</li>
+      <li><strong>разные машины и реплики</strong> — контейнеры одного сервиса на разных узлах.</li>
+    </ul>
+    <p>Для брокера «потребитель» — это конкретная подписка (consumer tag на канале), а не процесс: каждое
+      сообщение он отдаёт ровно одной подписке.</p>
     <h2>Потребитель в <code>BackgroundService</code></h2>
     <p>В ASP.NET потребитель живёт в фоновом сервисе: соединение и канал создаются один раз, подписка — на всё
       время работы, а при остановке приложения канал закрывается, и неподтверждённые сообщения возвращаются в
       очередь.</p>
+    <p><strong>«Один раз» — это «пока приложение работает».</strong> Соединение не открывается на каждое
+      сообщение: подписка должна быть активна всё время, иначе брокеру некуда присылать сообщения. Когда
+      приложение останавливается, сервис завершается и соединение закрывается — «вечного» сокета нет. Если
+      соединение разорвётся со стороны сети или брокера, переподключение делает сам клиент: в
+      <code>RabbitMQ.Client</code> 7.x по умолчанию включены <code>AutomaticRecoveryEnabled = true</code> и
+      <code>TopologyRecoveryEnabled = true</code> (проверено на 7.2.2). Проверено и на живом брокере: контейнер
+      RabbitMQ перезапустили, пока потребитель работал, — клиент восстановил соединение, канал, подписку и
+      объявление очереди сам, и следующее сообщение снова дошло до обработчика.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">public sealed class OrdersConsumer(IConnection conn, IServiceScopeFactory scopes) : BackgroundService // DI даёт соединение и фабрику scope
 {
