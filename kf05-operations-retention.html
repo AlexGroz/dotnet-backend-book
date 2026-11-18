@@ -169,11 +169,15 @@ docker exec kafka /opt/kafka/bin/kafka-log-dirs.sh --bootstrap-server localhost:
 # Что в JSON: broker — id брокера, logDir — каталог журналов, partition — имя партиции,
 #   size — размер в байтах, offsetLag — отставание реплики, isFuture — реплика догоняет лидера
 # --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
+# Querying brokers for log directories information          <- прогресс самой утилиты
+# Received log directory information from brokers 1         <- от какого брокера пришёл ответ
 # {"brokers":[{"broker":1,"logDirs":[{"partitions":[
-#   {"partition":"orders-0","size":83,"offsetLag":0,"isFuture":false},
+#   {"partition":"orders-0","size":166,"offsetLag":0,"isFuture":false},
 #   {"partition":"orders-1","size":83,"offsetLag":0,"isFuture":false},
-#   {"partition":"orders-2","size":83,"offsetLag":0,"isFuture":false}],
+#   {"partition":"orders-2","size":188,"offsetLag":0,"isFuture":false}],
 #  "error":null,"logDir":"/tmp/kraft-combined-logs"}]}],"version":1}
+# 83 / 166 / 188 байт — это 1, 2 и 3 записи: в orders-1 лежит order-1, в orders-0 — order-2 и
+#   order-6, в orders-2 — order-3, order-4 и order-5 (главы 3–4)
 
 # docker exec kafka ls -l — выполнить ls ВНУТРИ контейнера, а не на хосте
 # /tmp/kraft-combined-logs/state-0 — каталог партиции 0 топика state
@@ -197,6 +201,12 @@ docker exec kafka ls -l /tmp/kraft-combined-logs/state-0
 # --describe — оффсеты и отставание по партициям; --group orders-workers — какую группу смотреть
 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --describe --group orders-workers
+# Consumer group 'orders-workers' has no active members.   &lt;- сейчас никто не читает: это не ошибка
+# GROUP           TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
+# orders-workers  orders  0          1               2               1    -            -     -
+# orders-workers  orders  1          1               1               0    -            -     -
+# orders-workers  orders  2          1               3               2    -            -     -
+# суммарный lag — 3: те три сообщения, которые глава 4 записала, а прочитать их никто так и не успел
 
 # 2) состояние групп: Empty — участников нет, Stable — читают
 # --all-groups — все группы кластера, а не одна; --state — добавить колонку состояния
@@ -214,7 +224,24 @@ docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:90
 # 4) размер партиций на диске
 # --describe — показать данные; --topic-list orders — по каким топикам (через запятую)
 docker exec kafka /opt/kafka/bin/kafka-log-dirs.sh --bootstrap-server localhost:9092 \
-  --describe --topic-list orders</code></pre>
+  --describe --topic-list orders
+# Querying brokers for log directories information     &lt;- прогресс самой утилиты, а не данные
+# Received log directory information from brokers 1    &lt;- от какого брокера пришёл ответ
+# тот же JSON, что в разделе «Сегменты на диске»: топик с тех пор не менялся
+# {"brokers":[{"broker":1,"logDirs":[{"partitions":[
+#   {"partition":"orders-0","size":166,"offsetLag":0,"isFuture":false},
+#   {"partition":"orders-1","size":83,"offsetLag":0,"isFuture":false},
+#   {"partition":"orders-2","size":188,"offsetLag":0,"isFuture":false}],
+#  "error":null,"logDir":"/tmp/kraft-combined-logs"}]}],"version":1}</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Таблицы нет — значит нет группы</span>
+      <p>Если вместо таблицы команда печатает <code>Error: Consumer group 'orders-workers' does not exist.</code>,
+        под этим именем не закоммитили ни одного оффсета (потребитель ни разу не дошёл до
+        <code>Commit</code>) или группу удалили — <code>--delete --group orders-workers</code> (глава 4). Брокер
+        тут ни при чём: он просто не знает такой группы.</p>
+      <p>Для скриптов важно: эту строку утилита печатает в stdout и завершается с кодом <code>0</code>, поэтому
+        проверять надо текст вывода, а не код возврата.</p>
     </div>
     <table>
       <thead><tr><th>Что смотреть</th><th>Как</th><th>На что реагировать</th></tr></thead>

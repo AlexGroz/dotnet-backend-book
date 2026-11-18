@@ -180,6 +180,7 @@ docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server loc
 #   LOG-END-OFFSET — сколько записей в партиции всего (следующий оффсет для записи)
 #   LAG            — LOG-END-OFFSET минус CURRENT-OFFSET: сколько ещё не прочитано
 #   CONSUMER-ID / HOST / CLIENT-ID — кто читает партицию; прочерк — активных участников нет
+# Consumer group 'orders-workers' has no active members.   &lt;- предупреждение: сейчас группу никто не читает
 # GROUP           TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
 # orders-workers  orders  0          1               1               0    -            -     -
 # orders-workers  orders  1          1               1               0    -            -     -
@@ -237,6 +238,7 @@ printf 'order-4:{"id":4}\norder-5:{"id":5}\norder-6:{"id":6}\n' | docker exec -i
 # --describe --group orders-workers — снова смотрим оффсеты и lag: три сообщения ещё не прочитаны
 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --describe --group orders-workers
+# Consumer group 'orders-workers' has no active members.
 # GROUP           TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
 # orders-workers  orders  0          1               2               1    -            -     -
 # orders-workers  orders  1          1               1               0    -            -     -
