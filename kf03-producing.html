@@ -183,16 +183,41 @@ using var p = new ProducerBuilder&lt;string, string&gt;(bad).Build();</code></pr
     <p>Остановим контейнер и запустим ту же программу. Каждое сообщение ждёт <code>MessageTimeoutMs</code> и
       затем возвращает ошибку:</p>
     <div class="codewrap">
-      <pre><code class="language-text">failed: key=order-1 error=Local: Message timed out
+      <pre><code class="language-text">%3|1794997508.224|FAIL|orders-producer#producer-1| [thrd:localhost:9092/bootstrap]: localhost:9092/bootstrap: Connect to ipv4#127.0.0.1:9092 failed: Connection refused (after 0ms in state CONNECT)
+%3|1794997508.224|ERROR|orders-producer#producer-1| [thrd:localhost:9092/bootstrap]: 1/1 brokers are down
+%3|1794997508.226|ERROR|orders-producer#producer-1| [thrd:app]: orders-producer#producer-1: localhost:9092/bootstrap: Connect to ipv4#127.0.0.1:9092 failed: Connection refused (after 0ms in state CONNECT)
+
+# ...здесь пропущено ещё 143 такие строки: клиент снова и снова пытается подключиться —
+#     всего за прогон их 146, и все они уместились в 17 секунд
+
+failed: key=order-1 error=Local: Message timed out
 failed: key=order-2 error=Local: Message timed out
 failed: key=order-3 error=Local: Message timed out</code></pre>
     </div>
+    <table>
+      <thead><tr><th>Часть строки</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>%3|</code></td><td>префикс librdkafka: это строка лога клиента, а не вывод
+          приложения</td></tr>
+        <tr><td><code>1794997508.224</code></td><td>метка времени: секунды с эпохи и миллисекунды</td></tr>
+        <tr><td><code>FAIL</code> / <code>ERROR</code></td><td>уровень: операция не удалась / ошибка</td></tr>
+        <tr><td><code>orders-producer#producer-1</code></td><td><code>ClientId</code> из конфига и номер
+          внутреннего экземпляра producer'а</td></tr>
+        <tr><td><code>[thrd:localhost:9092/bootstrap]</code></td><td>поток, который пишет строку, и адрес
+          брокера; <code>[thrd:app]</code> — строка сформирована в потоке самого приложения</td></tr>
+        <tr><td><code>Connection refused</code>, <code>1/1 brokers are down</code></td><td>текст: порт закрыт,
+          все брокеры из списка недоступны</td></tr>
+      </tbody>
+    </table>
+    <p>Строки двух потоков идут вперемешку: <code>%3|</code> пишет librdkafka в stderr, а
+      <code>failed: ...</code> — ваша программа в stdout. В прогоне первое <code>failed:</code> появилось на
+      шестой секунде, между строками лога клиента.</p>
     <div class="box note">
-      <span class="t">Почему в консоли ещё куча строк <code>%3|...FAIL...</code></span>
-      <p><code>librdkafka</code> пишет сообщения о соединении в stderr: попытки подключиться, таймауты,
-        переподключения. Это не исключения приложения — ловить и логировать нужно строки
-        <code>failed: ...</code> из <code>ProduceException</code>. Уровень логов клиента настраивается в
-        <code>ProducerConfig</code> и через <code>SetLogHandler</code>.</p>
+      <span class="t">Что из этого ловить</span>
+      <p>Строки <code>%3|...FAIL...</code> — диагностика клиента: попытки подключиться, таймауты,
+        переподключения. Это не исключения приложения. Ловить и логировать нужно строки
+        <code>failed: ...</code> из <code>ProduceException</code>, иначе сбой доставки останется незамеченным.
+        Уровень логов клиента задаётся в <code>ProducerConfig</code> и через <code>SetLogHandler</code>.</p>
     </div>
     <p>Важно: <code>Local: Message timed out</code> — это «за отведённое время подтверждение не пришло», а не
       «сообщение точно не записано». Брокер мог принять запись, а ответ — потеряться. Поэтому повтор после

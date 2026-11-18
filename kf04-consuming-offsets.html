@@ -29,6 +29,7 @@
 {
     BootstrapServers = "localhost:9092",          // точка входа в кластер
     GroupId          = "orders-workers",          // имя группы: по нему хранятся оффсеты
+    ClientId         = "orders-consumer",         // имя клиента в логах брокера и в метриках
     AutoOffsetReset  = AutoOffsetReset.Earliest,  // с чего начинать, если коммита ещё нет
     EnableAutoCommit = false,                     // подтверждать оффсет вручную, после обработки
 };</code></pre>
@@ -63,6 +64,7 @@ var config = new ConsumerConfig
 {
     BootstrapServers = "localhost:9092",                 // адрес брокера
     GroupId          = "orders-workers",                 // группа: под ней будут храниться оффсеты
+    ClientId         = "orders-consumer",                // имя клиента в логах брокера и в метриках
     AutoOffsetReset  = AutoOffsetReset.Earliest,         // нет коммита — читаем с начала
     EnableAutoCommit = false,                            // коммитить будем вручную
 };
@@ -93,24 +95,74 @@ got key=order-2 partition=0 offset=0</code></pre>
       пришло первым. Внутри партиции порядок сохраняется всегда.</p>
 
     <h2>Что лежит в результате чтения</h2>
+    <p>Ниже — отдельный прогон, который печатает все поля результата чтения. Сообщение в нём записано с
+      заголовком <code>trace</code>, поэтому заголовков <code>1</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using System.Text;                                      // Encoding.UTF8 — разобрать байты заголовка
+using Confluent.Kafka;                                  // ConsumerConfig, ConsumerBuilder, ConsumeResult
+
+var config = new ConsumerConfig
+{
+    BootstrapServers = "localhost:9092",                // адрес брокера
+    GroupId          = "fields-demo",                   // своя группа: оффсета нет, читаем с начала
+    ClientId         = "orders-consumer",               // имя клиента в логах брокера и в метриках
+    AutoOffsetReset  = AutoOffsetReset.Earliest,        // без коммита — с начала журнала
+    EnableAutoCommit = false,                           // коммитим вручную
+};
+
+using var consumer = new ConsumerBuilder&lt;string, string&gt;(config).Build(); // ключ и значение — строки
+consumer.Subscribe("orders");                           // подписка на все партиции топика
+
+var cr = consumer.Consume(TimeSpan.FromSeconds(10));    // одно сообщение; null — если 10 с ничего не пришло
+if (cr is null) { Console.WriteLine("no messages"); return; }
+
+Console.WriteLine($"cr.Topic={cr.Topic} cr.Partition={cr.Partition.Value} cr.Offset={cr.Offset.Value}"); // откуда прочитано
+Console.WriteLine($"cr.Message.Key={cr.Message.Key} cr.Message.Value={cr.Message.Value}");              // что прочитано
+Console.WriteLine($"cr.TopicPartitionOffset={cr.TopicPartitionOffset}");                                // три части одним значением
+Console.WriteLine($"cr.Message.Timestamp={cr.Message.Timestamp.UtcDateTime:O} type={cr.Message.Timestamp.Type}"); // время записи
+Console.WriteLine($"headers count={cr.Message.Headers.Count} trace={Encoding.UTF8.GetString(cr.Message.Headers.GetLastBytes("trace"))}"); // заголовки
+Console.WriteLine($"cr.IsPartitionEOF={cr.IsPartitionEOF}");                                            // признак конца партиции
+
+consumer.Commit(cr);                                    // сохранить позицию: offset + 1
+Console.WriteLine("committed");</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">cr.Topic=orders cr.Partition=2 cr.Offset=0
+cr.Message.Key=order-3 cr.Message.Value={"id":3}
+cr.TopicPartitionOffset=orders [[2]] @0
+cr.Message.Timestamp=2026-11-18T10:20:08.1570000Z type=CreateTime
+headers count=1 trace=abc-3
+cr.IsPartitionEOF=False
+committed</code></pre>
+    </div>
+    <p>Теперь эти же поля — в таблице:</p>
     <table>
       <thead><tr><th>Поле</th><th>Что означает</th></tr></thead>
       <tbody>
-        <tr><td><code>cr.Message</code>, <code>cr.Key</code>, <code>cr.Value</code></td><td>сообщение и его
-          ключ со значением — уже десериализованные клиентом</td></tr>
+        <tr><td><code>cr.Message</code>, <code>cr.Message.Key</code>, <code>cr.Message.Value</code></td>
+          <td>сообщение и его ключ со значением — уже десериализованные клиентом</td></tr>
         <tr><td><code>cr.Topic</code>, <code>cr.Partition</code>, <code>cr.Offset</code></td><td>откуда
           прочитано: топик, партиция и оффсет записи</td></tr>
         <tr><td><code>cr.TopicPartitionOffset</code></td><td>все три части одним значением — удобно передать
           в <code>Commit</code> или сохранить</td></tr>
-        <tr><td><code>cr.Timestamp</code></td><td>время записи (тип <code>TimestampType</code> говорит, чьё
-          это время: producer'а или брокера)</td></tr>
-        <tr><td><code>cr.Headers</code></td><td>заголовки сообщения (например, trace-id)</td></tr>
+        <tr><td><code>cr.Message.Timestamp</code></td><td>время записи (тип <code>TimestampType</code> говорит,
+          чьё это время: producer'а или брокера)</td></tr>
+        <tr><td><code>cr.Message.Headers</code></td><td>заголовки сообщения (например, trace-id); у
+          <code>Headers</code> есть <code>GetLastBytes("trace")</code> — последнее значение по ключу</td></tr>
         <tr><td><code>cr.IsPartitionEOF</code></td><td><code>true</code>, если партиция дочитана до конца;
           сообщения в таком результате нет</td></tr>
         <tr><td><code>Consume(timeout)</code></td><td>вернёт <code>null</code>, если за <code>timeout</code>
           ничего не пришло. Это не ошибка — просто нет новых данных</td></tr>
       </tbody>
     </table>
+    <div class="box note">
+      <span class="t">Четыре сокращения, которые устарели в 2.16</span>
+      <p>У <code>ConsumeResult</code> есть короткие свойства <code>cr.Key</code>, <code>cr.Value</code>,
+        <code>cr.Timestamp</code>, <code>cr.Headers</code>. Они пока работают, но помечены устаревшими: компилятор
+        выдаёт <code>warning CS0618: 'ConsumeResult&lt;string, string&gt;.Headers' is obsolete: 'Please access the
+        message Headers via .Message.Headers.'</code> — и то же самое для остальных трёх. Поэтому в примере выше
+        везде <code>cr.Message.*</code>: это не придирка, а требование клиента 2.16.</p>
+    </div>
 
     <h2>Коммит: где именно хранится позиция</h2>
     <p><code>Commit(cr)</code> записывает для группы оффсет <strong>следующего</strong> сообщения, то есть
