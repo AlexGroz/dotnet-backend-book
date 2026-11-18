@@ -27,9 +27,12 @@
     <p>Рабочий клиент Kafka для .NET — <code>Confluent.Kafka</code>. Внутри пакета лежит нативная библиотека
       <code>librdkafka</code>, поэтому JVM и отдельной установки Kafka на машине приложению не нужно:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># добавить пакет в проект; версия на момент прогона — 2.16.0
+      <pre><code class="language-bash"># dotnet add package       — добавить NuGet-пакет в проект: правит .csproj, ставит ссылку
+# Confluent.Kafka          — имя пакета: клиент Kafka для .NET (внутри — нативная librdkafka)
+# --version 2.16.0         — зафиксировать версию; без флага ставится последняя стабильная
 dotnet add package Confluent.Kafka
-# info : PackageReference for package 'Confluent.Kafka' version '2.16.0' added to file '.../P.csproj'.</code></pre>
+# info : PackageReference for package 'Confluent.Kafka' version '2.16.0' added to file '.../P.csproj'.
+#        ^ ответ CLI: в файл проекта добавлена ссылка на пакет версии 2.16.0</code></pre>
     </div>
     <p>Версию лучше фиксировать, как и в случае с любым клиентом сети:
       <code>dotnet add package Confluent.Kafka --version 2.16.0</code>. Все примеры книги сняты на 2.16.0 и

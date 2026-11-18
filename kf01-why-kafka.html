@@ -93,15 +93,24 @@ consumer group "analytics":  оффсет 0 во всех партициях    
     <p>Официальный образ Apache Kafka 3.9 работает в режиме <strong>KRaft</strong>: метаданные хранит сам
       брокер, отдельный ZooKeeper не нужен. Для локальных опытов достаточно одной команды:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># -d — в фоне; --name kafka — имя контейнера для docker exec
-# -p 9092:9092 — порт, на который будут подключаться клиенты с хоста
+      <pre><code class="language-bash"># docker run               — создать контейнер из образа и сразу запустить его
+# -d                       — в фоне (detached): терминал остаётся свободным
+# --name kafka             — имя контейнера; по нему дальше идут все docker exec
+# -p 9092:9092             — пробросить порт: слева порт хоста, справа порт внутри контейнера
+# apache/kafka:3.9.1       — образ и тег: официальная сборка Apache Kafka версии 3.9.1
 docker run -d --name kafka -p 9092:9092 apache/kafka:3.9.1
 
 # готовность: брокер принимает запросы, когда утилита может получить список топиков
 # (на тёплом образе это ~5 секунд; команду можно повторять, пока не ответит)
+# docker exec              — выполнить команду в УЖЕ запущенном контейнере (новый не создаётся)
+# kafka                    — имя контейнера из --name выше
+# /opt/kafka/bin/kafka-topics.sh — путь к утилите топиков внутри образа
+# --bootstrap-server localhost:9092 — адрес брокера для подключения; localhost, потому что
+#                                     утилита запущена в том же контейнере, где слушает брокер
+# --list                   — вывести только имена топиков (на пустом кластере — пусто)
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 
-# версия Kafka внутри контейнера
+# --version                — версия утилиты, то есть релиз Kafka, из которого собран образ
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --version
 # 3.9.1</code></pre>
     </div>
@@ -135,18 +144,30 @@ docker exec kafka /opt/kafka/bin/kafka-topics.sh --version
     <h2>Первый топик и первые сообщения</h2>
     <p>Создадим топик из трёх партиций и одной реплики — кластер у нас один:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># --create        создать топик
-# --topic demo    его имя
-# --partitions 3  три независимых журнала внутри топика
-# --replication-factor 1  одна копия каждой партиции (при одном брокере иначе нельзя)
+      <pre><code class="language-bash"># docker exec, путь к утилите и --bootstrap-server — как в блоке выше:
+#   docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092
+# \                        — перенос длинной команды на следующую строку (экранирует Enter)
+# --create                 — создать новый топик
+# --topic demo             — имя создаваемого топика: по нему потом публикуют и читают
+# --partitions 3           — три независимых журнала внутри топика (единица параллелизма и порядка)
+# --replication-factor 1   — одна копия каждой партиции (при одном брокере иначе нельзя)
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --create --topic demo --partitions 3 --replication-factor 1
-# Created topic demo.</code></pre>
+# Created topic demo.      — ответ брокера: топик создан</code></pre>
     </div>
     <p>Посмотрим, что получилось:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># --describe --topic demo  показать топик и каждую его партицию
+      <pre><code class="language-bash"># --describe               — показать описание топика: сводку и строку на каждую партицию
+# --topic demo             — какой именно топик описывать
+# --bootstrap-server localhost:9092 — адрес брокера; утилита запущена в контейнере, поэтому localhost
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic demo
+# Что означает каждая часть вывода:
+#   Topic / TopicId                     — имя топика и его внутренний идентификатор
+#   PartitionCount / ReplicationFactor  — сколько партиций и сколько копий у каждой
+#   Configs                             — настройки топика (здесь — унаследованные от брокера)
+#   Partition / Leader                  — номер партиции и брокер-лидер, который принимает записи
+#   Replicas / Isr                      — все реплики и синхронные из них (In-Sync Replicas)
+#   Elr / LastKnownElr                  — «отстающие» реплики; пусто — таких нет
 # Topic: demo  TopicId: lr8veZlzSbOdrNUUlPrMLw  PartitionCount: 3  ReplicationFactor: 1
 #              Configs: segment.bytes=1073741824
 #   Topic: demo  Partition: 0  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:
@@ -157,17 +178,28 @@ docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:90
       всё это один и тот же брокер; в главе 5 столбцы станут разными, когда брокеров будет несколько.</p>
     <p>Кладём три сообщения с ключами. Консольный producer читает строки со stdin и отправляет их по одной:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># parse.key=true     считать первую часть строки ключом
-# key.separator=:    разделитель ключа и значения в строке (по умолчанию табуляция)
+      <pre><code class="language-bash"># printf 'k1:a\nk2:b\nk3:c\n' — сформировать три строки; \n — перевод строки
+# |                        — конвейер: вывод printf становится stdin следующей команды
+# docker exec -i           — -i оставляет stdin открытым, иначе утилита не увидит пайп
+# kafka-console-producer.sh — утилита публикации: читает строки со stdin и шлёт их по одной
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — снова localhost)
+# --topic demo             — в какой топик писать
+# --property parse.key=true — считать первую часть строки ключом (по умолчанию ключа нет)
+# --property key.separator=: — чем отделён ключ от значения (по умолчанию табуляция)
 printf 'k1:a\nk2:b\nk3:c\n' | docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server localhost:9092 --topic demo \
   --property parse.key=true --property key.separator=:</code></pre>
     </div>
     <p>Теперь прочитаем с начала и попросим печатать ключ, партицию и оффсет:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># --from-beginning   начать с самого старого доступного оффсета
-# --max-messages 3   выйти после трёх сообщений (иначе утилита ждёт новых)
-# print.key/print.partition/print.offset  что печатать перед значением
+      <pre><code class="language-bash"># kafka-console-consumer.sh — утилита чтения: печатает прочитанные сообщения в консоль
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
+# --topic demo             — из какого топика читать
+# --from-beginning         — начать с самого старого доступного оффсета (иначе только новые)
+# --max-messages 3         — выйти после трёх сообщений (без этого утилита ждёт новых)
+# --property print.key=true       — печатать ключ перед значением
+# --property print.partition=true — печатать номер партиции
+# --property print.offset=true    — печатать оффсет записи
 docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
   --topic demo --from-beginning --max-messages 3 \
   --property print.key=true --property print.partition=true --property print.offset=true
@@ -181,7 +213,13 @@ docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server lo
       <code>k3</code> — в 1: это не порядок отправки, а результат хеширования ключа (глава 2).</p>
     <p>Теперь главное отличие от очереди — прочитаем <em>ещё раз</em>, новой группой:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+      <pre><code class="language-bash"># те же аргументы, что в блоке выше:
+# --topic demo             — из какого топика читать
+# --from-beginning         — с самого старого оффсета; --max-messages 3 — выйти после трёх
+# --property print.key / print.partition / print.offset — печатать ключ, партицию и оффсет
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
+# --from-beginning снова читает журнал с нуля: после первого чтения сообщения не удалились
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
   --topic demo --from-beginning --max-messages 3 \
   --property print.key=true --property print.partition=true --property print.offset=true
 # Partition:0  Offset:0  k2  b
@@ -196,13 +234,17 @@ docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server lo
     <h2>Оффсеты: где начало и где конец журнала</h2>
     <p>Утилита <code>kafka-get-offsets.sh</code> показывает границы журнала для каждой партиции:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># --time -2  самый старый доступный оффсет (earliest)
+      <pre><code class="language-bash"># kafka-get-offsets.sh — утилита, которая печатает оффсеты партиций, не читая сообщения
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
+# --topic demo         — по какому топику смотреть оффсеты
+# --time -2            — earliest: самый старый доступный оффсет
 docker exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic demo --time -2
+# формат строки — topic:partition:offset: demo:0:0 — топик demo, партиция 0, оффсет 0
 # demo:0:0
 # demo:1:0
 # demo:2:0
 
-# без --time (то же, что --time -1)  следующий оффсет, куда запишется новое сообщение (latest)
+# без --time           — по умолчанию latest (то же, что --time -1): следующий оффсет для записи
 docker exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic demo
 # demo:0:1
 # demo:1:1

@@ -27,7 +27,13 @@
     <p>Журнал не вечен: старые сегменты удаляются по времени или по размеру. Настройки действуют на уровне
       топика и наследуются от брокера:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># --entity-type topics --entity-name orders --all  все настройки топика с источниками значений
+      <pre><code class="language-bash"># kafka-configs.sh        — утилита настроек: читает и меняет конфигурацию топиков и брокеров
+# --describe              — только показать значения, ничего не менять
+# --entity-type topics    — тип сущности: настройки топика (бывают ещё brokers, clients, users)
+# --entity-name orders    — какого именно топика
+# --all                   — все настройки, включая унаследованные, с источником значения (synonyms)
+# | grep -E '...'         — оставить в выводе четыре нужные строки
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
   --describe --entity-type topics --entity-name orders --all \
   | grep -E 'retention.ms|retention.bytes|cleanup.policy|segment.bytes'
@@ -58,11 +64,16 @@ docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9
     <p>Проверено, как изменить срок и увидеть, что значение стало динамическим (перекрывает настройку
       брокера):</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># --add-config retention.ms=60000  хранить записи одну минуту
+      <pre><code class="language-bash"># --alter                  — изменить настройки сущности (здесь — топика)
+# --entity-type topics     — тип сущности: топик
+# --entity-name orders     — какого именно топика
+# --add-config retention.ms=60000 — переопределить настройку: хранить записи одну минуту
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
   --alter --entity-type topics --entity-name orders --add-config retention.ms=60000
-# Completed updating config for topic orders.
+# Completed updating config for topic orders.   — ответ брокера: настройка применена
 
+# --describe … --all | grep retention.ms — проверяем результат: значение стало динамическим
 docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
   --describe --entity-type topics --entity-name orders --all | grep retention.ms
 # retention.ms=60000 ... synonyms={DYNAMIC_TOPIC_CONFIG:retention.ms=60000}</code></pre>
@@ -80,13 +91,18 @@ docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9
       в «таблицу состояний»: по журналу можно восстановить актуальное значение ключа, прочитав его с
       начала.</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># топик с компакцией; segment.bytes 4096 — чтобы сегменты быстро закрывались на демо-объёме
-# min.cleanable.dirty.ratio 0.01 — разрешить чистить сегмент, как только в нём 1% «мусора»
+      <pre><code class="language-bash"># --create --topic state --partitions 1 --replication-factor 1 — создать топик из одной партиции
+# --config cleanup.policy=compact — режим очистки: компакция (хранить последнее на ключ)
+# --config segment.bytes=4096 — размер сегмента: маленький, чтобы сегменты быстро закрывались
+# --config min.cleanable.dirty.ratio=0.01 — чистить сегмент, как только в нём 1% «мусора»
+# --config можно повторять: каждый раз одна настройка «имя=значение»
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --create --topic state --partitions 1 --replication-factor 1 \
   --config cleanup.policy=compact --config segment.bytes=4096 \
   --config min.cleanable.dirty.ratio=0.01
 
+# --describe --topic state — проверяем, что настройки применились (строка Configs)
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic state
 # Topic: state  TopicId: BGkHNyFPQsuKLIsHfYEF4w  PartitionCount: 1  ReplicationFactor: 1
 #               Configs: cleanup.policy=compact,segment.bytes=4096,min.cleanable.dirty.ratio=0.01</code></pre>
@@ -94,8 +110,13 @@ docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:90
     <p>Запишем 400 сообщений: пять ключей <code>a0…a4</code>, у каждого 80 версий. Пишем пачками по 40 —
       так проще не упереться в размер сегмента:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># внешний цикл — 10 пачек, внутренний — 40 сообщений в пачке
-# ключ — a0..a4 (i % 5), значение — версия вида v035
+      <pre><code class="language-bash"># for r in $(seq 0 9)      — внешний цикл: десять пачек (seq 0 9 — числа 0..9)
+# for i in $(seq 0 39)     — внутренний цикл: сорок сообщений в пачке
+# echo "a$((i % 5)):v$r$i" — ключ a0..a4 (остаток от деления на 5), значение вида v035
+# | docker exec -i kafka … — пачка строк уходит на stdin утилиты публикации
+# --topic state            — в какой топик писать
+# --property parse.key=true / key.separator=: — ключ и значение разделены двоеточием
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 for r in $(seq 0 9); do
   for i in $(seq 0 39); do echo "a$((i % 5)):v$r$i"; done | \
     docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
@@ -103,13 +124,18 @@ for r in $(seq 0 9); do
       --property parse.key=true --property key.separator=:
 done
 
-# сколько всего записано
+# сколько всего записано: без --time утилита печатает latest — следующий оффсет для записи
 docker exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic state
 # state:0:400</code></pre>
     </div>
     <p>Через полминуты фоновый cleaner отработает. Читаем с начала:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+      <pre><code class="language-bash"># --topic state            — компактированный топик из опыта выше
+# --from-beginning         — читать с самого начала журнала
+# --timeout-ms 8000        — выйти, если 8 секунд не пришло ни одного нового сообщения
+# --property print.key / print.offset — печатать ключ и оффсет каждой записи
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
   --topic state --from-beginning --timeout-ms 8000 --property print.key=true --property print.offset=true
 # ...
 # Offset:395  a0  v935
@@ -136,18 +162,25 @@ docker exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localho
     <h2>Сегменты на диске</h2>
     <p>Журнал партиции — набор файлов; имя файла начинается с оффсета первой записи в нём:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># какого размера партиции топика и где они лежат
+      <pre><code class="language-bash"># kafka-log-dirs.sh        — утилита: размеры партиций и каталоги, где они лежат на диске
+# --describe               — только показать данные
+# --topic-list orders      — по каким топикам (список через запятую); без него — по всем
 docker exec kafka /opt/kafka/bin/kafka-log-dirs.sh --bootstrap-server localhost:9092 --describe --topic-list orders
+# Что в JSON: broker — id брокера, logDir — каталог журналов, partition — имя партиции,
+#   size — размер в байтах, offsetLag — отставание реплики, isFuture — реплика догоняет лидера
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 # {"brokers":[{"broker":1,"logDirs":[{"partitions":[
 #   {"partition":"orders-0","size":83,"offsetLag":0,"isFuture":false},
 #   {"partition":"orders-1","size":83,"offsetLag":0,"isFuture":false},
 #   {"partition":"orders-2","size":83,"offsetLag":0,"isFuture":false}],
 #  "error":null,"logDir":"/tmp/kraft-combined-logs"}]}],"version":1}
 
-# файлы компактированного топика state: первый сегмент «сжат» до 492 байт
+# docker exec kafka ls -l — выполнить ls ВНУТРИ контейнера, а не на хосте
+# /tmp/kraft-combined-logs/state-0 — каталог партиции 0 топика state
 docker exec kafka ls -l /tmp/kraft-combined-logs/state-0
-# 00000000000000000000.log   492    &lt;- сегмент с оффсета 0, после компакции
-# 00000000000000000280.log  2284    &lt;- следующий сегмент, начинается с оффсета 280</code></pre>
+# 00000000000000000000.log   492    &lt;- имя файла — первый оффсет сегмента (20 цифр), .log — данные
+# 00000000000000000280.log  2284    &lt;- следующий сегмент, начинается с оффсета 280
+# первый сегмент после компакции занимает 492 байта: старые версии ключей из него убраны</code></pre>
     </div>
     <p><code>offsetLag</code> в ответе <code>kafka-log-dirs.sh</code> — насколько будущие реплики отстают от
       лидера; на одном брокере всегда 0.</p>
@@ -157,22 +190,29 @@ docker exec kafka ls -l /tmp/kraft-combined-logs/state-0
     <p>Три вопроса, на которые должна отвечать эксплуатация Kafka: догоняют ли потребители, здоровы ли реплики и
       хватает ли места.</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># 1) отставание групп: LAG = LOG-END-OFFSET - CURRENT-OFFSET (глава 4)
+      <pre><code class="language-bash"># у всех четырёх команд ниже один и тот же --bootstrap-server localhost:9092 — адрес брокера
+# (утилиты запускаются внутри контейнера, поэтому localhost); отдельно у каждой строки не повторяем
+
+# 1) отставание групп: LAG = LOG-END-OFFSET - CURRENT-OFFSET (глава 4)
+# --describe — оффсеты и отставание по партициям; --group orders-workers — какую группу смотреть
 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --describe --group orders-workers
 
 # 2) состояние групп: Empty — участников нет, Stable — читают
+# --all-groups — все группы кластера, а не одна; --state — добавить колонку состояния
 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --describe --all-groups --state
 # GROUP           COORDINATOR (ID)   ASSIGNMENT-STRATEGY  STATE   #MEMBERS
 # orders-workers  localhost:9092 (1)                      Empty   0
 
 # 3) партиции, у которых реплики отстали от лидера: пусто — всё синхронно
+# --under-replicated-partitions — фильтр к --describe: показать только недореплицированные партиции
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --describe --under-replicated-partitions
 # (пусто)
 
 # 4) размер партиций на диске
+# --describe — показать данные; --topic-list orders — по каким топикам (через запятую)
 docker exec kafka /opt/kafka/bin/kafka-log-dirs.sh --bootstrap-server localhost:9092 \
   --describe --topic-list orders</code></pre>
     </div>

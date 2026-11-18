@@ -27,8 +27,15 @@
     <p>Топик — это не только имя. У него есть число партиций, фактор репликации и набор конфигураций.
       Посмотрим на <code>demo</code> из главы 1:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic demo
-# Topic: demo  TopicId: lr8veZlzSbOdrNUUlPrMLw  PartitionCount: 3  ReplicationFactor: 1
+      <pre><code class="language-bash"># --describe               — вывести описание топика: сводку и строку на каждую партицию
+# --topic demo             — какой именно топик описывать
+# docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 —
+#   утилита топиков внутри контейнера kafka, подключается к брокеру на localhost:9092
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic demo
+# Topic / TopicId / PartitionCount / ReplicationFactor — имя, внутренний id, число партиций и копий
+#   Partition / Leader   — номер партиции и брокер-лидер, который принимает записи
+#   Replicas / Isr       — все реплики и синхронные из них (In-Sync Replicas)
+#   Elr / LastKnownElr   — «отстающие» реплики; пусто — таких нет
 #              Configs: segment.bytes=1073741824
 #   Topic: demo  Partition: 0  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:
 #   Topic: demo  Partition: 1  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:
@@ -76,14 +83,26 @@
         попал в партицию 2 — хеши совпали по модулю. Это нормально: партиций меньше, чем ключей.</li>
     </ul>
     <div class="codewrap">
-      <pre><code class="language-bash"># отдельный топик на три партиции, чтобы отсчёт оффсетов начался с нуля
+      <pre><code class="language-bash"># --create                 — создать новый топик
+# --topic keys             — имя топика
+# --partitions 3           — три партиции; отсчёт оффсетов в каждой начнётся с нуля
+# --replication-factor 1   — по одной копии каждой партиции (брокер один)
+# --bootstrap-server localhost:9092 — адрес брокера (все утилиты в контейнере — localhost)
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --create --topic keys --partitions 3 --replication-factor 1
 
-# три сообщения с ключом k1 и одно с ключом k9
+# printf — формирует строки «ключ:значение»; | — отдаёт их на stdin следующей команды
+# docker exec -i — оставить stdin открытым, иначе утилита не увидит пайп
+# --topic keys             — в какой топик писать
+# --property parse.key=true — первая часть строки считается ключом
+# --property key.separator=: — разделитель ключа и значения (по умолчанию табуляция)
 printf 'k1:x1\nk1:x2\nk1:x3\nk9:z\n' | docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server localhost:9092 --topic keys --property parse.key=true --property key.separator=:
 
+# --topic keys             — из какого топика читать
+# --from-beginning         — начать с самого старого доступного оффсета
+# --max-messages 4         — выйти после четырёх сообщений
+# --property print.key / print.partition / print.offset — печатать ключ, партицию и оффсет
 docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
   --topic keys --from-beginning --max-messages 4 \
   --property print.key=true --property print.partition=true --property print.offset=true
@@ -99,10 +118,16 @@ docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server lo
       пока набирается батч, все сообщения летят в одну партицию, затем выбирается следующая. На небольшой пачке
       это выглядит так, будто партиции вообще не используются:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># ключи не заданы: просто шесть строк
+      <pre><code class="language-bash"># ключи не заданы: каждая строка — только значение, у сообщения нет ключа
+# --topic nokeys           — топик на три партиции, создан для этого опыта
+# -i                       — оставить stdin открытым: без него утилита не прочитает пайп
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 printf 'n1\nn2\nn3\nn4\nn5\nn6\n' | docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server localhost:9092 --topic nokeys
 
+# --topic nokeys           — из какого топика читать
+# --from-beginning         — с самого старого оффсета; --max-messages 6 — выйти после шести
+# --property print.partition / print.offset — печатать партицию и оффсет (ключа нет, print.key не нужен)
 docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
   --topic nokeys --from-beginning --max-messages 6 \
   --property print.partition=true --property print.offset=true
@@ -123,8 +148,13 @@ docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server lo
       одном ключе <code>k1</code>: консольная утилита (Java-клиент) положила его в партицию 2, а
       <code>Confluent.Kafka</code> с настройками по умолчанию — в партицию 1.</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># одно и то же сообщение с ключом k1, записанное разными клиентами в один топик
-# console → partition 2, .NET (по умолчанию) → partition 1
+      <pre><code class="language-bash"># одно и то же сообщение с ключом k1 записали два клиента в один топик same:
+# консольная утилита положила его в партицию 2, .NET по умолчанию — в партицию 1
+# --topic same             — топик, в который писали оба клиента
+# --from-beginning         — с самого старого оффсета, чтобы увидеть обе записи
+# --max-messages 2         — выйти после двух сообщений
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
+# --property print.key / print.partition / print.offset — печатать ключ, партицию и оффсет
 docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
   --topic same --from-beginning --max-messages 2 \
   --property print.key=true --property print.partition=true --property print.offset=true
@@ -168,17 +198,22 @@ Console.WriteLine($"dotnet murmur2 k1 -&gt; partition {dr.Partition.Value}");
     <p>Партиции добавляют, когда читатели не успевают: больше партиций — больше параллельных потребителей в
       группе. Команда не печатает ничего при успехе и меняет только счётчик:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># увеличить число партиций с 3 до 6
+      <pre><code class="language-bash"># --alter                  — изменить уже существующий топик (здесь — число партиций)
+# --topic keys             — какой топик менять
+# --partitions 6           — новое число партиций: было 3, станет 6
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --alter --topic keys --partitions 6
-# (пусто, код возврата 0)
+# (пусто, код возврата 0)  — при успехе утилита ничего не печатает
 
+# --describe --topic keys  — проверить результат: PartitionCount должен стать 6
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic keys
 # Topic: keys  TopicId: kYUr7SVOS2G5RN-42m3Zjg  PartitionCount: 6  ReplicationFactor: 1
 #              Configs: segment.bytes=1073741824
 # ...шесть строк Partition: 0..5
 
 # уменьшить нельзя
+# --partitions 4           — 4 меньше текущих 6: брокер откажет, число партиций только растёт
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --alter --topic keys --partitions 4
 # Error while executing topic command : The topic keys currently has 6 partition(s); 4 would not be an increase.
@@ -195,7 +230,14 @@ docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:90
     <h2>Автосоздание топиков и значения по умолчанию</h2>
     <p>Kafka создаёт топик при первой записи, если его нет. Проверено на этом брокере:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># --entity-type brokers --entity-name 1 --all  показать все настройки брокера 1
+      <pre><code class="language-bash"># kafka-configs.sh         — утилита настроек: читает и меняет конфигурацию брокеров и топиков
+# --describe               — только показать значения, ничего не менять
+# --entity-type brokers    — тип сущности: настройки брокера (бывают ещё topics, clients, users)
+# --entity-name 1          — какого именно брокера: его id; в кластере из одного узла это 1
+# --all                    — все настройки, включая значения по умолчанию и статические;
+#                            без него выводятся только переопределённые вручную (динамические)
+# | grep -E '...'          — оставить в выводе две нужные строки вместо полусотни
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
   --describe --entity-type brokers --entity-name 1 --all | grep -E 'auto.create.topics.enable|num.partitions'
 # auto.create.topics.enable=true   ... DEFAULT_CONFIG:auto.create.topics.enable=true
@@ -212,7 +254,13 @@ docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9
       догоняют.</p>
     <p>Две настройки определяют, когда запись считается надёжной:</p>
     <div class="codewrap">
-      <pre><code class="language-bash">docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+      <pre><code class="language-bash"># --describe               — показать текущие настройки (ничего не менять)
+# --entity-type topics     — теперь сущность «топик» (а не брокер)
+# --entity-name orders     — какой именно топик смотреть
+# --all                    — все настройки, включая унаследованные значения по умолчанию
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
+# grep -E 'min.insync.replicas|unclean.leader' — оставить только две нужные строки
+docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
   --describe --entity-type topics --entity-name orders --all | grep -E 'min.insync.replicas|unclean.leader'
 # min.insync.replicas=1                  ... DEFAULT_CONFIG:min.insync.replicas=1
 # unclean.leader.election.enable=false   ... DEFAULT_CONFIG:unclean.leader.election.enable=false</code></pre>

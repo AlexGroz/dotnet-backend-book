@@ -117,9 +117,17 @@ got key=order-2 partition=0 offset=0</code></pre>
       <code>offset + 1</code>. Поэтому после чтения оффсета 0 в партиции 2 в описании группы стоит
       <code>CURRENT-OFFSET 1</code> — «следующее, которое надо прочитать».</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># описание группы: что уже закоммичено и что осталось
+      <pre><code class="language-bash"># kafka-consumer-groups.sh — утилита групп: оффсеты, отставание, состав участников
+# --describe               — показать состояние группы по партициям (ничего не менять)
+# --group orders-workers   — имя группы; то же значение, что GroupId в коде потребителя
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --describe --group orders-workers
+# Что означает каждая колонка:
+#   CURRENT-OFFSET — последний закоммиченный оффсет: следующее сообщение, которое группа прочитает
+#   LOG-END-OFFSET — сколько записей в партиции всего (следующий оффсет для записи)
+#   LAG            — LOG-END-OFFSET минус CURRENT-OFFSET: сколько ещё не прочитано
+#   CONSUMER-ID / HOST / CLIENT-ID — кто читает партицию; прочерк — активных участников нет
 # GROUP           TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
 # orders-workers  orders  0          1               1               0    -            -     -
 # orders-workers  orders  1          1               1               0    -            -     -
@@ -130,13 +138,16 @@ docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server loc
       коммите. Его параметры по умолчанию: 50 партиций и <code>cleanup.policy=compact</code>, то есть хранится
       последнее значение на ключ «группа + партиция».</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># служебный топик появился после первого коммита
+      <pre><code class="language-bash"># --list                   — все топики кластера; __consumer_offsets — служебный: в нём оффсеты групп
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 # __consumer_offsets
 # demo
 # keys
 # ... (остальные топики демо-кластера)
 
+# --describe --entity-type brokers --entity-name 1 --all — настройки брокера 1 целиком
+# grep offsets.topic.num.partitions — оставить только число партиций служебного топика
 docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
   --describe --entity-type brokers --entity-name 1 --all | grep offsets.topic.num.partitions
 # offsets.topic.num.partitions=50   ... DEFAULT_CONFIG:offsets.topic.num.partitions=50</code></pre>
@@ -162,11 +173,16 @@ docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9
     <p>Главная метрика consumer'а — <strong>lag</strong>: сколько записей в партиции ещё не прочитано группой.
       Добавим в <code>orders</code> три сообщения и снова посмотрим описание:</p>
     <div class="codewrap">
-      <pre><code class="language-bash"># пишем ещё три сообщения в топик, который группа уже читала
+      <pre><code class="language-bash"># printf … | docker exec -i — подать три строки на stdin утилиты публикации
+# --topic orders           — топик, который группа уже читала
+# --property parse.key=true — первая часть строки это ключ
+# --property key.separator=: — разделитель ключа и значения (по умолчанию табуляция)
+# --bootstrap-server localhost:9092 — адрес брокера (утилита в контейнере — localhost)
 printf 'order-4:{"id":4}\norder-5:{"id":5}\norder-6:{"id":6}\n' | docker exec -i kafka \
   /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic orders \
   --property parse.key=true --property key.separator=:
 
+# --describe --group orders-workers — снова смотрим оффсеты и lag: три сообщения ещё не прочитаны
 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --describe --group orders-workers
 # GROUP           TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
