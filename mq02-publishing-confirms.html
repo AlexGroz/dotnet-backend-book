@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -24,8 +25,11 @@
 
     <h2>Канал: что это и сколько их нужно</h2>
     <p><strong>Соединение</strong> (<code>IConnection</code>) — это TCP-сессия с брокером, её на процесс обычно
-      одно. <strong>Канал</strong> (<code>IChannel</code>) — «сессия внутри сессии»: в нём своя нумерация
-      delivery tag, свои подтверждения и свои ошибки.</p>
+      одно (например: веб-сервис, консольная утилита, фоновый воркер, экземпляр приложения в контейнере,
+      отдельный запуск <code>dotnet run</code>). <strong>Канал</strong> (<code>IChannel</code>) — «сессия
+      внутри сессии»: одно TCP-соединение и несколько независимых логических потоков внутри него (например:
+      один канал публикует, второй читает очередь, третий ведёт ответы на запросы), и в каждом свои delivery
+      tag, свои подтверждения и свои ошибки.</p>
     <ul>
       <li><strong>Канал дешёвый.</strong> Его открывают под задачу: один на публикацию, один на потребление,
         а не «один на всё».</li>
@@ -42,20 +46,47 @@
     <table>
       <thead><tr><th>Свойство</th><th>Зачем</th></tr></thead>
       <tbody>
-        <tr><td><code>Persistent = true</code></td><td>Просит брокера записать сообщение на диск (вместе с
-          <code>durable</code>-очередью это переживает перезапуск)</td></tr>
-        <tr><td><code>ContentType</code></td><td>Чтобы потребитель знал, чем разбирать тело
-          (<code>application/json</code>)</td></tr>
-        <tr><td><code>MessageId</code></td><td>Идентификатор для дедупликации и трассировки</td></tr>
-        <tr><td><code>CorrelationId</code></td><td>Связь ответа с исходным запросом (RPC-паттерн)</td></tr>
+        <tr><td><code>Persistent = true</code></td><td>Просит брокера записать сообщение на диск. Переживает
+          перезапуск только вместе с <code>durable</code>-очередью — очередью, объявленной с
+          <code>durable: true</code>: её описание брокер хранит на диске и восстанавливает после рестарта, а
+          очередь с <code>durable: false</code> после рестарта исчезает вместе с сообщениями</td></tr>
+        <tr><td><code>ContentType</code></td><td>MIME-тип тела — строка «тип/подтип», по которой потребитель
+          понимает, чем разбирать байты (<code>application/json</code>, <code>text/plain</code>,
+          <code>application/xml</code>)</td></tr>
+        <tr><td><code>MessageId</code></td><td>Идентификатор для дедупликации — отбрасывания повторов:
+          потребитель помнит ID уже обработанных сообщений и второй раз такое же пропускает (оно приходит
+          снова после сбоя или повторной публикации). По нему же сообщение ищут в логах — трассировка</td></tr>
+        <tr><td><code>CorrelationId</code></td><td>Связь ответа с исходным запросом в RPC-паттерне (Remote
+          Procedure Call — вызов «как локальной функции», только через очередь): клиент кладёт в запрос свой
+          идентификатор, сервер возвращает ответ с тем же идентификатором, и клиент видит, на какой именно
+          запрос это ответ</td></tr>
         <tr><td><code>Headers</code></td><td>Произвольные пары «ключ — значение»: версия схемы, попытка, источник</td></tr>
       </tbody>
     </table>
+    <div class="box note">
+      <span class="t">Три слова, которые легко перепутать</span>
+      <ul>
+        <li><strong><code>durable</code> — свойство очереди</strong> (и обменника): очередь объявляют с
+          <code>durable: true</code>, и тогда брокер хранит её описание на диске — после перезапуска очередь
+          снова существует. С <code>durable: false</code> очередь после рестарта исчезает.</li>
+        <li><strong><code>Persistent</code> — свойство сообщения:</strong> просьба записать на диск именно это
+          сообщение. Работает только в паре с durable-очередью: persistent-сообщение в очереди с
+          <code>durable: false</code> исчезнет вместе с ней.</li>
+        <li><strong>confirm — подтверждение брокера:</strong> ответ «я принял сообщение», которого ждёт
+          публикующий код. Он говорит о судьбе сообщения, а не о том, что его кто-то прочитал.</li>
+      </ul>
+    </div>
     <p>Тонкость API, на которой легко споткнуться: в <code>RabbitMQ.Client</code> 7.x у
       <code>BasicPublishAsync</code> свойства идут <strong>после</strong> флага <code>mandatory</code>.
-      Считаем, что <code>ch</code> — канал из главы 1. Вызов либо без свойств вообще, либо так:</p>
+      Ниже — весь путь целиком: подключение, канал, свойства и публикация, без ссылок на другие главы.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var props = new BasicProperties           // свойства сообщения — отдельный объект, тело передаётся отдельно
+      <pre><code class="language-csharp">using RabbitMQ.Client;                                              // ConnectionFactory, BasicProperties, IChannel
+
+var factory = new ConnectionFactory { HostName = "localhost" };      // порт 5672 и guest/guest — по умолчанию
+await using var conn = await factory.CreateConnectionAsync();       // TCP-соединение: одно на процесс
+await using var ch   = await conn.CreateChannelAsync();             // канал: через него идёт публикация
+
+var props = new BasicProperties           // свойства сообщения — отдельный объект, тело передаётся отдельно
 {
     Persistent  = true,                   // просить брокера записать на диск (работает вместе с durable-очередью)
     ContentType = "application/json",     // подсказка потребителю, чем разбирать тело
@@ -75,12 +106,14 @@ await ch.BasicPublishAsync(
       <thead><tr><th>Что</th><th>Что означает</th></tr></thead>
       <tbody>
         <tr><td><code>Persistent = true</code></td><td>просит брокера записать сообщение на диск. Само по себе
-          ничего не гарантирует: нужна ещё <code>durable</code>-очередь, а что запись действительно
-          произошла — подтверждает confirm</td></tr>
-        <tr><td><code>ContentType</code></td><td>MIME-тип тела; потребитель по нему решает, чем
-          десериализовать</td></tr>
+          ничего не гарантирует: нужна ещё durable-очередь (объявленная с <code>durable: true</code>), а что
+          запись действительно произошла — подтверждает confirm</td></tr>
+        <tr><td><code>ContentType</code></td><td>MIME-тип тела (<code>application/json</code>): потребитель по
+          нему решает, чем десериализовать</td></tr>
         <tr><td><code>MessageId</code></td><td>идентификатор сообщения. <code>Guid.ToString("N")</code> —
-          32 hex-символа без дефисов; по нему делают дедупликацию и трассировку</td></tr>
+          32 hex-символа без дефисов; по нему отбрасывают повторы (дедупликация) и ищут сообщение в логах</td></tr>
+        <tr><td><code>CorrelationId</code></td><td>идентификатор «на какой запрос это ответ»: в RPC-паттерне
+          сервер копирует его из запроса в ответ</td></tr>
         <tr><td><code>Headers</code></td><td>произвольные пары «ключ — значение»; потребитель видит их в
           <code>ea.BasicProperties.Headers</code>. Значения — простые типы: строка, число, байты</td></tr>
         <tr><td><code>exchange</code>, <code>routingKey</code></td><td>куда и с каким адресом публикуем
@@ -217,7 +250,7 @@ catch (PublishReturnException e)                  // канал с tracking: в�
       бизнес-данные, а отдельный воркер публикует его с подтверждениями и помечает отправленным
       (подробно — в .NET-разделе, глава про Outbox и идемпотентность).</p>
     <div class="codewrap">
-      <pre><code class="language-text">BEGIN;                                         -- одна транзакция на бизнес-запись и намерение отправить
+      <pre><code class="language-sql">BEGIN;                                         -- одна транзакция на бизнес-запись и намерение отправить
   INSERT INTO orders …;                        -- бизнес-данные
   INSERT INTO outbox (type, payload) VALUES ('order.created', …);  -- сообщение как строка таблицы
 COMMIT;                                        -- либо видны оба INSERT, либо ни одного
