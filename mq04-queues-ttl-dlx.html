@@ -65,6 +65,13 @@ orders.new      true    0</code></pre>
       <span class="t">Минимальный набор для «переживает перезапуск»</span>
       <p><code>durable: true</code> у очереди + <code>Persistent = true</code> у сообщения + публикация с
         подтверждением (глава 2). Если убрать любой из трёх — сообщение можно потерять, и вы об этом не узнаете.</p>
+      <p>У третьего пункта есть название, но это не флаг сообщения: режим называется <strong>publisher
+        confirms</strong> (подтверждения публикации), а канал, на котором он включён, — <strong>confirm-канал</strong>.
+        Включается он не у сообщения, а у канала:
+        <code>CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled:
+        true)</code> — тогда <code>BasicPublishAsync</code> ждёт ответа брокера. Поэтому
+        <code>durable</code>/<code>Persistent</code> — это свойства (очереди и сообщения), а publisher confirms —
+        режим канала, и у самого сообщения такого свойства нет.</p>
     </div>
 
     <h2>TTL: когда сообщение устаревает</h2>

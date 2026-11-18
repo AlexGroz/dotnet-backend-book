@@ -84,6 +84,15 @@ curl -s -u guest:guest 'http://localhost:15672/api/queues/%2F/q.dlq'
     <h2>Alarms: что происходит при перегрузке</h2>
     <p>RabbitMQ следит за памятью и местом на диске. Когда порог превышен, включается <strong>alarm</strong>, и
       брокер перестаёт читать данные от публикующих соединений — это защита, чтобы не упасть целиком.</p>
+    <p><strong>Про какую память речь.</strong> Про оперативную (RAM), которую занимает сам брокер — процесс
+      Erlang VM. Считается она по RSS этого процесса, а не «сколько свободно в системе»: <code>rabbitmqctl
+      status</code> печатает <code>Total memory used</code> (в прогоне — <code>0.1799 gb</code>) и
+      <code>Calculation strategy: rss</code>. Заранее ничего выделять не нужно: брокер занимает память по мере
+      надобности (соединения, очереди, кэш сообщений) и растёт сам, сколько ему позволят.</p>
+    <p><strong>От чего считается порог.</strong> От всей памяти, доступной узлу:
+      <code>vm_memory_high_watermark</code> — доля от общего объёма, и этот объём брокер определяет сам. В прогоне
+      на этой машине он увидел 15.1 ГБ (это RAM хоста: контейнер запущен без своего лимита памяти), и при пороге
+      <code>0.4</code> получилось <code>6.2034 gb</code> — ровно это печатает <code>rabbitmqctl status</code>:</p>
     <div class="codewrap">
       <pre><code class="language-bash"># set_vm_memory_high_watermark — доля доступной памяти, при превышении которой включается alarm
 # 0.000001 — заведомо низкий порог, чтобы alarm сработал сразу; 0.4 — значение по умолчанию
@@ -100,6 +109,15 @@ docker exec rmq3 rabbitmqctl status | grep -A2 '^Alarms'
 # снять alarm: вернуть порог 0.4
 docker exec rmq3 rabbitmqctl set_vm_memory_high_watermark 0.4</code></pre>
     </div>
+    <p>Порог задают и в абсолютных единицах — <code>set_vm_memory_high_watermark absolute 1MiB</code>: так
+      понятнее, когда у контейнера есть собственный лимит памяти и «доля от RAM хоста» ничего не значит. Пока
+      занятая память ниже порога, брокер работает как обычно; ближе к порогу он начинает сбрасывать часть
+      сообщений из памяти на диск (paging) — это происходит на <code>vm_memory_high_watermark_paging_ratio =
+      0.5</code>, то есть на половине порога.</p>
+    <p>У диска свой независимый порог — <code>disk_free_limit</code>: в этом образе 50 МБ, в
+      <code>rabbitmqctl status</code> это строка <code>Low free disk space watermark: 0.05 gb</code>. Если
+      свободного места станет меньше, включится второй alarm — и публикаторы блокируются так же, как при
+      нехватке памяти.</p>
     <p>Самое интересное — как это выглядит <em>из приложения</em>. Проверено дважды, на одном и том же
       publish:</p>
     <div class="codewrap">
@@ -199,6 +217,9 @@ confirm: NOT received -&gt; TaskCanceledException   # подтверждения
           <code>messages_unacknowledged</code>, <code>consumers</code> — по ним видно, где застряло.</li>
         <li><strong>Alarm памяти или диска блокирует публикацию</strong>; без confirms приложение этого не
           замечает.</li>
+        <li><strong>Память в alarm — это RAM процесса брокера</strong> (считается по RSS), а порог —
+          <code>vm_memory_high_watermark</code>, доля от всей памяти узла; заранее она не выделяется, брокер
+          занимает её по мере надобности.</li>
         <li><strong>HTTP API</strong> (<code>/api/queues</code>) — источник данных для дашбордов и алертов.</li>
         <li><strong>Кластер ≠ шардирование:</strong> очередь живёт на узле; репликация — <code>quorum</code>-очереди.</li>
         <li><strong>Надёжность собирается из мелочей:</strong> durable + persistent + confirm + mandatory + ack +
