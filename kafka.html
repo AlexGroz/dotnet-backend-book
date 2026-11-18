@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kafka: журнал событий в .NET</title>
+<link rel="stylesheet" href="book.css">
+</head>
+<body>
+<div class="container">
+  <div class="topbar"><div class="in">
+    <a href="index.html">← Все разделы</a>
+    <span class="booktitle">Kafka</span>
+    <a href="docker.html">Docker и контейнеры →</a>
+  </div></div>
+
+  <div class="cover">
+    <div class="kicker">Учебник · Kafka</div>
+    <h1>Kafka:<br>журнал событий в .NET</h1>
+    <p>От «чем это отличается от очереди» до партиций, ключей, подтверждений и consumer-групп. Примеры — на C#
+      с клиентом <code>Confluent.Kafka</code>, каждый вывод получен прогоном на Kafka 3.9.</p>
+    <p style="margin-top:14px;font-size:14px;opacity:.92">
+      <span class="tag lead">подводящая</span> готовит почву &nbsp;
+      <span class="tag core">основная</span> раскрывает тему</p>
+  </div>
+
+  <h2 style="border:none;padding:0;margin:26px 0 4px">Содержание</h2>
+
+  <div class="toc-part">Kafka · Часть I. Основы</div>
+  <div class="toc">
+    <a href="kf01-why-kafka.html"><span class="n">Глава 1</span><span class="t">Зачем Kafka: журнал, партиции и оффсеты</span><span class="d"><span class="tag lead">подводящая</span>Чем журнал отличается от очереди, из чего он состоит и первая проверка</span></a>
+    <a href="kf02-topic-partitions.html"><span class="n">Глава 2</span><span class="t">Топики и партиции: где лежит сообщение и почему порядок не глобальный</span><span class="d"><span class="tag core">основная</span>kafka-topics, ключ сообщения, хеш партиции, реплики и ISR</span></a>
+  </div>
+
+  <div class="toc-part">Kafka · Часть II. Клиент из .NET</div>
+  <div class="toc">
+    <a href="kf03-producing.html"><span class="n">Глава 3</span><span class="t">Producer из .NET: acks, ключи и идемпотентность</span><span class="d"><span class="tag core">основная</span>Confluent.Kafka, delivery report, acks=all, ретраи и порядок</span></a>
+    <a href="kf04-consuming-offsets.html"><span class="n">Глава 4</span><span class="t">Consumer: группы, оффсеты, коммиты и rebalance</span><span class="d"><span class="tag core">основная</span>Чтение с оффсета, ручной коммит, at-least-once и распределение партиций</span></a>
+  </div>
+
+  <div class="toc-part">Kafka · Часть III. Эксплуатация</div>
+  <div class="toc">
+    <a href="kf05-operations-retention.html"><span class="n">Глава 5</span><span class="t">Эксплуатация: retention, compaction, lag и мониторинг</span><span class="d"><span class="tag core">основная</span>Сколько данные живут, что такое компакция, как читать lag и метрики</span></a>
+  </div>
+
+  <p style="color:var(--muted);font-size:14px;margin-top:34px">
+    Все примеры проверены на Kafka 3.9.1 (KRaft, Apache-образ) и клиенте Confluent.Kafka.
+  </p>
+</div>
+</body>
+</html>

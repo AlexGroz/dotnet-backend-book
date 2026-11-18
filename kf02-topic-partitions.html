@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 2 · Топики и партиции</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="kafka.html">← Оглавление</a>
+  <span class="booktitle">Kafka</span>
+  <a href="kf03-producing.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Kafka · Часть I · Основы</div>
+    <h1>Глава 2. Топики и партиции: где лежит сообщение и почему порядок не глобальный</h1>
+    <p class="sublead">Ключ сообщения, хеш партиции, границы роста топика и что означают Leader, Replicas и
+      Isr в выводе describe</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что задаёт топик</h2>
+    <p>Топик — это не только имя. У него есть число партиций, фактор репликации и набор конфигураций.
+      Посмотрим на <code>demo</code> из главы 1:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic demo
+# Topic: demo  TopicId: lr8veZlzSbOdrNUUlPrMLw  PartitionCount: 3  ReplicationFactor: 1
+#              Configs: segment.bytes=1073741824
+#   Topic: demo  Partition: 0  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:
+#   Topic: demo  Partition: 1  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:
+#   Topic: demo  Partition: 2  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Поле</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>TopicId</code></td><td>внутренний идентификатор топика. Он не меняется при
+          переименовании и отличает новый топик с тем же именем от старого</td></tr>
+        <tr><td><code>PartitionCount</code></td><td>сколько партиций: столько независимых журналов и столько
+          параллельных читателей максимум (внутри одной группы)</td></tr>
+        <tr><td><code>ReplicationFactor</code></td><td>сколько копий каждой партиции хранится в кластере</td></tr>
+        <tr><td><code>Configs</code></td><td>настройки топика, отличающиеся от настроек брокера. Здесь только
+          <code>segment.bytes</code>, унаследованный от брокера</td></tr>
+        <tr><td><code>Leader</code></td><td>брокер, который принимает записи и отдаёт чтение для этой
+          партиции</td></tr>
+        <tr><td><code>Replicas</code></td><td>все брокеры, на которых лежит копия партиции</td></tr>
+        <tr><td><code>Isr</code></td><td>in-sync replicas: реплики, которые не отстали от лидера. Только они
+          могут стать новым лидером без потери данных</td></tr>
+        <tr><td><code>Elr</code></td><td>eligible leader replicas — расширенный набор кандидатов в лидеры
+          (появился в KRaft-кластерах)</td></tr>
+      </tbody>
+    </table>
+    <p>Пока брокер один, все роли — <code>1</code>: он и лидер, и реплика, и синхронная реплика. Смысл колонок
+      становится виден в кластере из нескольких брокеров (глава 5).</p>
+
+    <h2>Ключ решает, в какую партицию писать</h2>
+    <p>В главе 1 ключи <code>k1</code>, <code>k2</code>, <code>k3</code> разошлись по партициям 2, 0 и 1.
+      Это не случайность и не порядок отправки: партиция вычисляется из ключа:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">partition = hash(key) mod число_партиций
+
+при 3 партициях:  k1 → 2,  k2 → 0,  k3 → 1
+при 6 партициях:  тот же k1 может попасть в другую партицию</code></pre>
+    </div>
+    <p>Из этого следуют три важных свойства:</p>
+    <ul>
+      <li><strong>Один ключ — всегда одна партиция.</strong> Пока число партиций не менялось, все сообщения с
+        ключом <code>k1</code> попадут в партицию 2.</li>
+      <li><strong>Порядок есть только на ключ.</strong> В партиции 2 записи <code>k1</code> получили оффсеты
+        0, 1, 2, 3 — по порядку отправки. Но между <code>k1</code> и <code>k2</code> никакого порядка нет: они
+        в разных журналах.</li>
+      <li><strong>Разные ключи могут делить партицию.</strong> В том же прогоне ключ <code>k9</code> тоже
+        попал в партицию 2 — хеши совпали по модулю. Это нормально: партиций меньше, чем ключей.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-bash"># отдельный топик на три партиции, чтобы отсчёт оффсетов начался с нуля
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --topic keys --partitions 3 --replication-factor 1
+
+# три сообщения с ключом k1 и одно с ключом k9
+printf 'k1:x1\nk1:x2\nk1:x3\nk9:z\n' | docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic keys --property parse.key=true --property key.separator=:
+
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic keys --from-beginning --max-messages 4 \
+  --property print.key=true --property print.partition=true --property print.offset=true
+# Partition:2  Offset:0  k1  x1
+# Partition:2  Offset:1  k1  x2
+# Partition:2  Offset:2  k1  x3
+# Partition:2  Offset:3  k9  z
+# Processed a total of 4 messages</code></pre>
+    </div>
+
+    <h2>Без ключа: sticky, а не «по кругу»</h2>
+    <p>Если ключ не задан, партиция выбирается не хешем. Клиент применяет <strong>sticky</strong>-стратегию:
+      пока набирается батч, все сообщения летят в одну партицию, затем выбирается следующая. На небольшой пачке
+      это выглядит так, будто партиции вообще не используются:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># ключи не заданы: просто шесть строк
+printf 'n1\nn2\nn3\nn4\nn5\nn6\n' | docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic nokeys
+
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic nokeys --from-beginning --max-messages 6 \
+  --property print.partition=true --property print.offset=true
+# Partition:0  Offset:0  n1
+# Partition:0  Offset:1  n2
+# Partition:0  Offset:2  n3
+# Partition:0  Offset:3  n4
+# Partition:0  Offset:4  n5
+# Partition:0  Offset:5  n6
+# Processed a total of 6 messages</code></pre>
+    </div>
+    <p>Причина — производительность: один батч в одну партицию означает меньше запросов и лучшее сжатие.
+      Следствия важнее: <strong>без ключа Kafka не обещает порядок</strong> и не размазывает нагрузку по
+      сообщениям. Нужен порядок на сущность — задайте ключ: id заказа, id пользователя, id устройства.</p>
+
+    <h2>Ловушка: партиционер зависит от клиента</h2>
+    <p>Хеш — это не «вообще хеш», а конкретная функция из библиотеки. Проверено на одном топике на 3 партиции и
+      одном ключе <code>k1</code>: консольная утилита (Java-клиент) положила его в партицию 2, а
+      <code>Confluent.Kafka</code> с настройками по умолчанию — в партицию 1.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># одно и то же сообщение с ключом k1, записанное разными клиентами в один топик
+# console → partition 2, .NET (по умолчанию) → partition 1
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic same --from-beginning --max-messages 2 \
+  --property print.key=true --property print.partition=true --property print.offset=true
+# Partition:2  Offset:0  k1  from-console
+# Partition:1  Offset:0  k1  from-dotnet
+# Processed a total of 2 messages</code></pre>
+    </div>
+    <p>Лечится настройкой партиционера — нужно выбрать тот же алгоритм, что у Java-клиента:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var cfg = new ProducerConfig
+{
+    BootstrapServers = "localhost:9092",       // адрес брокера
+    Acks = Acks.All,                           // ждать подтверждения от всех синхронных реплик
+    EnableIdempotence = true,                  // защита от дублей при ретраях (глава 3)
+    Partitioner = Partitioner.Murmur2Random,   // murmur2, как у Java-клиента
+};
+using var p = new ProducerBuilder&lt;string, string&gt;(cfg).Build();
+var dr = await p.ProduceAsync("same2", new Message&lt;string, string&gt; { Key = "k1", Value = "from-dotnet" });
+Console.WriteLine($"dotnet murmur2 k1 -&gt; partition {dr.Partition.Value}");
+// dotnet murmur2 k1 -&gt; partition 2   &lt;- совпало с консолью</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Клиент / настройка</th><th>Алгоритм</th><th>Партиция для k1 (3 партиции)</th></tr></thead>
+      <tbody>
+        <tr><td>Java-клиент, консольные утилиты</td><td>murmur2 по ключу</td><td><code>2</code></td></tr>
+        <tr><td><code>Confluent.Kafka</code> по умолчанию</td><td><code>consistent_random</code> (CRC32)</td>
+          <td><code>1</code></td></tr>
+        <tr><td><code>Partitioner.Murmur2Random</code></td><td>murmur2 по ключу</td><td><code>2</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Почему это критично в проде</span>
+      <p>Если часть producer'ов пишет из Java, часть из .NET, а партиционеры разные, <strong>один ключ окажется
+        в двух партициях</strong> — и порядок по этому ключу исчезнет. Клиенты не узнают об этом: оба вызова
+        успешны, просто события лежат в разных журналах. Договоритесь об алгоритме явно: в .NET —
+        <code>Partitioner.Murmur2Random</code>, в Java — значение по умолчанию.</p>
+    </div>
+
+
+    <h2>Число партиций можно только увеличивать</h2>
+    <p>Партиции добавляют, когда читатели не успевают: больше партиций — больше параллельных потребителей в
+      группе. Команда не печатает ничего при успехе и меняет только счётчик:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># увеличить число партиций с 3 до 6
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --alter --topic keys --partitions 6
+# (пусто, код возврата 0)
+
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic keys
+# Topic: keys  TopicId: kYUr7SVOS2G5RN-42m3Zjg  PartitionCount: 6  ReplicationFactor: 1
+#              Configs: segment.bytes=1073741824
+# ...шесть строк Partition: 0..5
+
+# уменьшить нельзя
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --alter --topic keys --partitions 4
+# Error while executing topic command : The topic keys currently has 6 partition(s); 4 would not be an increase.
+# ... InvalidPartitionsException: The topic keys currently has 6 partition(s); 4 would not be an increase.</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Увеличение партиций ломает привязку ключа</span>
+      <p>Старые записи остаются в своих партициях, но для новых сообщений <code>hash(key) mod 6</code> уже не
+        то же, что <code>hash(key) mod 3</code>: ключ, который жил в партиции 2, может уехать в другую. Порядок
+        по этому ключу разрывается. Поэтому число партиций планируют заранее «на вырост», а не увеличивают
+        на работающем потоке.</p>
+    </div>
+
+    <h2>Автосоздание топиков и значения по умолчанию</h2>
+    <p>Kafka создаёт топик при первой записи, если его нет. Проверено на этом брокере:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># --entity-type brokers --entity-name 1 --all  показать все настройки брокера 1
+docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --describe --entity-type brokers --entity-name 1 --all | grep -E 'auto.create.topics.enable|num.partitions'
+# auto.create.topics.enable=true   ... DEFAULT_CONFIG:auto.create.topics.enable=true
+# num.partitions=1                 ... STATIC_BROKER_CONFIG:num.partitions=1, DEFAULT_CONFIG:num.partitions=1</code></pre>
+    </div>
+    <p>Значит случайно созданный топик получит <strong>одну партицию</strong> и одну реплику — и «ускорить»
+      его потом можно только добавлением партиций. В продакшене автосоздание отключают
+      (<code>auto.create.topics.enable=false</code>) и создают топики явно, с нужным числом партиций и
+      репликацией.</p>
+
+    <h2>Реплики: что защищает от потери брокера</h2>
+    <p>Сейчас у всех партиций <code>ReplicationFactor: 1</code>: копия одна, и её потеря — потеря данных. Для
+      продакшена фактор репликации 3 означает три копии на разных брокерах; лидер принимает записи, остальные
+      догоняют.</p>
+    <p>Две настройки определяют, когда запись считается надёжной:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --describe --entity-type topics --entity-name orders --all | grep -E 'min.insync.replicas|unclean.leader'
+# min.insync.replicas=1                  ... DEFAULT_CONFIG:min.insync.replicas=1
+# unclean.leader.election.enable=false   ... DEFAULT_CONFIG:unclean.leader.election.enable=false</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Настройка</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>min.insync.replicas</code></td><td>сколько синхронных реплик должно подтвердить запись,
+          чтобы producer с <code>acks=all</code> получил успех. Для RF=3 ставят 2: переживает потерю одного
+          брокера</td></tr>
+        <tr><td><code>unclean.leader.election.enable</code></td><td>разрешать ли выбирать лидером отставшую
+          реплику. <code>false</code> — лучше остаться без записи, чем потерять уже подтверждённые
+          данные</td></tr>
+        <tr><td><code>replication-factor</code></td><td>сколько копий хранить. 3 — стандарт для продакшена;
+          1 — только для локальных опытов</td></tr>
+      </tbody>
+    </table>
+    <p>Связка для «не терять подтверждённое»: <code>replication-factor=3</code> +
+      <code>min.insync.replicas=2</code> + <code>acks=all</code> у producer (глава 3). Если <code>acks=1</code>,
+      подтверждение придёт от лидера, а он может упасть до того, как реплики заберут запись.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Партиция выбирается по ключу:</strong> <code>hash(key) mod partitionCount</code>. Один ключ —
+          одна партиция, и только внутри неё сохраняется порядок.</li>
+        <li><strong>Без ключа — sticky-батчи:</strong> сообщения липнут к одной партиции, порядок между ними не
+          обещан.</li>
+        <li><strong>Партиционер зависит от клиента:</strong> Java — murmur2, <code>Confluent.Kafka</code> по
+          умолчанию — CRC32. Для совместимости ставят <code>Partitioner.Murmur2Random</code>.</li>
+        <li><strong>Партиций может стать больше, но не меньше;</strong> увеличение меняет отображение ключей и
+          рвёт порядок на ключ.</li>
+        <li><strong>Автосоздание даёт 1 партицию и 1 реплику;</strong> в проде топики создают явно.</li>
+        <li><strong>Надёжность — это RF, ISR и acks:</strong> 3 копии, <code>min.insync.replicas=2</code>,
+          <code>acks=all</code>.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="kf01-why-kafka.html">← <span class="sp">Глава 1. Зачем Kafka: журнал, партиции и оффсеты</span></a>
+      <a href="kf03-producing.html"><span class="sp">Глава 3. Producer из .NET: acks, ключи и идемпотентность</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 4 · Consumer: группы и оффсеты</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="kafka.html">← Оглавление</a>
+  <span class="booktitle">Kafka</span>
+  <a href="kf05-operations-retention.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Kafka · Часть II · Клиент из .NET</div>
+    <h1>Глава 4. Consumer: группы, оффсеты, коммиты и rebalance</h1>
+    <p class="sublead">Как читать журнал со своего места, когда коммитить оффсет, что показывает LAG и почему
+      партиции делятся между экземплярами</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Настройки consumer'а</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var config = new ConsumerConfig
+{
+    BootstrapServers = "localhost:9092",          // точка входа в кластер
+    GroupId          = "orders-workers",          // имя группы: по нему хранятся оффсеты
+    AutoOffsetReset  = AutoOffsetReset.Earliest,  // с чего начинать, если коммита ещё нет
+    EnableAutoCommit = false,                     // подтверждать оффсет вручную, после обработки
+};</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Настройка</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>GroupId</code></td><td>имя consumer group. Оффсеты хранятся на пару «группа + топик +
+          партиция»; участники с одним <code>GroupId</code> делят партиции между собой</td></tr>
+        <tr><td><code>AutoOffsetReset</code></td><td>что делать, если для группы нет сохранённого оффсета:
+          <code>Earliest</code> — с начала журнала, <code>Latest</code> — только новые сообщения.
+          Значение по умолчанию — <code>Latest</code></td></tr>
+        <tr><td><code>EnableAutoCommit</code></td><td><code>true</code> — клиент коммитит оффсеты сам по
+          таймеру, до обработки; <code>false</code> — коммит делает приложение через
+          <code>Commit</code></td></tr>
+        <tr><td><code>BootstrapServers</code>, <code>ClientId</code></td><td>адрес кластера и имя клиента —
+          как у producer'а</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t"><code>EnableAutoCommit = true</code> — источник потерь</span>
+      <p>Автокоммит отправляет оффсет по расписанию, не дожидаясь обработки. Процесс упал в середине
+        обработки — оффсет уже сдвинут, сообщение не будет прочитано никем. Поэтому в рабочих сервисах
+        автокоммит выключают и коммитят после обработки.</p>
+    </div>
+
+    <h2>Код: читаем со своего места и коммитим</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using Confluent.Kafka;                                   // ConsumerConfig, ConsumerBuilder, ConsumeResult
+
+var config = new ConsumerConfig
+{
+    BootstrapServers = "localhost:9092",                 // адрес брокера
+    GroupId          = "orders-workers",                 // группа: под ней будут храниться оффсеты
+    AutoOffsetReset  = AutoOffsetReset.Earliest,         // нет коммита — читаем с начала
+    EnableAutoCommit = false,                            // коммитить будем вручную
+};
+
+using var consumer = new ConsumerBuilder&lt;string, string&gt;(config).Build(); // ключ и значение — строки
+consumer.Subscribe("orders");                            // подписка на топик целиком (все партиции)
+
+var idleUntil = DateTime.UtcNow.AddSeconds(10);          // первая подписка ждёт ребаланс — даём до 10 с
+while (DateTime.UtcNow &lt; idleUntil)
+{
+    var cr = consumer.Consume(TimeSpan.FromMilliseconds(200)); // null, если за 200 мс ничего не пришло
+    if (cr is null)
+        continue;                                        // ждём дальше, пока не истечёт окно
+
+    Console.WriteLine($"got key={cr.Message.Key} partition={cr.Partition.Value} offset={cr.Offset.Value}");
+    consumer.Commit(cr);                                 // сдвинуть оффсет группы: сообщение обработано
+    idleUntil = DateTime.UtcNow.AddSeconds(2);           // после сообщения ждём тишины 2 с
+}
+
+consumer.Close();                                        // выйти из группы и завершить сессию корректно</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">got key=order-3 partition=2 offset=0
+got key=order-1 partition=1 offset=0
+got key=order-2 partition=0 offset=0</code></pre>
+    </div>
+    <p>Порядок строк — не порядок отправки: три партиции читаются параллельно, и consumer получает то, что
+      пришло первым. Внутри партиции порядок сохраняется всегда.</p>
+
+    <h2>Что лежит в результате чтения</h2>
+    <table>
+      <thead><tr><th>Поле</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>cr.Message</code>, <code>cr.Key</code>, <code>cr.Value</code></td><td>сообщение и его
+          ключ со значением — уже десериализованные клиентом</td></tr>
+        <tr><td><code>cr.Topic</code>, <code>cr.Partition</code>, <code>cr.Offset</code></td><td>откуда
+          прочитано: топик, партиция и оффсет записи</td></tr>
+        <tr><td><code>cr.TopicPartitionOffset</code></td><td>все три части одним значением — удобно передать
+          в <code>Commit</code> или сохранить</td></tr>
+        <tr><td><code>cr.Timestamp</code></td><td>время записи (тип <code>TimestampType</code> говорит, чьё
+          это время: producer'а или брокера)</td></tr>
+        <tr><td><code>cr.Headers</code></td><td>заголовки сообщения (например, trace-id)</td></tr>
+        <tr><td><code>cr.IsPartitionEOF</code></td><td><code>true</code>, если партиция дочитана до конца;
+          сообщения в таком результате нет</td></tr>
+        <tr><td><code>Consume(timeout)</code></td><td>вернёт <code>null</code>, если за <code>timeout</code>
+          ничего не пришло. Это не ошибка — просто нет новых данных</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Коммит: где именно хранится позиция</h2>
+    <p><code>Commit(cr)</code> записывает для группы оффсет <strong>следующего</strong> сообщения, то есть
+      <code>offset + 1</code>. Поэтому после чтения оффсета 0 в партиции 2 в описании группы стоит
+      <code>CURRENT-OFFSET 1</code> — «следующее, которое надо прочитать».</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># описание группы: что уже закоммичено и что осталось
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --describe --group orders-workers
+# GROUP           TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
+# orders-workers  orders  0          1               1               0    -            -     -
+# orders-workers  orders  1          1               1               0    -            -     -
+# orders-workers  orders  2          1               1               0    -            -     -</code></pre>
+    </div>
+    <p>Оффсеты групп хранит не потребитель и не «память брокера», а служебный топик
+      <strong><code>__consumer_offsets</code></strong> — обычный топик Kafka, который создаётся при первом
+      коммите. Его параметры по умолчанию: 50 партиций и <code>cleanup.policy=compact</code>, то есть хранится
+      последнее значение на ключ «группа + партиция».</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># служебный топик появился после первого коммита
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+# __consumer_offsets
+# demo
+# keys
+# ... (остальные топики демо-кластера)
+
+docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --describe --entity-type brokers --entity-name 1 --all | grep offsets.topic.num.partitions
+# offsets.topic.num.partitions=50   ... DEFAULT_CONFIG:offsets.topic.num.partitions=50</code></pre>
+    </div>
+
+    <h2>Гарантия: at-least-once</h2>
+    <p>Схема «прочитал → обработал → закоммитил» даёт <strong>доставку как минимум один раз</strong>:</p>
+    <ul>
+      <li><strong>Упали до коммита</strong> — оффсет не сдвинулся, после перезапуска сообщение придёт снова.
+        Работа не потеряна, но может выполниться дважды.</li>
+      <li><strong>Упали после коммита</strong> — сообщение считается обработанным; если коммит был раньше
+        обработки (автокоммит), работа потеряна.</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Порядок действий важнее настроек</span>
+      <p>Коммит — это «я закончил». Пока он идёт <em>после</em> обработки, Kafka не теряет работу; дубли
+        возможны, и обработчик должен быть идемпотентным: проверять <code>Message.Key</code> или уникальный
+        идентификатор в БД, как в книге про RabbitMQ (глава 3).</p>
+    </div>
+
+
+    <h2>LAG: насколько группа отстала</h2>
+    <p>Главная метрика consumer'а — <strong>lag</strong>: сколько записей в партиции ещё не прочитано группой.
+      Добавим в <code>orders</code> три сообщения и снова посмотрим описание:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># пишем ещё три сообщения в топик, который группа уже читала
+printf 'order-4:{"id":4}\norder-5:{"id":5}\norder-6:{"id":6}\n' | docker exec -i kafka \
+  /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic orders \
+  --property parse.key=true --property key.separator=:
+
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --describe --group orders-workers
+# GROUP           TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
+# orders-workers  orders  0          1               2               1    -            -     -
+# orders-workers  orders  1          1               1               0    -            -     -
+# orders-workers  orders  2          1               3               2    -            -     -</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Колонка</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>CURRENT-OFFSET</code></td><td>последний закоммиченный оффсет: следующее сообщение,
+          которое группа прочитает</td></tr>
+        <tr><td><code>LOG-END-OFFSET</code></td><td>сколько всего записей в партиции (следующий оффсет для
+          записи)</td></tr>
+        <tr><td><code>LAG</code></td><td><code>LOG-END-OFFSET − CURRENT-OFFSET</code>: сколько ещё не
+          прочитано. Сумма по партициям — общий lag группы</td></tr>
+        <tr><td><code>CONSUMER-ID</code>, <code>HOST</code>, <code>CLIENT-ID</code></td><td>кто именно читает
+          партицию; прочерки означают, что активных участников нет</td></tr>
+      </tbody>
+    </table>
+    <p>Здесь суммарный lag — 3: ровно три новых сообщения. Если lag растёт монотонно, потребители не
+      успевают; если он равен нулю, группа дочитала журнал.</p>
+
+    <h2>Rebalance: как партиции делятся между экземплярами</h2>
+    <p>Запустим два consumer'а с одним <code>GroupId</code> на топик из трёх партиций и попросим каждого
+      напечатать своё назначение:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static ConsumerConfig Cfg() =&gt; new()                 // одинаковая конфигурация для обоих
+{
+    BootstrapServers = "localhost:9092",
+    GroupId          = "assign-demo",                 // одна группа — значит делят партиции
+    AutoOffsetReset  = AutoOffsetReset.Earliest,
+    EnableAutoCommit = false,
+};
+
+using var c1 = new ConsumerBuilder&lt;string, string&gt;(Cfg()).Build();
+using var c2 = new ConsumerBuilder&lt;string, string&gt;(Cfg()).Build();
+c1.Subscribe("orders");
+c2.Subscribe("orders");
+
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)); // даём время на ребаланс
+while (!cts.IsCancellationRequested)
+{
+    c1.Consume(100);                                  // опрос обязателен: он же держит участие в группе
+    c2.Consume(100);
+}
+
+Console.WriteLine($"c1: {string.Join(",", c1.Assignment.Select(p =&gt; p.Partition.Value))}");
+Console.WriteLine($"c2: {string.Join(",", c2.Assignment.Select(p =&gt; p.Partition.Value))}");</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">c1: 2
+c2: 0,1</code></pre>
+    </div>
+    <ul>
+      <li><strong>Партиции поделились, а не продублировались:</strong> каждая партиция досталась ровно
+        одному участнику группы.</li>
+      <li><strong>Максимум параллелизма — число партиций.</strong> Четвёртый consumer на топик из трёх
+        партиций останется без работы.</li>
+      <li><strong>Первая подписка ждёт</strong> <code>group.initial.rebalance.delay.ms</code> — в этом
+        кластере 3000 мс (проверено в конфигурации брокера). «Первое сообщение не приходит мгновенно» —
+        это нормально.</li>
+      <li><strong>При добавлении участника партиции переезжают</strong> (rebalance): часть партиций
+        освобождается и назначается новому consumer'у.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Почему нужен <code>Consume</code> в цикле</span>
+      <p>Участие в группе поддерживается опросом: heartbeats уходят во время <code>Consume</code>. Если
+        перестать его вызывать, брокер решит, что участник умер, и запустит ребаланс.</p>
+    </div>
+
+
+    <h2>AutoOffsetReset: где начинать</h2>
+    <p>Настройка действует только тогда, когда у группы <strong>нет</strong> закоммиченного оффсета —
+      например, при первом запуске новой группы:</p>
+    <table>
+      <thead><tr><th>Значение</th><th>Поведение</th></tr></thead>
+      <tbody>
+        <tr><td><code>Earliest</code></td><td>читать журнал с самого начала (с earliest-оффсета). Так делает
+          программа выше</td></tr>
+        <tr><td><code>Latest</code> (по умолчанию)</td><td>читать только новые сообщения, всё старое
+          игнорируется</td></tr>
+      </tbody>
+    </table>
+    <p>Если оффсет уже закоммичен, <code>AutoOffsetReset</code> не применяется: группа продолжит с сохранённого
+      места. Сдвинуть её назад можно, удалив оффсеты группы —
+      <code>kafka-consumer-groups.sh --bootstrap-server localhost:9092 --delete --group orders-workers</code>;
+      команда работает, только когда в группе нет активных участников.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Оффсет группы хранится в Kafka</strong> — в служебном топике
+          <code>__consumer_offsets</code>, а не в памяти потребителя.</li>
+        <li><strong><code>Commit(cr)</code> записывает <code>offset + 1</code>:</strong> «следующее, что надо
+          прочитать».</li>
+        <li><strong>Коммит после обработки = at-least-once:</strong> падение до коммита даёт повтор, а не
+          потерю; обработчик должен быть идемпотентным.</li>
+        <li><strong>LAG = LOG-END-OFFSET − CURRENT-OFFSET</strong> — главная метрика отставания группы.</li>
+        <li><strong>Партиции делятся между участниками группы:</strong> максимум параллелизма — число
+          партиций; лишние consumer'ы простаивают.</li>
+        <li><strong><code>AutoOffsetReset</code> работает только без коммита:</strong> <code>Earliest</code>
+          читает с начала, <code>Latest</code> — только новое.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="kf03-producing.html">← <span class="sp">Глава 3. Producer из .NET: acks, ключи и идемпотентность</span></a>
+      <a href="kf05-operations-retention.html"><span class="sp">Глава 5. Эксплуатация: retention, compaction, lag и мониторинг</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

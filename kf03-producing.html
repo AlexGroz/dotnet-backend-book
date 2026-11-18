@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 3 · Producer из .NET</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="kafka.html">← Оглавление</a>
+  <span class="booktitle">Kafka</span>
+  <a href="kf04-consuming-offsets.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Kafka · Часть II · Клиент из .NET</div>
+    <h1>Глава 3. Producer из .NET: acks, ключи и идемпотентность</h1>
+    <p class="sublead">Когда запись считается доставленной, что означает каждая настройка и почему «отправил» —
+      не то же самое, что «брокер записал»</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Клиент: один пакет, без Java</h2>
+    <p>Рабочий клиент Kafka для .NET — <code>Confluent.Kafka</code>. Внутри пакета лежит нативная библиотека
+      <code>librdkafka</code>, поэтому JVM и отдельной установки Kafka на машине приложению не нужно:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># добавить пакет в проект; версия на момент прогона — 2.16.0
+dotnet add package Confluent.Kafka
+# info : PackageReference for package 'Confluent.Kafka' version '2.16.0' added to file '.../P.csproj'.</code></pre>
+    </div>
+    <p>Версию лучше фиксировать, как и в случае с любым клиентом сети:
+      <code>dotnet add package Confluent.Kafka --version 2.16.0</code>. Все примеры книги сняты на 2.16.0 и
+      Kafka 3.9.1.</p>
+
+    <h2>Настройки producer'а</h2>
+    <p>Конфигурация — обычный объект; каждая настройка отвечает на свой вопрос:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var config = new ProducerConfig
+{
+    BootstrapServers  = "localhost:9092",   // точка входа: адрес любого брокера кластера
+    ClientId          = "orders-producer",  // имя клиента в логах брокера и в метриках
+    Acks              = Acks.All,           // ждать подтверждения от всех синхронных реплик
+    EnableIdempotence = true,               // не создавать дубли при повторных попытках
+    MessageTimeoutMs  = 5000,               // сколько ждать доставки, прежде чем вернуть ошибку
+};</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Настройка</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>BootstrapServers</code></td><td>список <code>host:port</code> через запятую — любые
+          брокеры кластера. Клиент подключается к одному, получает метаданные и находит остальных</td></tr>
+        <tr><td><code>ClientId</code></td><td>метка клиента: по ней его видно в логах и метриках. Помогает
+          понять, какой сервис создал нагрузку</td></tr>
+        <tr><td><code>Acks</code></td><td>сколько подтверждений ждать: <code>None</code> — не ждать,
+          <code>Leader</code> — от лидера, <code>All</code> — от всех синхронных реплик (разбор ниже)</td></tr>
+        <tr><td><code>EnableIdempotence</code></td><td>брокер отбрасывает повторные записи с тем же номером
+          продюсера и последовательности. Защищает от дублей при ретраях и требует
+          <code>Acks.All</code></td></tr>
+        <tr><td><code>MessageTimeoutMs</code></td><td>предельное время ожидания доставки одного сообщения. По
+          истечении <code>ProduceAsync</code> вернёт ошибку <code>Local: Message timed out</code></td></tr>
+        <tr><td><code>Partitioner</code></td><td>как выбирается партиция по ключу; по умолчанию
+          <code>consistent_random</code> (CRC32), для совместимости с Java — <code>Murmur2Random</code>
+          (глава 2)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Первое сообщение: программа и разбор строк</h2>
+    <p>Ниже — полная программа; она пишет три сообщения в топик <code>orders</code> (три партиции, создан
+      заранее) и печатает, куда именно попало каждое:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using Confluent.Kafka;                                   // ProducerConfig, ProducerBuilder, Message, ProduceException
+
+var config = new ProducerConfig                          // все настройки клиента в одном объекте
+{
+    BootstrapServers  = "localhost:9092",                // адрес брокера; для кластера — список через запятую
+    ClientId          = "orders-producer",               // имя клиента в логах брокера и в метриках
+    Acks              = Acks.All,                        // ждать подтверждения от всех синхронных реплик
+    EnableIdempotence = true,                            // брокер отбросит дубли, если клиент повторит запись
+    MessageTimeoutMs  = 5000,                            // 5 секунд на доставку, дальше — ошибка
+};
+
+using var producer = new ProducerBuilder&lt;string, string&gt;(config).Build(); // ключ и значение — строки
+
+for (int i = 1; i &lt;= 3; i++)
+{
+    var msg = new Message&lt;string, string&gt; { Key = $"order-{i}", Value = $"{{\"id\":{i}}}" }; // ключ задаёт партицию
+    try
+    {
+        var dr = await producer.ProduceAsync("orders", msg);   // ждём отчёт о доставке этого сообщения
+        Console.WriteLine($"delivered: key={msg.Key} partition={dr.Partition.Value} offset={dr.Offset.Value}");
+    }
+    catch (ProduceException&lt;string, string&gt; e)               // брокер не принял или истёк таймаут
+    {
+        Console.WriteLine($"failed: key={msg.Key} error={e.Error.Reason}");
+    }
+}
+
+producer.Flush(TimeSpan.FromSeconds(5));                   // дождаться того, что ещё висит в очереди клиента</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">delivered: key=order-1 partition=1 offset=0
+delivered: key=order-2 partition=0 offset=0
+delivered: key=order-3 partition=2 offset=0</code></pre>
+    </div>
+    <p>Три разных партиции и оффсет 0 в каждой — потому что ключи разные, а топик новый (глава 2). Если запустить
+      программу ещё раз, те же ключи попадут в те же партиции, а оффсеты станут 1, 1, 1: ключ определяет журнал,
+      а оффсет — место в нём.</p>
+    <p>Что лежит в отчёте о доставке (<code>DeliveryResult&lt;TKey, TValue&gt;</code>):</p>
+    <table>
+      <thead><tr><th>Поле</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>Topic</code></td><td>топик, в который записано сообщение</td></tr>
+        <tr><td><code>Partition</code></td><td>номер партиции; <code>.Value</code> — <code>int</code></td></tr>
+        <tr><td><code>Offset</code></td><td>оффсет записи в партиции; <code>.Value</code> — <code>long</code>.
+          По нему потом можно проверить, что сообщение действительно лежит в журнале</td></tr>
+        <tr><td><code>Status</code></td><td><code>PersistenceStatus</code>:
+          <code>NotPersisted</code>, <code>PossiblyPersisted</code>, <code>Persisted</code> — насколько
+          уверенно можно считать запись сохранённой</td></tr>
+        <tr><td><code>Message</code>, <code>Key</code>, <code>Value</code></td><td>само сообщение и его ключ
+          и значение в исходном виде</td></tr>
+        <tr><td><code>Timestamp</code>, <code>Headers</code></td><td>время записи (по умолчанию — создания
+          сообщения) и заголовки</td></tr>
+        <tr><td><code>ProduceException.Error</code></td><td>при ошибке: <code>Code</code> (например,
+          <code>Local_MsgTimedOut</code>) и <code>Reason</code> — текст, который удобно писать в лог</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Оффсет — это подтверждение записи</span>
+      <p>Если <code>ProduceAsync</code> вернул <code>delivered</code> с оффсетом, запись уже лежит в журнале
+        лидера (а при <code>Acks.All</code> — и на синхронных репликах). Прочитать её можно консольной
+        утилитой по этому же оффсету: <code>kafka-console-consumer.sh … --property print.offset=true</code>.</p>
+    </div>
+
+
+    <h2>acks: когда считать запись доставленной</h2>
+    <table>
+      <thead><tr><th>Значение</th><th>Чего ждёт producer</th><th>Последствия</th></tr></thead>
+      <tbody>
+        <tr><td><code>Acks.None</code> (0)</td><td>Ничего: отправил и забыл</td><td>Самая высокая скорость;
+          потеря сообщений при падении брокера останется незамеченной</td></tr>
+        <tr><td><code>Acks.Leader</code> (1)</td><td>Подтверждение лидера партиции</td><td>Быстро, но если
+          лидер упадёт до репликации, запись пропадёт</td></tr>
+        <tr><td><code>Acks.All</code> (-1)</td><td>Подтверждение всех синхронных реплик
+          (<code>min.insync.replicas</code>)</td><td>Медленнее, зато переживает потерю лидера; требуется для
+          идемпотентности</td></tr>
+      </tbody>
+    </table>
+    <p>Проверено, что идемпотентность действительно требует <code>Acks.All</code>: клиент не даёт собрать
+      несовместимую конфигурацию:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var bad = new ProducerConfig
+{
+    BootstrapServers  = "localhost:9092",
+    Acks              = Acks.None,     // несовместимо с идемпотентностью
+    EnableIdempotence = true,
+};
+using var p = new ProducerBuilder&lt;string, string&gt;(bad).Build();</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">InvalidOperationException: `acks` must be set to `all` when `enable.idempotence` is true</code></pre>
+    </div>
+
+    <h2>Что такое идемпотентность producer'а</h2>
+    <p>Producer сам повторяет отправку при сбоях сети — иначе любая заминка означала бы потерю. Но повтор
+      создаёт риск дубля: первая запись могла дойти до брокера, а ответ — потеряться. С
+      <code>EnableIdempotence = true</code> клиент получает от брокера <strong>producer id</strong> и
+      нумерует сообщения в каждой партиции; брокер отбрасывает повтор с уже виденным номером.</p>
+    <ul>
+      <li><strong>Это защита от дублей внутри одной сессии producer'а,</strong> а не «ровно один раз» для
+        приложения: процесс упал и перезапустился — новый producer id, новая сессия.</li>
+      <li><strong>Порядок в партиции сохраняется</strong> и при ретраях.</li>
+      <li><strong>Требует <code>Acks.All</code></strong> (проверено выше) и заметно не замедляет запись на фоне
+        сетевых задержек.</li>
+    </ul>
+
+    <h2>Когда брокер недоступен</h2>
+    <p>Остановим контейнер и запустим ту же программу. Каждое сообщение ждёт <code>MessageTimeoutMs</code> и
+      затем возвращает ошибку:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">failed: key=order-1 error=Local: Message timed out
+failed: key=order-2 error=Local: Message timed out
+failed: key=order-3 error=Local: Message timed out</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Почему в консоли ещё куча строк <code>%3|...FAIL...</code></span>
+      <p><code>librdkafka</code> пишет сообщения о соединении в stderr: попытки подключиться, таймауты,
+        переподключения. Это не исключения приложения — ловить и логировать нужно строки
+        <code>failed: ...</code> из <code>ProduceException</code>. Уровень логов клиента настраивается в
+        <code>ProducerConfig</code> и через <code>SetLogHandler</code>.</p>
+    </div>
+    <p>Важно: <code>Local: Message timed out</code> — это «за отведённое время подтверждение не пришло», а не
+      «сообщение точно не записано». Брокер мог принять запись, а ответ — потеряться. Поэтому повтор после
+      таймаута без идемпотентности даёт дубль.</p>
+
+
+    <h2>Производительность: не ждите каждое сообщение</h2>
+    <p><code>ProduceAsync</code> в цикле — самый простой, но и самый медленный способ: программа ждёт
+      подтверждения, прежде чем отправить следующее. Для потока событий применяют асинхронную отправку с
+      отчётом в callback и периодический <code>Flush</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Produce не блокирует: сообщение уходит в очередь клиента и батчится с соседними
+producer.Produce("orders", msg, report =&gt;
+{
+    if (report.Error.IsError)                       // ошибка приходит сюда, а не исключением
+        Console.WriteLine($"failed: {report.Error.Reason}");
+});
+
+// Flush возвращает число сообщений, которые не удалось доставить за отведённое время
+int left = producer.Flush(TimeSpan.FromSeconds(5));
+Console.WriteLine($"in flight after flush: {left}");</code></pre>
+    </div>
+    <p>Правило простое: <strong>ждём подтверждения пачкой, а не по одному</strong>. <code>Flush</code> перед
+      остановкой процесса обязателен — иначе очередь клиента потеряется вместе с процессом.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong><code>Confluent.Kafka</code> — самодостаточный клиент:</strong> внутри
+          <code>librdkafka</code>, Java на машине не нужна.</li>
+        <li><strong>Основные настройки:</strong> <code>BootstrapServers</code>, <code>Acks</code>,
+          <code>EnableIdempotence</code>, <code>MessageTimeoutMs</code>, <code>Partitioner</code>.</li>
+        <li><strong><code>delivered</code> с партицией и оффсетом — запись в журнале;</strong>
+          <code>failed</code> с <code>Local: Message timed out</code> — подтверждения нет, но сообщение могло
+          дойти.</li>
+        <li><strong><code>Acks.All</code> + <code>EnableIdempotence</code></strong> — минимальный набор против
+          потерь и дублей; без <code>All</code> идемпотентность не собирается.</li>
+        <li><strong>Не ждите каждое сообщение:</strong> <code>Produce</code> + callback + <code>Flush</code>
+          перед остановкой.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="kf02-topic-partitions.html">← <span class="sp">Глава 2. Топики и партиции: где лежит сообщение и почему порядок не глобальный</span></a>
+      <a href="kf04-consuming-offsets.html"><span class="sp">Глава 4. Consumer: группы, оффсеты, коммиты и rebalance</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

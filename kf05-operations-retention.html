@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 5 · Эксплуатация: retention, compaction и lag</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="kafka.html">← Оглавление</a>
+  <span class="booktitle">Kafka</span>
+  <a href="docker.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Kafka · Часть III · Эксплуатация</div>
+    <h1>Глава 5. Эксплуатация: retention, compaction, lag и мониторинг</h1>
+    <p class="sublead">Сколько данные живут на диске, что такое компакция, как читать lag и по каким метрикам
+      понимать, что кластер здоров</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Сколько живут данные: retention</h2>
+    <p>Журнал не вечен: старые сегменты удаляются по времени или по размеру. Настройки действуют на уровне
+      топика и наследуются от брокера:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># --entity-type topics --entity-name orders --all  все настройки топика с источниками значений
+docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --describe --entity-type topics --entity-name orders --all \
+  | grep -E 'retention.ms|retention.bytes|cleanup.policy|segment.bytes'
+# cleanup.policy=delete     ... DEFAULT_CONFIG:log.cleanup.policy=delete
+# retention.bytes=-1        ... DEFAULT_CONFIG:log.retention.bytes=-1
+# retention.ms=604800000    ... synonyms={}   &lt;- вычислено из log.retention.hours=168
+# segment.bytes=1073741824  ... STATIC_BROKER_CONFIG:log.segment.bytes=1073741824, DEFAULT_CONFIG:...</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Настройка</th><th>По умолчанию</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>retention.ms</code></td><td><code>604800000</code> (7 дней; по умолчанию считается из
+          <code>log.retention.hours=168</code>)</td><td>сколько хранить сегмент, прежде чем удалить его
+          целиком</td></tr>
+        <tr><td><code>retention.bytes</code></td><td><code>-1</code></td><td>лимит размера партиции;
+          <code>-1</code> — без ограничения. Ограничивает диск, а не возраст</td></tr>
+        <tr><td><code>segment.ms</code></td><td><code>604800000</code></td><td>через сколько закрывать
+          сегмент по времени (после этого он может быть удалён или компактирован)</td></tr>
+        <tr><td><code>segment.bytes</code></td><td><code>1073741824</code> (1 ГБ)</td><td>размер сегмента:
+          при заполнении журнал переходит к следующему файлу</td></tr>
+        <tr><td><code>log.retention.check.interval.ms</code></td><td><code>300000</code> (5 минут)</td>
+          <td>как часто брокер проверяет, что можно удалить. Поэтому новый <code>retention.ms</code> действует
+          не мгновенно</td></tr>
+        <tr><td><code>cleanup.policy</code></td><td><code>delete</code></td><td>что делать со старыми
+          сегментами: удалять (<code>delete</code>) или компактировать (<code>compact</code>)</td></tr>
+      </tbody>
+    </table>
+    <p>Проверено, как изменить срок и увидеть, что значение стало динамическим (перекрывает настройку
+      брокера):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># --add-config retention.ms=60000  хранить записи одну минуту
+docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --alter --entity-type topics --entity-name orders --add-config retention.ms=60000
+# Completed updating config for topic orders.
+
+docker exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --describe --entity-type topics --entity-name orders --all | grep retention.ms
+# retention.ms=60000 ... synonyms={DYNAMIC_TOPIC_CONFIG:retention.ms=60000}</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Retention удаляет сегменты, а не отдельные сообщения</span>
+      <p>Нельзя «оставить» сообщение, которое старше <code>retention.ms</code>: удаляется целый закрытый
+        сегмент, когда его возраст превысил порог. Поэтому реальное время жизни записи — от
+        <code>retention.ms</code> до <code>retention.ms + segment.ms</code>.</p>
+    </div>
+
+    <h2>Компакция: хранить последнее значение на ключ</h2>
+    <p>Второй режим — <code>cleanup.policy=compact</code>. Он не удаляет старые записи по времени, а оставляет
+      в закрытых сегментах <strong>только последнее значение для каждого ключа</strong>. Это превращает топик
+      в «таблицу состояний»: по журналу можно восстановить актуальное значение ключа, прочитав его с
+      начала.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># топик с компакцией; segment.bytes 4096 — чтобы сегменты быстро закрывались на демо-объёме
+# min.cleanable.dirty.ratio 0.01 — разрешить чистить сегмент, как только в нём 1% «мусора»
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --topic state --partitions 1 --replication-factor 1 \
+  --config cleanup.policy=compact --config segment.bytes=4096 \
+  --config min.cleanable.dirty.ratio=0.01
+
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic state
+# Topic: state  TopicId: BGkHNyFPQsuKLIsHfYEF4w  PartitionCount: 1  ReplicationFactor: 1
+#               Configs: cleanup.policy=compact,segment.bytes=4096,min.cleanable.dirty.ratio=0.01</code></pre>
+    </div>
+    <p>Запишем 400 сообщений: пять ключей <code>a0…a4</code>, у каждого 80 версий. Пишем пачками по 40 —
+      так проще не упереться в размер сегмента:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># внешний цикл — 10 пачек, внутренний — 40 сообщений в пачке
+# ключ — a0..a4 (i % 5), значение — версия вида v035
+for r in $(seq 0 9); do
+  for i in $(seq 0 39); do echo "a$((i % 5)):v$r$i"; done | \
+    docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+      --bootstrap-server localhost:9092 --topic state \
+      --property parse.key=true --property key.separator=:
+done
+
+# сколько всего записано
+docker exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic state
+# state:0:400</code></pre>
+    </div>
+    <p>Через полминуты фоновый cleaner отработает. Читаем с начала:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic state --from-beginning --timeout-ms 8000 --property print.key=true --property print.offset=true
+# ...
+# Offset:395  a0  v935
+# Offset:396  a1  v936
+# Offset:397  a2  v937
+# Offset:398  a3  v938
+# Offset:399  a4  v939
+# Processed a total of 125 messages</code></pre>
+    </div>
+    <p>Из 400 записей читается 125: старые версии ключей удалены, актуальные (последние по оффсету) остались.
+      Число не равно пяти, потому что компакция идёт по <em>закрытым</em> сегментам и порциями, а самый
+      последний (активный) сегмент не компактируется вовсе — допишем ещё 40 сообщений, и после следующего
+      прохода читаться будет 165.</p>
+    <div class="box note">
+      <span class="t">Почему consumer печатает <code>TimeoutException</code></span>
+      <p><code>--timeout-ms 8000</code> — это «сколько ждать новых сообщений». Когда журнал дочитан, утилита
+        печатает ошибку таймаута и завершает работу. Это не сбой данных: итог — строка
+        <code>Processed a total of N messages</code>.</p>
+    </div>
+    <p>Удаление ключа в компактированном топике — это запись с тем же ключом и <strong>пустым
+      значением</strong> (tombstone). После компакции такая запись и предыдущие версии ключа исчезают; на
+      уровне приложения это означает «ключ удалён».</p>
+
+    <h2>Сегменты на диске</h2>
+    <p>Журнал партиции — набор файлов; имя файла начинается с оффсета первой записи в нём:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># какого размера партиции топика и где они лежат
+docker exec kafka /opt/kafka/bin/kafka-log-dirs.sh --bootstrap-server localhost:9092 --describe --topic-list orders
+# {"brokers":[{"broker":1,"logDirs":[{"partitions":[
+#   {"partition":"orders-0","size":83,"offsetLag":0,"isFuture":false},
+#   {"partition":"orders-1","size":83,"offsetLag":0,"isFuture":false},
+#   {"partition":"orders-2","size":83,"offsetLag":0,"isFuture":false}],
+#  "error":null,"logDir":"/tmp/kraft-combined-logs"}]}],"version":1}
+
+# файлы компактированного топика state: первый сегмент «сжат» до 492 байт
+docker exec kafka ls -l /tmp/kraft-combined-logs/state-0
+# 00000000000000000000.log   492    &lt;- сегмент с оффсета 0, после компакции
+# 00000000000000000280.log  2284    &lt;- следующий сегмент, начинается с оффсета 280</code></pre>
+    </div>
+    <p><code>offsetLag</code> в ответе <code>kafka-log-dirs.sh</code> — насколько будущие реплики отстают от
+      лидера; на одном брокере всегда 0.</p>
+
+
+    <h2>Мониторинг: lag, репликация, диски</h2>
+    <p>Три вопроса, на которые должна отвечать эксплуатация Kafka: догоняют ли потребители, здоровы ли реплики и
+      хватает ли места.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># 1) отставание групп: LAG = LOG-END-OFFSET - CURRENT-OFFSET (глава 4)
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --describe --group orders-workers
+
+# 2) состояние групп: Empty — участников нет, Stable — читают
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --describe --all-groups --state
+# GROUP           COORDINATOR (ID)   ASSIGNMENT-STRATEGY  STATE   #MEMBERS
+# orders-workers  localhost:9092 (1)                      Empty   0
+
+# 3) партиции, у которых реплики отстали от лидера: пусто — всё синхронно
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --describe --under-replicated-partitions
+# (пусто)
+
+# 4) размер партиций на диске
+docker exec kafka /opt/kafka/bin/kafka-log-dirs.sh --bootstrap-server localhost:9092 \
+  --describe --topic-list orders</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Что смотреть</th><th>Как</th><th>На что реагировать</th></tr></thead>
+      <tbody>
+        <tr><td>Отставание потребителей</td><td><code>LAG</code> в
+          <code>kafka-consumer-groups --describe</code></td><td>монотонный рост lag: потребители не успевают
+          или упали</td></tr>
+        <tr><td>Живость группы</td><td><code>--all-groups --state</code></td><td><code>Empty</code> при
+          непустом топике — никто не читает</td></tr>
+        <tr><td>Репликация</td><td><code>--describe --under-replicated-partitions</code>, колонка
+          <code>Isr</code></td><td>непустой список — реплика отстала или брокер недоступен</td></tr>
+        <tr><td>Диск</td><td><code>kafka-log-dirs.sh</code>, место на узле</td><td>рост быстрее
+          <code>retention</code> — топик хранит больше, чем планировали</td></tr>
+        <tr><td>Публикация</td><td>ошибки <code>ProduceException</code> в приложении</td><td>рост
+          <code>Local: Message timed out</code> — брокер не успевает</td></tr>
+      </tbody>
+    </table>
+    <p>На стороне приложения метрики снимают с клиента: у <code>Confluent.Kafka</code> есть
+      <code>SetStatisticsHandler</code> — librdkafka отдаёт JSON со счётчиками отправки, ошибок и очередей.
+      На стороне брокера — JMX: число сообщений в секунду, размер партиций, число недореплицированных
+      партиций. Lag удобнее брать из CLI или Admin API: он считается по данным кластера, а не клиента, и
+      виден даже когда потребитель лежит.</p>
+
+
+    <h2>Чек-лист перед продакшеном</h2>
+    <ul>
+      <li><strong>Три брокера и <code>replication-factor=3</code></strong>, <code>min.insync.replicas=2</code>:
+        потеря одного узла не теряет подтверждённые записи.</li>
+      <li><strong>Producer: <code>Acks.All</code> + <code>EnableIdempotence</code></strong> (глава 3); повторы
+        не создают дублей.</li>
+      <li><strong>Consumer: <code>EnableAutoCommit=false</code></strong> и коммит после обработки (глава 4);
+        обработчик идемпотентен.</li>
+      <li><strong>Ключ и партиционер согласованы</strong> между всеми клиентами (глава 2), иначе порядок на
+        ключ разваливается.</li>
+      <li><strong>Число партиций спланировано заранее:</strong> увеличивать можно, уменьшать нельзя, а
+        увеличение меняет отображение ключей.</li>
+      <li><strong>Автосоздание топиков выключено</strong> (<code>auto.create.topics.enable=false</code>):
+        случайный топик получит 1 партицию и 1 реплику.</li>
+      <li><strong>Retention и лимиты заданы:</strong> <code>retention.ms</code>,
+        <code>retention.bytes</code>, при необходимости <code>cleanup.policy=compact</code>.</li>
+      <li><strong>Алерты:</strong> рост lag, недореплицированные партиции, свободное место, ошибки
+        producer'а.</li>
+    </ul>
+
+    <div class="box warn">
+      <span class="t">Типичные ошибки</span>
+      <ul>
+        <li><strong>Хранить в Kafka «всё навсегда»</strong> — диск закончится раньше, если retention не
+          настроен по объёму.</li>
+        <li><strong>Ждать глобального порядка</strong> — его нет: порядок только внутри партиции.</li>
+        <li><strong>Разные партиционеры у Java и .NET</strong> — один ключ в двух партициях, порядок потерян
+          без единой ошибки.</li>
+        <li><strong>Автокоммит в consumer</strong> — падение процесса теряет уже «закоммиченную» работу.</li>
+        <li><strong>Один брокер и RF=1 в продакшене</strong> — перезапуск узла останавливает поток и может
+          потерять данные.</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Retention задаёт срок жизни сегментов:</strong> по умолчанию 7 дней
+          (<code>retention.ms=604800000</code>), <code>retention.bytes=-1</code> — без лимита по размеру.</li>
+        <li><strong>Проверка удаления идёт периодически:</strong> <code>log.retention.check.interval.ms</code>
+          = 5 минут, поэтому новый retention срабатывает не мгновенно.</li>
+        <li><strong>Компакция оставляет последнее значение на ключ</strong> и работает по закрытым сегментам:
+          в прогоне из 400 записей читалось 125.</li>
+        <li><strong>Lag — главная метрика:</strong> <code>LOG-END-OFFSET − CURRENT-OFFSET</code>; сумма по
+          партициям показывает отставание группы.</li>
+        <li><strong>Здоровье кластера:</strong> пустой список under-replicated партиций, синхронный
+          <code>Isr</code>, свободное место и отсутствие ошибок публикации.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="kf04-consuming-offsets.html">← <span class="sp">Глава 4. Consumer: группы, оффсеты, коммиты и rebalance</span></a>
+      <a href="docker.html"><span class="sp">Следующая книга: Docker и контейнеры →</span></a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+

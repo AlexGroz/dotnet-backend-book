@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 1 · Зачем Kafka: журнал, партиции и оффсеты</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="kafka.html">← Оглавление</a>
+  <span class="booktitle">Kafka</span>
+  <a href="kf02-topic-partitions.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Kafka · Часть I · Основы</div>
+    <h1>Глава 1. Зачем Kafka: журнал, партиции и оффсеты</h1>
+    <p class="sublead">Сообщение из Kafka не «забирают» — его читают со своего места: чем журнал отличается от
+      очереди и из чего он состоит</p>
+    <p><span class="tag lead">подводящая глава</span></p>
+
+    <h2>Задача: одно событие — много читателей</h2>
+    <p>Очередь (RabbitMQ, книга про AMQP) отвечает на вопрос «кто-то один должен сделать работу». Она хорошо
+      подходит для команд: «списать деньги», «отправить письмо». Но есть другой класс задач — <strong>события</strong>:
+      «заказ создан», «платёж прошёл», «цена изменилась». Такое событие нужно сразу нескольким системам: биллингу,
+      складу, аналитике, поисковому индексу. И каждой из них может понадобиться перечитать события заново —
+      например, чтобы пересчитать витрину после исправления бага.</p>
+    <p>Если строить это на очереди, придётся заводить по копии сообщения на каждого читателя: producer не знает,
+      кто ещё захочет это событие, а после подтверждения сообщение из очереди исчезает. Добавили нового
+      потребителя — он не увидит ни одного события из прошлого.</p>
+    <div class="box tip">
+      <span class="t">Идея Kafka</span>
+      <p>Сообщения не удаляются после чтения. Они складываются в <strong>журнал</strong> (log) и лежат там,
+        пока не истечёт срок хранения. Каждый потребитель хранит не «где сообщение», а <strong>свою
+        позицию</strong> в журнале — и читает с любого места столько раз, сколько нужно.</p>
+    </div>
+
+    <h2>Журнал, а не очередь</h2>
+    <p>Слово «очередь» в Kafka осталось только в названии команды. Семантика другая:</p>
+    <table>
+      <thead><tr><th></th><th>Очередь (RabbitMQ)</th><th>Журнал (Kafka)</th></tr></thead>
+      <tbody>
+        <tr><td>После чтения</td><td>Сообщение подтверждают — и оно удаляется</td>
+          <td>Ничего: запись остаётся в партиции до истечения retention</td></tr>
+        <tr><td>Кто получает</td><td>Одно сообщение — одному потребителю (копия — на каждую очередь)</td>
+          <td>Каждая consumer group читает весь журнал независимо от других</td></tr>
+        <tr><td>Повторное чтение</td><td>Нет: подтверждённое сообщение исчезло</td>
+          <td>Есть: группа может сдвинуть оффсет назад и перечитать</td></tr>
+        <tr><td>Порядок</td><td>В пределах одной очереди</td><td>В пределах одной партиции; между партициями
+          порядка нет</td></tr>
+        <tr><td>«Где я остановился»</td><td>Хранит брокер (доставленные и неподтверждённые)</td>
+          <td>Хранит потребитель: коммит оффсета в служебный топик <code>__consumer_offsets</code></td></tr>
+      </tbody>
+    </table>
+    <p>Отсюда главное практическое следствие: Kafka — это <em>события</em>, которые читают многие и, возможно,
+      несколько раз. Команда «сделай это один раз» лучше ложится на очередь.</p>
+
+    <h2>Из чего состоит Kafka</h2>
+    <ul>
+      <li><strong>Брокер (broker)</strong> — процесс Kafka, который хранит партиции на диске и обслуживает
+        клиентов. Кластер — несколько брокеров (в этой книге — один).</li>
+      <li><strong>Топик (topic)</strong> — именованный поток событий: <code>orders</code>,
+        <code>payments</code>. Топик режут на партиции.</li>
+      <li><strong>Партиция (partition)</strong> — независимый журнал: записи только добавляются в конец, у
+        каждой есть номер. Партиция — единица параллелизма и порядка.</li>
+      <li><strong>Оффсет (offset)</strong> — номер записи внутри партиции: 0, 1, 2, … Он не «тратится» после
+        чтения, а указывает место.</li>
+      <li><strong>Реплики (replicas)</strong> — копии партиции на других брокерах; одна из них лидер,
+        остальные догоняют. Репликация защищает от потери узла (глава 5).</li>
+      <li><strong>Producer</strong> — пишет в конец партиции; какую именно выбрать, решает ключ сообщения
+        (глава 2).</li>
+      <li><strong>Consumer group</strong> — читатели, которые делят партиции между собой: в каждый момент
+        партицию читает один участник группы (глава 4).</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-text">producer ──▶ topic "orders"
+                ├─ partition 0:  [0][1][2][3]   &lt;- оффсеты; записи только добавляются справа
+                ├─ partition 1:  [0][1]
+                └─ partition 2:  [0][1][2]
+
+consumer group "billing":    оффсет 3 в p0, 1 в p1, 2 в p2   &lt;- своя позиция
+consumer group "analytics":  оффсет 0 во всех партициях      &lt;- читает с начала</code></pre>
+    </div>
+    <p>Две группы не мешают друг другу: каждая двигает <em>свои</em> оффсеты. Внутри группы партиции
+      распределяются между участниками — поэтому «больше потребителей, чем партиций» чтение не ускоряет
+      (глава 4).</p>
+
+    <h2>Запуск брокера</h2>
+    <p>Официальный образ Apache Kafka 3.9 работает в режиме <strong>KRaft</strong>: метаданные хранит сам
+      брокер, отдельный ZooKeeper не нужен. Для локальных опытов достаточно одной команды:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># -d — в фоне; --name kafka — имя контейнера для docker exec
+# -p 9092:9092 — порт, на который будут подключаться клиенты с хоста
+docker run -d --name kafka -p 9092:9092 apache/kafka:3.9.1
+
+# готовность: брокер принимает запросы, когда утилита может получить список топиков
+# (на тёплом образе это ~5 секунд; команду можно повторять, пока не ответит)
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+# версия Kafka внутри контейнера
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --version
+# 3.9.1</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Что</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>docker run</code></td><td>создать и запустить контейнер из образа</td></tr>
+        <tr><td><code>-d</code></td><td>работать в фоне, не занимая терминал логами брокера</td></tr>
+        <tr><td><code>--name kafka</code></td><td>имя контейнера — по нему выполняются все следующие
+          <code>docker exec</code></td></tr>
+        <tr><td><code>-p 9092:9092</code></td><td>порт брокера: левое число — на хосте, правое — внутри
+          контейнера. 9092 — порт клиентского протокола Kafka</td></tr>
+        <tr><td><code>apache/kafka:3.9.1</code></td><td>образ и тег: официальная сборка Apache Kafka
+          3.9.1</td></tr>
+        <tr><td><code>kafka-topics.sh</code></td><td>CLI-утилита для работы с топиками; в образе лежит в
+          <code>/opt/kafka/bin/</code></td></tr>
+        <tr><td><code>--bootstrap-server localhost:9092</code></td><td>адрес брокера, через который клиент
+          узнаёт остальных; утилиты ходят тем же протоколом, что и приложение</td></tr>
+        <tr><td><code>--list</code></td><td>показать существующие топики (на пустом кластере — пусто)</td></tr>
+        <tr><td><code>--version</code></td><td>версия Kafka</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Один брокер — только для опытов</span>
+      <p>В контейнере нет тома: остановили и удалили — данные пропали. А <code>replication-factor 1</code>
+        означает единственную копию партиции: потеря брокера — потеря данных. Для продакшена нужны минимум три
+        брокера и фактор репликации 3 (глава 5).</p>
+    </div>
+
+
+    <h2>Первый топик и первые сообщения</h2>
+    <p>Создадим топик из трёх партиций и одной реплики — кластер у нас один:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># --create        создать топик
+# --topic demo    его имя
+# --partitions 3  три независимых журнала внутри топика
+# --replication-factor 1  одна копия каждой партиции (при одном брокере иначе нельзя)
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --topic demo --partitions 3 --replication-factor 1
+# Created topic demo.</code></pre>
+    </div>
+    <p>Посмотрим, что получилось:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># --describe --topic demo  показать топик и каждую его партицию
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic demo
+# Topic: demo  TopicId: lr8veZlzSbOdrNUUlPrMLw  PartitionCount: 3  ReplicationFactor: 1
+#              Configs: segment.bytes=1073741824
+#   Topic: demo  Partition: 0  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:
+#   Topic: demo  Partition: 1  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:
+#   Topic: demo  Partition: 2  Leader: 1  Replicas: 1  Isr: 1  Elr:  LastKnownElr:</code></pre>
+    </div>
+    <p>Три партиции, у каждой лидер (брокер 1), список реплик и синхронных реплик (Isr). Пока реплика одна —
+      всё это один и тот же брокер; в главе 5 столбцы станут разными, когда брокеров будет несколько.</p>
+    <p>Кладём три сообщения с ключами. Консольный producer читает строки со stdin и отправляет их по одной:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># parse.key=true     считать первую часть строки ключом
+# key.separator=:    разделитель ключа и значения в строке (по умолчанию табуляция)
+printf 'k1:a\nk2:b\nk3:c\n' | docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic demo \
+  --property parse.key=true --property key.separator=:</code></pre>
+    </div>
+    <p>Теперь прочитаем с начала и попросим печатать ключ, партицию и оффсет:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># --from-beginning   начать с самого старого доступного оффсета
+# --max-messages 3   выйти после трёх сообщений (иначе утилита ждёт новых)
+# print.key/print.partition/print.offset  что печатать перед значением
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic demo --from-beginning --max-messages 3 \
+  --property print.key=true --property print.partition=true --property print.offset=true
+# Partition:0  Offset:0  k2  b
+# Partition:1  Offset:0  k3  c
+# Partition:2  Offset:0  k1  a
+# Processed a total of 3 messages</code></pre>
+    </div>
+    <p>Обратите внимание: ключи разошлись по разным партициям, и в каждой записи достался оффсет 0 — свои
+      оффсеты у каждой партиции. Ключ <code>k1</code> попал в партицию 2, <code>k2</code> — в 0,
+      <code>k3</code> — в 1: это не порядок отправки, а результат хеширования ключа (глава 2).</p>
+    <p>Теперь главное отличие от очереди — прочитаем <em>ещё раз</em>, новой группой:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic demo --from-beginning --max-messages 3 \
+  --property print.key=true --property print.partition=true --property print.offset=true
+# Partition:0  Offset:0  k2  b
+# Partition:1  Offset:0  k3  c
+# Partition:2  Offset:0  k1  a
+# Processed a total of 3 messages</code></pre>
+    </div>
+    <p>Сообщения на месте: чтение ничего не удалило. Консольная утилита каждый раз создаёт новую consumer
+      group, поэтому начинает с начала — своим оффсетом.</p>
+
+
+    <h2>Оффсеты: где начало и где конец журнала</h2>
+    <p>Утилита <code>kafka-get-offsets.sh</code> показывает границы журнала для каждой партиции:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># --time -2  самый старый доступный оффсет (earliest)
+docker exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic demo --time -2
+# demo:0:0
+# demo:1:0
+# demo:2:0
+
+# без --time (то же, что --time -1)  следующий оффсет, куда запишется новое сообщение (latest)
+docker exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic demo
+# demo:0:1
+# demo:1:1
+# demo:2:1</code></pre>
+    </div>
+    <p>Формат ответа — <code>топик:партиция:оффсет</code>. Разница между latest и earliest — сколько записей
+      сейчас лежит в партиции; здесь по одной. Новое сообщение получит оффсет 1, и latest станет 2.</p>
+    <p>Флаги и свойства, которые встретились в главе:</p>
+    <table>
+      <thead><tr><th>Флаг</th><th>Что означает</th></tr></thead>
+      <tbody>
+        <tr><td><code>--bootstrap-server</code></td><td>адрес брокера-точки входа; через него клиент получает
+          метаданные и находит остальных</td></tr>
+        <tr><td><code>--topic demo</code></td><td>имя топика, с которым работаем</td></tr>
+        <tr><td><code>--create</code> / <code>--describe</code> / <code>--delete</code></td><td>создать /
+          показать / удалить топик</td></tr>
+        <tr><td><code>--partitions 3</code></td><td>сколько партиций создать; позже можно только
+          увеличивать</td></tr>
+        <tr><td><code>--replication-factor 1</code></td><td>сколько копий каждой партиции хранить</td></tr>
+        <tr><td><code>parse.key</code>, <code>key.separator</code></td><td>свойства консольного producer:
+          как разбирать строку на ключ и значение</td></tr>
+        <tr><td><code>print.key</code>, <code>print.partition</code>, <code>print.offset</code></td>
+          <td>свойства консольного consumer: что печатать вместе со значением</td></tr>
+        <tr><td><code>--from-beginning</code></td><td>начать с earliest, а не с latest</td></tr>
+        <tr><td><code>--max-messages N</code></td><td>остановиться после N сообщений</td></tr>
+        <tr><td><code>--time -2</code> / <code>-1</code></td><td>оффсет earliest / latest для
+          <code>kafka-get-offsets.sh</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>Что мы увидели</h2>
+    <ul>
+      <li><strong>Запись осталась после чтения.</strong> Второй consumer прочитал те же три сообщения: журнал
+        не «отдаёт» их, а позволяет читать с любого оффсета.</li>
+      <li><strong>Оффсеты у каждой партиции свои.</strong> Три сообщения получили оффсет 0 в трёх разных
+        партициях — это нормально.</li>
+      <li><strong>Ключ определяет партицию.</strong> <code>k1</code>, <code>k2</code>, <code>k3</code>
+        разошлись по партициям 2, 0 и 1 — по хешу, а не по порядку (глава 2).</li>
+      <li><strong>Порядок гарантирован только внутри партиции.</strong> Между партициями общего порядка нет —
+        поэтому и говорят «порядок на ключ», а не «порядок в топике».</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить из главы</span>
+      <ul>
+        <li><strong>Kafka — распределённый журнал, а не очередь:</strong> сообщения хранятся после чтения, пока
+          действует retention.</li>
+        <li><strong>Топик = набор партиций.</strong> Партиция — единица параллелизма и порядка; оффсет — номер
+          записи внутри партиции.</li>
+        <li><strong>Каждая consumer group читает независимо</strong> и хранит свою позицию (коммит оффсета), а
+          не «забирает» сообщения у других.</li>
+        <li><strong>Порядок — только внутри партиции.</strong> Ключ сообщения определяет, в какую партицию оно
+          попадёт, и тем самым — по какому «потоку» сохранится порядок.</li>
+        <li><strong>Клиент и CLI говорят одним протоколом:</strong> <code>--bootstrap-server</code> — та же
+          точка входа, что <code>BootstrapServers</code> в .NET.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="kafka.html">← <span class="sp">Оглавление</span></a>
+      <a href="kf02-topic-partitions.html"><span class="sp">Глава 2. Топики и партиции: где лежит сообщение и почему порядок не глобальный</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
