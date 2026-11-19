@@ -152,8 +152,8 @@ ImplementationType: ReportService': Cannot consume scoped service 'AppDbContext'
       <p>Проверено на .NET 8: с тем же кодом приложение в <code>Development</code>
         <strong>падает на старте</strong> (сообщение выше), а в <code>Production</code>
         <strong>стартует нормально</strong> — captive создаётся молча. Ошибка вылезает позже, когда два
-        запроса одновременно работают с одним и тем же <code>DbContext</code> (два параллельных
-        <code>GET /report</code> на боевом окружении):</p>
+        запроса одновременно работают с одним и тем же <code>DbContext</code> (проверено в
+        <code>Production</code>: два параллельных <code>GET /report</code>):</p>
       <pre><code class="language-text">req1: 500   req2: 200
 
 System.InvalidOperationException: An attempt was made to use the context instance
