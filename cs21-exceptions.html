@@ -70,7 +70,7 @@ finally
         идут раньше общего — иначе общий «съест» всё.</li>
       <li><strong><code>finally</code> выполняется всегда</strong>, в том числе при <code>return</code> внутри
         <code>try</code>. Для ресурсов предпочтительнее <code>using</code>/<code>await using</code> — это тот же
-        <code>finally</code>, только короче.</li>
+        <code>finally</code>, только короче (подробно — глава 23).</li>
       <li><strong><code>throw;</code> против <code>throw ex;</code></strong>: <code>throw ex;</code> обнуляет
         стек и вы теряете место, где ошибка случилась. Внутри <code>catch</code> — только
         <code>throw;</code>.</li>

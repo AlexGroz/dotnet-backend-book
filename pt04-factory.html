@@ -19,9 +19,60 @@
   <div class="chapter">
     <div class="part">Паттерны · Часть II · Шесть паттернов на каждый день</div>
     <h1>Глава 4. Фабрика: почему <code>new HttpClient()</code> — ловушка</h1>
-    <p class="sublead">Фабрика нужна не для красоты, а чтобы спрятать <em>создание</em> и <em>время жизни</em>
-      объектов. В .NET это видно на двух классических авариях.</p>
+    <p class="sublead">«Спрятать создание и время жизни» — это два конкретных решения, которые потребитель
+      перестаёт принимать сам: <em>что именно</em> создать и <em>как долго</em> объект живёт. В .NET цена
+      ошибки в каждом из них видна на двух классических авариях.</p>
     <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что значит «создание» и «время жизни»</h2>
+    <p>Оба слова звучат абстрактно, пока не разложить их на вопросы, которые код задаёт себе при каждом
+      использовании объекта.</p>
+    <table>
+      <thead><tr><th>Создание</th><th>Время жизни</th></tr></thead>
+      <tbody>
+        <tr><td>Какой <strong>тип</strong> создать (<code>EmailNote</code> или <code>SmsNote</code>?)</td>
+          <td><strong>Сколько</strong> объектов нужно: на каждый вызов, на запрос, один на процесс?</td></tr>
+        <tr><td>С какими <strong>параметрами</strong> (адрес, таймаут, строка подключения, флаги)?</td>
+          <td><strong>Кто освобождает</strong> ресурс и когда (<code>Dispose</code>, возврат в пул)?</td></tr>
+        <tr><td>Какие <strong>зависимости</strong> передать в конструктор?</td>
+          <td><strong>Кто переиспользует</strong> объект и можно ли его вообще переиспользовать?</td></tr>
+        <tr><td>Что делать, если создать нельзя (неизвестный тип, нет настройки)?</td>
+          <td>Что будет, если объектов станет больше лимита (сокеты, соединения, память)?</td></tr>
+      </tbody>
+    </table>
+    <p><strong>«Спрятать»</strong> значит, что эти решения принимаются <em>не в месте использования</em>.
+      Потребителю не нужно знать ни класс, ни параметры, ни то, когда вызывать <code>Dispose</code>: он
+      просит «дай мне <code>INotification</code>» или «дай мне клиента для платежей», а фабрика отвечает
+      за всё остальное.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ решение о создании размазано по коду: три места — три одинаковых new
+var mail1 = new SmtpClient("smtp.example.com", 587);    // адрес и порт знает каждый вызывающий
+var mail2 = new SmtpClient("smtp.example.com", 587);
+var client = new HttpClient();                          // и ещё одно решение — «живёт один вызов»
+
+// ✔ решение принято один раз, в фабрике; потребитель видит только контракт
+INotification note = NotificationFactory.Create("email");
+using var http = _httpClientFactory.CreateClient("payments");</code></pre>
+    </div>
+    <p>Зачем прятать — четыре причины, и каждая проверяема на практике:</p>
+    <ol>
+      <li><strong>Одно место изменения.</strong> Сменился адрес платёжного сервиса, таймаут или тип
+        уведомления — правится одна регистрация, а не двадцать вызовов <code>new</code>.</li>
+      <li><strong>Нельзя забыть про ресурс.</strong> Если создание спрятано, вызывающий код физически не
+        может «забыть <code>Dispose</code>» или создать <code>HttpClient</code> на каждый вызов: политика
+        освобождения живёт там же, где создание.</li>
+      <li><strong>Тесты.</strong> Подменить реализацию можно в одном месте (в контейнере), не трогая
+        потребителей.</li>
+      <li><strong>Политика и лимиты.</strong> Пул соединений, максимальное число сокетов, повторные
+        попытки, таймауты — это свойства <em>создания</em>, и настраивать их надо централизованно.</li>
+    </ol>
+    <div class="box note">
+      <span class="t">Почему в .NET это особенно заметно</span>
+      <p>Здесь есть объекты, у которых «создание» и «время жизни» стоят денег: <code>HttpClient</code>
+        держит сокет, <code>DbContext</code> — соединение и ChangeTracker, <code>ILoggerFactory</code> —
+        подписки на провайдеры. Ошибка в любом из двух решений проявляется не сразу, а под нагрузкой:
+        исчерпанные порты, «второй запрос на том же контексте», утечка памяти.</p>
+    </div>
 
     <h2>Разминка: идея на десяти строках</h2>
     <p>Задача: в разных местах нужно уведомление, но создаётся оно по-разному. Фабрика — это «кто-то, кто знает,
@@ -96,6 +147,52 @@ public sealed class PaymentClient(IHttpClientFactory factory)  // 4) фабри�
 }</code></pre>
     </div>
     <div class="box note">
+      <span class="t">Что такое «ретраи» и «circuit breaker» в строке 3</span>
+      <p><code>AddStandardResilienceHandler()</code> добавляет к клиенту готовый набор политик
+        (пакет <code>Microsoft.Extensions.Http.Resilience</code>, .NET 8). Две из них — самые важные:</p>
+      <ul>
+        <li><strong>Ретрай (retry, повтор)</strong> — если вызов упал <em>временно</em> (таймаут,
+          обрыв соединения, ответ <code>5xx</code>), тот же запрос повторяется ещё несколько раз с паузой.
+          «Временно» — ключевое слово: <code>4xx</code> повторять бессмысленно (запрос неверен), а
+          <code>POST</code>, который создаёт платёж, — опасно (можно создать дважды), поэтому повторяют
+          только идемпотентные операции или с ключом идемпотентности. Пауза растёт экспоненциально плюс
+          случайная добавка (<em>jitter</em>), чтобы клиенты не били по серверу одновременно.</li>
+        <li><strong>Предохранитель (circuit breaker)</strong> — счётчик неудач с окном. Когда доля ошибок
+          превышает порог (и запросов было достаточно), «пробка выбивает»: все вызовы <em>сразу</em>
+          падают, не доходя до сервиса. Через заданное время предохранитель пропускает один пробный запрос
+          (<em>half-open</em>): успех — цепь закрывается, ошибка — снова открывается. Смысл: не тратить
+          свои потоки и таймауты на зависимость, которая и так лежит, и дать ей время восстановиться.</li>
+      </ul>
+      <p>Значения по умолчанию у стандартного пайплайна (получены из
+        <code>new HttpStandardResilienceOptions()</code>, .NET 8):</p>
+      <table>
+        <thead><tr><th>Параметр</th><th>Значение</th><th>Что значит</th></tr></thead>
+        <tbody>
+          <tr><td><code>Retry.MaxRetryAttempts</code></td><td>3</td><td>до трёх повторов после первой попытки</td></tr>
+          <tr><td><code>Retry.BackoffType</code> / <code>UseJitter</code></td><td><code>Exponential</code> / <code>true</code></td><td>пауза растёт, плюс случайный разброс</td></tr>
+          <tr><td><code>Retry.Delay</code></td><td>2 с</td><td>базовая пауза перед повтором</td></tr>
+          <tr><td><code>AttemptTimeout</code></td><td>10 с</td><td>таймаут одной попытки</td></tr>
+          <tr><td><code>TotalRequestTimeout</code></td><td>30 с</td><td>таймаут на все попытки вместе</td></tr>
+          <tr><td><code>CircuitBreaker.FailureRatio</code></td><td>0.1</td><td>10 % ошибок в окне открывают цепь</td></tr>
+          <tr><td><code>CircuitBreaker.MinimumThroughput</code></td><td>100</td><td>минимум запросов в окне, иначе статистика недостоверна</td></tr>
+          <tr><td><code>CircuitBreaker.SamplingDuration</code> / <code>BreakDuration</code></td><td>30 с / 5 с</td><td>окно подсчёта / сколько цепь остаётся открытой</td></tr>
+        </tbody>
+      </table>
+      <p>Проверено на локальном сервере (в демонстрации <code>MaxRetryAttempts = 1</code> и
+        <code>MinimumThroughput = 2</code> — с настройками по умолчанию ждать пришлось бы дольше):
+        эндпоинт отвечал <code>503</code> два раза, потом <code>200</code> — клиент сделал три запроса и
+        вернул <code>200</code> за 536 мс (паузы между повторами). Второй эндпоинт отвечал <code>500</code>
+        всегда; после двух запросов к нему (первый вызов: попытка + ретрай) предохранитель открылся, и
+        следующие вызовы падали мгновенно, <strong>не доходя до сервера</strong>:</p>
+      <pre><code class="language-text">1) /flaky -> 200 за 536 мс (ретраи внутри)      ← сервер получил 3 запроса
+2) /fail: три вызова подряд
+   вызов 1: 500 за 149 мс                       ← 2 запроса к серверу (1 попытка + 1 ретрай)
+   вызов 2: BrokenCircuitException за 3 мс: The circuit is now open and is not allowing calls.
+   вызов 3: BrokenCircuitException за 0 мс: The circuit is now open and is not allowing calls.</code></pre>
+      <p>Подробно политики, таймауты и метрики разобраны в главе 27 «Устойчивость внешних вызовов».</p>
+    </div>
+
+    <div class="box note">
       <span class="t">Что происходит по шагам</span>
       <ul>
         <li><strong>5)</strong> <code>CreateClient</code> не создаёт новый сокет: он берёт общий
@@ -103,6 +200,65 @@ public sealed class PaymentClient(IHttpClientFactory factory)  // 4) фабри�
         <li><strong>После вызова</strong> <code>using</code> освобождает именно <code>HttpClient</code>, а
           соединение возвращается в пул — <code>TIME_WAIT</code> больше не накапливается.</li>
         <li><strong>Настройки</strong> (адрес, таймаут, ретраи) заданы в одном месте — в шаге 1.</li>
+      </ul>
+    </div>
+
+    <h3>Откуда взялся <code>IHttpClientFactory</code></h3>
+    <p>Резонный вопрос: это интерфейс, но кто его реализует и когда появляется объект? Ответ: его регистрирует
+      <strong>сам <code>AddHttpClient()</code></strong> — вы не пишете ни класс, ни регистрацию фабрики.
+      Проверено на пустом <code>ServiceCollection</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">после AddHttpClient() в контейнере:
+   IHttpClientFactory   Lifetime=Singleton   Impl=(factory)
+   HttpClient           Lifetime=Transient   Impl=(factory)
+
+GetRequiredService&lt;IHttpClientFactory&gt;() -&gt; Microsoft.Extensions.Http.DefaultHttpClientFactory
+AddHttpClient&lt;PaymentClient&gt;()             -&gt; PaymentClient Lifetime=Transient
+без AddHttpClient()                       -&gt; InvalidOperationException:
+   No service for type 'System.Net.Http.IHttpClientFactory' has been registered.</code></pre>
+    </div>
+    <p>То есть последовательность такая:</p>
+    <ol>
+      <li>В <code>Program.cs</code> вызывается <code>AddHttpClient()</code> (без имени — только фабрика,
+        либо с именем — фабрика + описание клиента, либо с типом — фабрика + типизированный клиент).</li>
+      <li>Метод кладёт в DI-контейнер <code>IHttpClientFactory</code> (Singleton) и <code>HttpClient</code>
+        (Transient). Реализация — <code>DefaultHttpClientFactory</code> из
+        <code>Microsoft.Extensions.Http</code> (входит в ASP.NET Core, отдельный пакет нужен только
+        консольным приложениям).</li>
+      <li>Дальше фабрика внедряется как любой сервис: <code>PaymentClient(IHttpClientFactory factory)</code>.
+        «Внедрить» её можно только после шага 1 — порядок регистраций в <code>Program.cs</code> при этом
+        не важен, важен сам факт вызова до <code>Build()</code>.</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// шаг 1: имя + настройки. Имя — это ключ, по которому потом выдадут клиента
+builder.Services.AddHttpClient("payments", c =&gt;
+{
+    c.BaseAddress = new Uri("https://payments.example.com");
+    c.Timeout = TimeSpan.FromSeconds(5);
+});
+
+// шаг 3: фабрика пришла из контейнера, имя — то же самое
+public sealed class PaymentClient(IHttpClientFactory factory)
+{
+    public Task&lt;HttpResponseMessage&gt; GetAsync(Guid id, CancellationToken ct)
+    {
+        using var client = factory.CreateClient("payments");   // BaseAddress уже настроен
+        return client.GetAsync($"/payments/{id}", ct);
+    }
+}</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Что важно знать про имена</span>
+      <ul>
+        <li><strong>Имя — обычная строка.</strong> Опечатались в <code>CreateClient("payment")</code> —
+          получите клиента <em>без</em> настроек: <code>BaseAddress = null</code>, без таймаута из
+          регистрации. Исключения не будет (проверено), ошибка вылезет позже — на относительном URL.</li>
+        <li><strong>Типизированный клиент короче:</strong> <code>AddHttpClient&lt;PaymentClient&gt;()</code>
+          регистрирует <code>PaymentClient</code> как Transient и сам передаёт ему настроенный
+          <code>HttpClient</code> — тогда <code>IHttpClientFactory</code> в конструкторе не нужен.</li>
+        <li><strong>Пул общий.</strong> Все клиенты с одним именем используют один и тот же пул
+          <em>handlers</em>, поэтому <code>using</code> вокруг <code>CreateClient</code> освобождает только
+          лёгкую обёртку, а не соединения (глава 27 «Устойчивость внешних вызовов»).</li>
       </ul>
     </div>
 
@@ -144,6 +300,28 @@ public sealed class OutboxWorker(IDbContextFactory&lt;AppDbContext&gt; factory) 
 }</code></pre>
     </div>
 
+    <div class="box tip">
+      <span class="t">Где именно заканчивается <code>await using var db</code></span>
+      <p>В коде выше <code>await using var db = ...</code> стоит в начале тела <code>while</code>, поэтому
+        контекст освобождается <strong>в конце тела цикла</strong> — то есть после
+        <code>await Task.Delay(1000, ct)</code>, а не сразу после <code>SaveChangesAsync</code>. Проверено
+        на эквивалентном коде с метками времени: <code>Dispose</code> случился через 100 мс сна, а не в
+        момент объявления.</p>
+      <p>Если контекст должен жить только работу, сузьте область — скобками:</p>
+      <pre><code class="language-csharp">while (!ct.IsCancellationRequested)
+{
+    await using (var db = await factory.CreateDbContextAsync(ct))
+    {
+        var batch = await db.Outbox.Where(x =&gt; x.Status == "new").Take(100).ToListAsync(ct);
+        …
+        await db.SaveChangesAsync(ct);
+    }                                        // ← контекст освобождён здесь
+    await Task.Delay(TimeSpan.FromSeconds(1), ct);   // пауза уже без контекста
+}</code></pre>
+      <p>Подробно про область жизни <code>using var</code>, порядок <code>Dispose</code> и
+        <code>await using</code> — в C#-книге, глава 23.</p>
+    </div>
+
     <div class="box note">
       <span class="t">Почему это не «scoped внутри singleton»</span>
       <p>Резонный вопрос: воркер — singleton, а <code>AppDbContext</code> — scoped. Не то же ли это самое
@@ -159,14 +337,93 @@ public sealed class OutboxWorker(IDbContextFactory&lt;AppDbContext&gt; factory) 
           экземпляр, а <code>await using</code> его освобождает (шаги 3–4 в коде). В поле воркера лежит
           только фабрика — ни одного scoped-объекта.</li>
       </ul>
-      <p>То же для любого другого scoped-сервиса в фоне — общий способ через scope:</p>
-      <pre><code class="language-csharp">// на одну единицу работы — свой scope, внутри — scoped-сервисы
-using var scope = _scopeFactory.CreateScope();               // IServiceScopeFactory — singleton
-var repo = scope.ServiceProvider.GetRequiredService&lt;IOrdersRepository&gt;();
-await repo.DoWorkAsync(ct);                                  // scope закроется на выходе из using</code></pre>
     </div>
 
-    <h2>Три вида фабрик — и в чём разница</h2>
+    <h3>Если scoped-сервис — не <code>DbContext</code>: scope</h3>
+    <p>«То же» — это <strong>та же проблема</strong>: singleton (фоновый воркер) хочет работать с сервисом,
+      зарегистрированным как Scoped. Для <code>DbContext</code> есть отдельная фабрика
+      <code>IDbContextFactory&lt;T&gt;</code>, а для <em>любого другого</em> scoped-сервиса (репозиторий,
+      Unit of Work, сервис с состоянием запроса) универсальный способ — создать scope вручную.
+      Пример: <code>IOrdersRepository</code> зарегистрирован как Scoped.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddScoped&lt;IOrdersRepository, OrdersRepository&gt;();
+
+public sealed class PollingWorker(IServiceScopeFactory scopeFactory) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            using (var scope = scopeFactory.CreateScope())          // 1) граница владения
+            {
+                var repo = scope.ServiceProvider                     // 2) scoped из ЭТОГО scope
+                    .GetRequiredService&lt;IOrdersRepository&gt;();
+
+                await repo.DoWorkAsync(ct);                          // 3) работа
+            }                                                        // 4) Dispose(scope) здесь
+
+            await Task.Delay(1000, ct);                              // пауза уже без scope
+        }
+    }
+}</code></pre>
+    </div>
+    <p>По шагам:</p>
+    <ol>
+      <li><strong><code>CreateScope()</code></strong> создаёт не сервис, а <em>границу владения</em>: у scope
+        свой <code>ServiceProvider</code> и свой набор scoped-экземпляров.</li>
+      <li><strong>Резолв внутри scope</strong> отдаёт объект, принадлежащий именно этому scope. Два разных
+        scope — два разных экземпляра (проверено: «два scope → два экземпляра: True»).</li>
+      <li><strong>Работа</strong> — всё, что должно жить в одной единице работы.</li>
+      <li><strong>Конец блока</strong> — <code>Dispose</code> scope; контейнер сам вызовет <code>Dispose</code>
+        у всех scoped-сервисов, созданных внутри (проверено: два scope — «освобождено 2»). Ручной
+        <code>using</code> на самом репозитории не нужен: владелец — контейнер, а второй <code>Dispose</code>
+        (пусть обычно и безвредный) означает, что владение определено неверно.</li>
+    </ol>
+    <p>Чего этот способ <strong>не делает</strong>:</p>
+    <ul>
+      <li>не превращает репозиторий в singleton и не делит его между итерациями — каждая итерация получает
+        свежий экземпляр;</li>
+      <li>не отменяет правило «долгоживущий не зависит от короткоживущего»: в поле воркера лежит только
+        фабрика scope, а не scoped-объект;</li>
+      <li>не делает транзакцию на несколько итераций: scope — это время жизни объектов, а не транзакция;</li>
+      <li>не освобождает объекты, созданные вами вручную вне scope, и не защищает от конкурентности:
+        <code>DbContext</code> и большинство scoped-сервисов не потокобезопасны, поэтому один scope — одна
+        последовательная единица работы.</li>
+    </ul>
+    <table>
+      <thead><tr><th></th><th><code>IDbContextFactory&lt;T&gt;</code></th><th><code>IServiceScopeFactory</code></th></tr></thead>
+      <tbody>
+        <tr><td>Что создаёт</td><td>сразу <code>DbContext</code></td><td>scope — набор scoped-сервисов</td></tr>
+        <tr><td>Что внедряется в singleton</td><td>фабрику контекста (Singleton)</td>
+          <td>фабрику scope (тоже Singleton)</td></tr>
+        <tr><td>Как освобождать</td><td><code>await using</code> контекста</td><td><code>Dispose</code>/<code>DisposeAsync</code> scope</td></tr>
+        <tr><td>Когда брать</td><td>нужен только <code>DbContext</code></td>
+          <td>любой scoped-сервис, несколько сервисов сразу, Unit of Work</td></tr>
+        <tr><td>Цена</td><td>короче, оптимизировано для EF</td><td>универсально, но больше кода</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Два практических нюанса</span>
+      <ul>
+        <li><strong><code>CreateScope()</code> против <code>CreateAsyncScope()</code>.</strong> Если среди
+          scoped-сервисов есть реализующий только <code>IAsyncDisposable</code>, обычный
+          <code>CreateScope()</code> при закрытии упадёт:
+          <code>InvalidOperationException: 'AsyncThing' type only implements IAsyncDisposable. Use DisposeAsync
+          to dispose the container.</code> Тогда — <code>await using var scope = factory.CreateAsyncScope();</code>
+          (проверено: работает).</li>
+        <li><strong>Не храните scope в поле.</strong> Он живёт ровно одну единицу работы; повторное
+          использование того же scope между операциями — это тот же captive dependency, только
+          замаскированный.</li>
+      </ul>
+    </div>
+
+    <h2>Четыре вида фабрик — и в чём разница</h2>
+    <p>В таблице ниже <strong>четыре строки</strong>, и это не «четыре паттерна GoF». Два из них —
+      действительно паттерны из книги «Банды четырёх» (<em>Factory Method</em> и <em>Abstract Factory</em>);
+      «простая фабрика» — распространённая идиома, которой в GoF нет; «фабрика как сервис DI» — вообще
+      механизм платформы, а не паттерн. В одной таблице они стоят потому, что отвечают на один и тот же
+      вопрос («кто решает, что создать и как долго это живёт»), но <strong>разными механизмами</strong>.
+      Поэтому дальше — по строке на каждый, с кодом и тем, что происходит под капотом.</p>
     <table>
       <thead><tr><th>Вид</th><th>Суть</th><th>Пример в .NET</th></tr></thead>
       <tbody>
@@ -176,6 +433,62 @@ await repo.DoWorkAsync(ct);                                  // scope закро
         <tr><td><strong>Фабрика как сервис DI</strong></td><td>Контейнер сам управляет созданием и временем жизни</td><td><code>IServiceProvider</code>, <code>AddHttpClient</code>, <code>AddDbContextFactory</code></td></tr>
       </tbody>
     </table>
+    <h3>1. Простая фабрика: один метод со <code>switch</code></h3>
+    <p>Это то, с чего начиналась глава (<code>NotificationFactory.Create(channel)</code>). Под капотом —
+      обычный статический метод: решение принимается <em>здесь и сейчас</em>, по значению параметра;
+      наследников нет, переопределить нечего. Меняется набор типов — правится один <code>switch</code>.
+      Это идиома, а не паттерн GoF: у неё нет ни полиморфизма, ни инверсии управления.</p>
+
+    <h3>2. Фабричный метод: решение принимает наследник</h3>
+    <p>Здесь создание вынесено в <strong>виртуальный метод</strong> базового класса, а конкретный тип
+      выбирает наследник. Базовая логика при этом общая (типы <code>Report</code> и <code>IWriter</code> —
+      условные, важен только контракт):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public abstract class ReportExporter
+{
+    protected abstract IWriter CreateWriter();      // ← фабричный метод: решает наследник
+
+    public void Export(Report report)               // общий алгоритм для всех наследников
+    {
+        using var writer = CreateWriter();
+        writer.Write(report);
+    }
+}
+
+public sealed class CsvExporter : ReportExporter
+{
+    protected override IWriter CreateWriter() =&gt; new CsvWriter();
+}</code></pre>
+    </div>
+    <p>Под капотом — <em>виртуальный вызов</em>: <code>Export</code> не знает, какой писатель появится, но
+      контракт гарантирует, что он будет. В .NET этот приём встречается в обёртке над «создать по
+      интерфейсу»: <code>ILoggerFactory.CreateLogger(string)</code> возвращает <code>ILogger</code>
+      (проверено: тип возврата — <code>ILogger</code>), а какая реализация логгера получится, решает
+      конкретная фабрика.</p>
+
+    <h3>3. Абстрактная фабрика: семейство согласованных объектов</h3>
+    <p>Отличие от фабричного метода: создаётся не один объект, а <strong>набор объектов одного
+      семейства</strong>, которые должны подходить друг другу. Классический пример в .NET —
+      <code>DbProviderFactory</code>: одна фабрика для конкретной СУБД создаёт соединение, команду,
+      параметр, адаптер и построитель строки подключения. Проверено рефлексией, что она создаёт именно
+      семейство:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">DbProviderFactory создаёт: CreateBatch, CreateBatchCommand, CreateCommand,
+CreateCommandBuilder, CreateConnection, CreateConnectionStringBuilder,
+CreateDataAdapter, CreateDataSource, CreateDataSourceEnumerator, CreateParameter</code></pre>
+    </div>
+    <p>Смысл: нельзя случайно смешать <code>SqlConnection</code> с <code>NpgsqlCommand</code> — все объекты
+      приходят из одного семейства и гарантированно совместимы.</p>
+
+    <h3>4. Фабрика как сервис DI: создание и время жизни — у контейнера</h3>
+    <p>Это уже не паттерн, а механизм: контейнер сам решает, когда создать объект и сколько он живёт.
+      Фабрика здесь — <em>объект, который умеет выдать сервис</em>, и его регистрирует платформа.
+      Проверено: <code>AddHttpClient()</code> кладёт <code>IHttpClientFactory</code> как Singleton, а
+      реализация — <code>Microsoft.Extensions.Http.DefaultHttpClientFactory</code>; типизированный клиент
+      регистрируется как Transient. Разница с первыми тремя: там вы вызываете метод и получаете объект
+      <em>сейчас</em>, а здесь вы просите «дай мне <code>IHttpClientFactory</code>» — и контейнер решает,
+      что вернуть, создать ли новый экземпляр и когда его освободить.</p>
+
     <div class="box note">
       <span class="t">Важное следствие для .NET</span>
       <p>В приложении с DI <strong>контейнер уже является фабрикой</strong>. Поэтому «своя» фабрика нужна не

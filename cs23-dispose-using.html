@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 23 · using, await using и IDisposable: кто освобождает ресурсы</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="csharp.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы, делегаты и асинхронность</div>
+    <h1>Глава 23. using, await using и IDisposable: кто освобождает ресурсы</h1>
+    <p class="sublead">Где именно заканчивается жизнь объекта, объявленного через <code>using var</code>,
+      чем это отличается от <code>using (...)</code> со скобками, почему <code>await using</code> — отдельная
+      конструкция и как всё это связано с DI-scope. Поведение проверено запусками на .NET 8.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Зачем вообще что-то освобождать</h2>
+    <p>Сборщик мусора освобождает <strong>управляемую память</strong>: объекты в куче. Но многие ресурсы
+      живут <em>вне</em> кучи и GC о них ничего не знает:</p>
+    <ul>
+      <li>TCP-сокет и файловый дескриптор (открытый файл, соединение с БД);</li>
+      <li>аренда места в пуле (соединение, взятое у пула, надо вернуть);</li>
+      <li>блокировка или мьютекс (её надо отпустить, иначе ждут остальные);</li>
+      <li>нативная память, выделенная в C-библиотеке.</li>
+    </ul>
+    <p>Если такой ресурс не освободить, GC рано или поздно соберёт объект-обёртку, но дескриптор может
+      остаться занятым до финализатора, а финализатор работает <em>когда-нибудь</em>. Для сокетов это
+      означает исчерпанные порты, для БД — исчерпанный пул соединений. Поэтому у ресурса есть явный
+      контракт: <code>IDisposable.Dispose()</code> (или <code>IAsyncDisposable.DisposeAsync()</code>),
+      а у языка — две конструкции, которые его гарантированно вызывают: <code>using</code> и
+      <code>await using</code>.</p>
+    <div class="box note">
+      <span class="t">Dispose — это не «удалить объект»</span>
+      <p>После <code>Dispose()</code> объект остаётся в памяти (и GC его соберёт когда захочет). Dispose
+        освобождает <em>ресурс</em>: закрывает файл, возвращает соединение в пул, отпускает блокировку.
+        Поэтому «вызвать Dispose» и «обнулить ссылку» — разные действия.</p>
+    </div>
+
+    <h2><code>using (...)</code>: блок, который гарантирует Dispose</h2>
+    <p>Классическая форма — инструкция со скобками. Компилятор разворачивает её в
+      <code>try/finally</code>, поэтому <code>Dispose</code> выполнится и при исключении:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using (var file = File.OpenRead(path))     // Dispose вызовется на закрывающей скобке
+{
+    var buffer = new byte[1024];
+    file.Read(buffer);
+}   // ← здесь file.Dispose(), даже если внутри было исключение
+
+// во что это превращается:
+var file2 = File.OpenRead(path);
+try
+{
+    var buffer = new byte[1024];
+    file2.Read(buffer);
+}
+finally
+{
+    file2?.Dispose();
+}</code></pre>
+    </div>
+    <p>Проверим, <em>когда</em> именно вызывается <code>Dispose</code> — с метками времени:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using (new Probe("braces", sw))
+{
+    Console.WriteLine($"[{sw.ElapsedMilliseconds,3} мс] внутри скобок");
+    Thread.Sleep(50);
+}
+Console.WriteLine($"[{sw.ElapsedMilliseconds,3} мс] после скобок");</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">[  0 мс] старт
+[ 10 мс] внутри скобок
+[ 60 мс] Dispose(braces)
+[ 60 мс] после скобок</code></pre>
+    </div>
+    <h2><code>using var</code>: объявление без скобок</h2>
+    <p>Та же гарантия, но записанная иначе: <code>using var x = ...;</code> — это <strong>using-объявление</strong>
+      (<em>using declaration</em>). Ключевое отличие от скобок одно: ресурс живёт <strong>до конца
+      текущего блока</strong> — того <code>{ }</code>, внутри которого стоит объявление. Не до конца строки и
+      не до конца метода обязательно: до конца именно этого блока.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static void WithDeclaration(Stopwatch sw)
+{
+    using var p = new Probe("declaration", sw);      // объявили здесь
+    Console.WriteLine($"[{sw.ElapsedMilliseconds,3} мс] внутри метода");
+    Thread.Sleep(50);
+    Console.WriteLine($"[{sw.ElapsedMilliseconds,3} мс] метод заканчивается");
+}   // ← Dispose(p) только здесь</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">[ 61 мс] внутри метода
+[111 мс] метод заканчивается
+[111 мс] Dispose(declaration)          ← через 50 мс после объявления, в конце блока
+[111 мс] после вызова метода с using var</code></pre>
+    </div>
+    <p>То есть <code>using var</code> — это «объявил и забыл»: компилятор сам оборачивает <em>остаток
+      блока</em> в <code>try/finally</code>. Отсюда три следствия, которые чаще всего и удивляют.</p>
+
+    <h3>1. Порядок Dispose — обратный порядку объявления</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">void Run()
+{
+    using var a = new Probe("a");
+    using var b = new Probe("b");
+}   // сначала b, потом a</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">порядок Dispose: Dispose(b), Dispose(a)</code></pre>
+    </div>
+    <p>Так же ведёт себя и вложенный <code>using (...)</code>: <code>using (first) using (second) { }</code>
+      освобождает <code>second</code>, затем <code>first</code>. Это логично: ресурсы освобождаются в порядке,
+      обратном захвату (как в стеке), — и outer-ресурс не остаётся с уже освобождённым inner.</p>
+
+    <h3>2. В цикле <code>using var</code> живёт до конца итерации</h3>
+    <div class="codewrap">
+      <pre><code class="language-csharp">for (var i = 1; i &lt;= 3; i++)
+{
+    using var c = new Probe($"c{i}");
+    Console.WriteLine($"   итерация {i}, до конца блока");
+}   // ← Dispose на каждой итерации</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">   итерация 1, до конца блока
+   итерация 2, до конца блока
+   итерация 3, до конца блока
+Dispose: Dispose(c1), Dispose(c2), Dispose(c3)</code></pre>
+    </div>
+    <p>Это ровно то поведение, которое нужно в фоновом воркере: объявили контекст в начале тела
+      <code>while</code> — он освободится в конце этой итерации, а не в конце метода.</p>
+
+    <h3>3. Но всё, что после объявления, — внутри области жизни</h3>
+    <p>Самая практическая ловушка: если объявление стоит в начале длинного блока, ресурс
+      <strong>держится до конца блока</strong>, включая ожидания, HTTP-вызовы и <code>Task.Delay</code>.
+      Замер на том же <code>Probe</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">for (var i = 1; i &lt;= 2; i++)
+{
+    using var db = new Probe($"db-итерация-{i}", sw);   // объявили в начале
+    Console.WriteLine($"итерация {i}: работа");
+    Thread.Sleep(100);                                  // «сон» внутри области жизни
+    Console.WriteLine($"итерация {i}: сон закончился");
+}   // ← Dispose только здесь</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">[112 мс] итерация 1: работа
+[212 мс] итерация 1: сон закончился
+[212 мс] Dispose(db-итерация-1)     ← ресурс был занят все 100 мс сна
+[212 мс] итерация 2: работа
+[313 мс] итерация 2: сон закончился
+[313 мс] Dispose(db-итерация-2)</code></pre>
+    </div>
+    <p>Для <code>DbContext</code> это значит: сам контекст (и всё, что он отслеживает) живёт до конца блока.
+      Соединение EF обычно возвращает в пул сразу после операции, но если внутри блока открыта транзакция
+      или явно открыто соединение — они будут держаться до <code>Dispose</code>. Поэтому «живёт до конца
+      блока» — это про ресурсы объекта, а не только про память. Если нужно отпустить раньше — сузьте блок:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ контекст живёт весь цикл, включая паузу
+while (!ct.IsCancellationRequested)
+{
+    await using var db = await factory.CreateDbContextAsync(ct);
+    await ProcessAsync(db, ct);
+    await Task.Delay(1000, ct);        // контекст (и его ChangeTracker) всё ещё жив
+}
+
+// ✔ контекст живёт только работу
+while (!ct.IsCancellationRequested)
+{
+    await using (var db = await factory.CreateDbContextAsync(ct))
+    {
+        await ProcessAsync(db, ct);
+    }                                   // ← Dispose здесь, пауза уже без контекста
+    await Task.Delay(1000, ct);
+}</code></pre>
+    </div>
+    <h2><code>await using</code>: асинхронное освобождение</h2>
+    <p>Некоторые ресурсы освобождаются асинхронно: закрыть сетевое соединение, отправить финальный пакет,
+      дождаться подтверждения. Для них есть <code>IAsyncDisposable</code> с методом
+      <code>DisposeAsync()</code>, возвращающим <code>ValueTask</code>, и конструкция
+      <code>await using</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class AsyncProbe(string name, List&lt;string&gt; log) : IAsyncDisposable
+{
+    public ValueTask DisposeAsync()
+    {
+        log.Add($"DisposeAsync({name})");
+        return ValueTask.CompletedTask;
+    }
+}
+
+async Task UseAsync()
+{
+    await using var e = new AsyncProbe("async", log);   // вызовет DisposeAsync, а не Dispose
+    Console.WriteLine("тело await using");
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">тело await using
+Dispose: DisposeAsync(async)</code></pre>
+    </div>
+    <p>Правила те же, что у <code>using</code>: область — до конца блока, порядок — обратный, при
+      исключении <code>DisposeAsync</code> всё равно будет ожидаться. Разница только в том, что
+      освобождение можно <code>await</code>-ить. Если тип реализует <em>оба</em> интерфейса, компилятор
+      в <code>await using</code> предпочтёт <code>DisposeAsync</code>, а в обычном <code>using</code> —
+      <code>Dispose</code>.</p>
+
+    <h2>Скобки или объявление: в чём разница на практике</h2>
+    <table>
+      <thead><tr><th></th><th><code>using (x) { ... }</code></th><th><code>using var x = ...;</code></th></tr></thead>
+      <tbody>
+        <tr><td>Область жизни</td><td>Блок в скобках</td><td>До конца текущего блока (метода, цикла, лямбды)</td></tr>
+        <tr><td>Где заканчивается</td><td>Явно видно: закрывающая скобка</td><td>Не видно: ищи конец блока</td></tr>
+        <tr><td>Можно сузить</td><td>Да — просто поставить скобки раньше</td><td>Только дополнительным блоком <code>{ }</code></td></tr>
+        <tr><td>Несколько ресурсов</td><td><code>using (a) using (b) { }</code> или <code>using (a, b)</code>*</td>
+          <td><code>using Probe a = ..., b = ...;</code> (с явным типом)</td></tr>
+        <tr><td>Читаемость в длинном методе</td><td>Нужен отступ на весь блок</td><td>Меньше вложенности</td></tr>
+        <tr><td>Риск</td><td>Забыть скобку</td><td>Держать ресурс дольше, чем нужно</td></tr>
+      </tbody>
+    </table>
+    <p>* <code>using (Probe a = ..., b = ...)</code> — несколько ресурсов в одной инструкции: это одна
+      декларация с несколькими переменными. С <code>var</code> так нельзя (ошибка <code>CS0819</code>:
+      «Implicitly-typed variables cannot have multiple declarators»), нужен явный тип. Порядок
+      освобождения — обратный.</p>
+    <div class="box note">
+      <span class="t">Одинаково ли они работают «под капотом»</span>
+      <p>Да: обе формы компилируются в <code>try/finally</code> с вызовом <code>Dispose</code>. Разница
+        только в том, где компилятор закрывает <code>try</code>. Поэтому «преимущество» скобок — не
+        производительность, а <strong>контроль области жизни</strong>: раннее освобождение видно глазами
+        и не зависит от того, где заканчивается метод.</p>
+    </div>
+
+    <h2>Где <code>using</code> не поможет</h2>
+    <ul>
+      <li><strong>Объект вам не принадлежит.</strong> Если <code>DbContext</code> или <code>HttpClient</code>
+        пришёл из DI, освобождать его вручную не нужно: контейнер сам вызовет <code>Dispose</code> у
+        scoped-сервисов при закрытии scope, а <code>HttpClient</code> из <code>IHttpClientFactory</code>
+        — лёгкая обёртка, которую можно и <code>using</code>, но connection pool живёт отдельно
+        (глава про фабрику в книге паттернов). «Двойной Dispose» обычно безопасен, но признак того, что
+        владение ресурсом определено неверно.</li>
+      <li><strong>Ресурс передан наружу.</strong> Если метод возвращает объект, <code>using var</code>
+        внутри метода освободит его до возврата — наружу уедет уже освобождённый объект.</li>
+      <li><strong>Освобождение нужно позже, чем заканчивается блок.</strong> Тогда <code>using</code> не
+        подходит: владение должно быть у того, кто живёт дольше (контейнер, scope, вызывающий код).</li>
+    </ul>
+
+    <h3>struct, бокс и <code>using var</code></h3>
+    <p>Если тип — <code>struct</code> и реализует <code>IDisposable</code>, <code>using</code> вызывает
+      <code>Dispose</code> напрямую, без упаковки. А вот если сначала привести структуру к
+      <code>IDisposable</code>, получится бокс — объект в куче на каждой итерации. Замер на 1 000 000
+      итераций:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">struct using:          0 байт на 1 000 000 итераций
+через IDisposable:     24000336 байт на 1 000 000 итераций    (~24 байта на бокс)</code></pre>
+    </div>
+    <p>Поэтому в горячем коде не «приводите к интерфейсу ради using»: <code>using var s = new StructProbe();</code>
+      дешевле, чем <code>IDisposable d = s; using (d) { }</code>.</p>
+    <h2><code>using</code> и DI-scope: кто кого освобождает</h2>
+    <p>В приложении с DI у ресурса часто есть <strong>владелец</strong> — контейнер. Граница владения —
+      <em>scope</em>: когда scope закрывается, контейнер вызывает <code>Dispose</code> (или
+      <code>DisposeAsync</code>) у всех scoped-сервисов, которые он создал в этом scope. Проверено на
+      сервисе, который просто считает свои освобождения:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">E) IServiceScopeFactory один и тот же: True        ← это Singleton
+F) два scope -> два экземпляра: True               ← scoped-сервис свой в каждом scope
+G) после Dispose scope: освобождено 2              ← контейнер вызвал Dispose за нас
+    </code></pre>
+    </div>
+    <p>Поэтому в коде, который получил <code>DbContext</code> или репозиторий через конструктор,
+      <code>using</code> не нужен: освободит контейнер. А вот если singleton (фоновый воркер) создаёт
+      scoped-сервис <em>сам</em>, границу нужно создать вручную:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Worker(IServiceScopeFactory scopeFactory) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();     // граница владения
+            var repo = scope.ServiceProvider.GetRequiredService&lt;IOrdersRepository&gt;();
+
+            await repo.DoWorkAsync(ct);
+        }   // DisposeAsync(scope) → контейнер освободит repo и всё scoped внутри
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>CreateScope()</code> против <code>CreateAsyncScope()</code>.</strong> Если среди
+        scoped-сервисов есть реализующий только <code>IAsyncDisposable</code>, обычный
+        <code>CreateScope()</code> при закрытии упадёт:
+        <code>InvalidOperationException: 'AsyncThing' type only implements IAsyncDisposable. Use DisposeAsync
+        to dispose the container.</code> Проверено: <code>CreateAsyncScope()</code> в том же сценарии
+        работает.</li>
+      <li><strong><code>IServiceScopeFactory</code> — Singleton</strong>, его можно держать в поле
+        singleton-сервиса (проверено: один и тот же экземпляр и в корне, и внутри scope). А вот
+        <code>IServiceProvider</code> из корня — нельзя: резолв scoped-сервиса оттуда либо бросит
+        <code>Cannot resolve scoped service ... from root provider</code>, либо (без валидации) отдаст
+        объект, живущий всё время процесса.</li>
+      <li><strong>Scope ≠ <code>using</code> одного объекта.</strong> <code>using</code> освобождает
+        <em>один</em> объект; scope освобождает <em>все</em> scoped-сервисы, созданные внутри, в обратном
+        порядке, — это одно и то же правило, применённое к дереву объектов.</li>
+      <li><strong>Scope не хранят в поле</strong> и не переиспользуют между операциями: он живёт ровно
+        столько, сколько единица работы.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li><code>using var</code> освобождает ресурс <strong>в конце текущего блока</strong>, а не на
+          строке объявления; порядок — обратный порядку объявления.</li>
+        <li><code>using (...)</code> и <code>using var</code> дают одинаковую гарантию (<code>try/finally</code>),
+          разница — в области жизни и читаемости. Скобки позволяют освободить раньше.</li>
+        <li><code>await using</code> нужен для <code>IAsyncDisposable</code> (сеть, БД, потоки).</li>
+        <li>Объект, пришедший из DI, освобождает контейнер; ручной <code>using</code> нужен только для
+          того, чем вы владеете сами.</li>
+        <li><code>using var</code> на <code>struct</code> не создаёт бокс; приведение к
+          <code>IDisposable</code> — создаёт (~24 байта на итерацию).</li>
+      </ul>
+    </div>
+
+    <p>Связь с остальными главами: исключения и <code>finally</code> — глава 21; пулы соединений и цена
+      удержания транзакции — глава 23 книги «Backend на .NET»; фабрики и время жизни в DI — глава 4 книги
+      «Паттерны в .NET».</p>
+
+    <div class="pager">
+      <a href="cs22-reflection-attributes.html">← <span class="sp">Глава 22. Рефлексия и атрибуты: typeof, Type, Activator, метаданные</span></a>
+      <a href="csharp.html"><span class="sp">Оглавление</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
