@@ -85,7 +85,7 @@ var rows = await db.Orders.AsNoTracking().Where(o =&gt; o.Total &gt; 100).ToList
 
 // чтение с последующим изменением: нужен трекинг, иначе SaveChanges ничего не сохранит
 var order = await db.Orders.FirstAsync(o =&gt; o.Id == id, ct);
-order.MarkAsPaid();
+order.MarkAsPaid();          // метод самой сущности Order — «Паттерны», глава 7
 await db.SaveChangesAsync(ct);</code></pre>
       </div>
     </div>

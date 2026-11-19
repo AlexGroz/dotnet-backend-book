@@ -110,6 +110,56 @@ public sealed class EfUnitOfWork(AppDbContext db) : IUnitOfWork
 }</code></pre>
     </div>
     <div class="box note">
+      <span class="t">Откуда взялся <code>MarkAsPaid()</code></span>
+      <p>Это <strong>не метод репозитория</strong> и не то, что генерирует EF Core: <code>MarkAsPaid()</code>
+        объявлен в самой сущности <code>Order</code>. Вызов <code>order.MarkAsPaid()</code> работает только
+        потому, что переменная <code>order</code> имеет тип <code>Order</code>, а у этого класса есть такой метод.
+        В книге он раньше не показывался — вот объявление целиком:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public enum OrderStatus { New, Paid, Cancelled }
+
+public sealed class Order                                // сущность: данные + правило над ними
+{
+    public Guid Id { get; private set; }
+    public DateTime DueAt { get; private set; }
+    public OrderStatus Status { get; private set; }       // по умолчанию New (0)
+
+    public Order(Guid id, DateTime dueAt)                 // обычный конструктор: так создаётся заказ
+    {
+        Id = id;
+        DueAt = dueAt;
+    }
+
+    public void MarkAsPaid() =&gt; Status = OrderStatus.Paid;   // ← вот он, отсюда
+}</code></pre>
+      </div>
+      <p>В разминке <code>Order</code> был записью из двух полей — «просто данные», без поведения: там такого
+        метода нет и быть не могло. Здесь заказ — <em>сущность</em>: поля плюс метод, который меняет состояние по
+        правилу. Поэтому в обработчике и нет строки «оплатить»: правило живёт в одном месте, в домене.</p>
+      <p><strong>Сеттер закрыт не случайно.</strong> <code>Status</code> объявлен как
+        <code>{ get; private set; }</code>, поэтому снаружи статус меняется <em>только</em> через
+        <code>MarkAsPaid()</code>: строка <code>order.Status = OrderStatus.Paid;</code> из другого класса не
+        соберётся. Приватный сеттер не мешает EF Core: при чтении строки он заполняет свойства сам, в том числе
+        закрытые (в прогоне на SQLite заказ, сохранённый со статусом <code>Paid</code>, читается обратно как
+        <code>Paid</code>) — проверено:</p>
+      <div class="codewrap">
+        <pre><code class="language-text">error CS0272: The property or indexer 'Order.Status' cannot be used in this context
+               because the set accessor is inaccessible</code></pre>
+      </div>
+      <p>Дальше работу делает EF Core: он отслеживает загруженный объект, замечает, что <code>Status</code>
+        изменился, и при <code>SaveChangesAsync</code> отправляет <code>UPDATE</code>. В прогоне на SQLite
+        (EF Core 8) получилось так — репозиторий для этого не пишет ни строчки:</p>
+      <div class="codewrap">
+        <pre><code class="language-text">UPDATE "Orders" SET "Status" = @p0
+WHERE "Id" = @p1
+RETURNING 1;</code></pre>
+      </div>
+      <p>Тело метода специально минимальное: настоящие правила (нельзя оплатить отменённый заказ, повторная
+        оплата, событие «заказ оплачен») — это уже доменная модель, отдельная тема. Для главы важно другое:
+        <code>MarkAsPaid()</code> — обычный метод класса <code>Order</code>, и объявлен он там же, где живёт
+        правило.</p>
+    </div>
+    <div class="box note">
       <span class="t">В интерфейсе нет кода — откуда берётся работа?</span>
       <p><code>IOrderRepository</code> — только <em>обещание</em> («есть метод <code>GetAsync</code>»). Тело метода
         живёт в реализации <code>EfOrderRepository</code>, где написан запрос через EF Core. Обработчик об этом
@@ -219,12 +269,57 @@ public sealed class OrderService(IServiceProvider sp)
     public async Task PayAsync(Guid id, CancellationToken ct)
     {
         var repo = sp.GetRequiredService&lt;IOrderRepository&gt;();   // зависимость «из воздуха»
-        …
+        var uow  = sp.GetRequiredService&lt;IUnitOfWork&gt;();
+
+        var order = await repo.GetAsync(id, ct) ?? throw new NotFoundException(id);
+        order.MarkAsPaid();
+        await uow.SaveChangesAsync(ct);
     }
 }</code></pre>
     </div>
-    <p>Правильно — <strong>внедрять зависимости через конструктор</strong>. Тогда видно, что нужно сервису, и
-      тест может подставить реализации напрямую.</p>
+    <p>По сигнатуре <code>OrderService(IServiceProvider sp)</code> не видно, что классу на самом деле нужны
+      <code>IOrderRepository</code> и <code>IUnitOfWork</code>: они «достаются» внутри метода. Компилятор такой код
+      принимает, поэтому забытая регистрация обнаруживается только в момент вызова — в прогоне на .NET 8:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">InvalidOperationException: No service for type 'IOrderRepository' has been registered.</code></pre>
+    </div>
+    <p>Правильно — <strong>внедрять зависимости через конструктор</strong>. Тот же класс, то же поведение:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✔ Constructor injection: зависимости видны в сигнатуре
+public sealed class OrderService(IOrderRepository repo, IUnitOfWork uow)
+{
+    public async Task PayAsync(Guid id, CancellationToken ct)
+    {
+        var order = await repo.GetAsync(id, ct) ?? throw new NotFoundException(id);
+        order.MarkAsPaid();
+        await uow.SaveChangesAsync(ct);
+    }
+}
+
+// контейнер сам подставит аргументы — регистрировать нужно только сам класс
+builder.Services.AddScoped&lt;OrderService&gt;();</code></pre>
+    </div>
+    <p>Что это меняет (каждый пункт проверен на .NET 8):</p>
+    <ul>
+      <li><strong>Зависимости видны без чтения тела.</strong> Сигнатура говорит всё: репозиторий, Unit of Work —
+        больше классу ничего не нужно.</li>
+      <li><strong>Забыть зависимость нельзя молча.</strong> <code>new OrderService()</code> просто не соберётся:
+        <code>error CS7036: There is no argument given that corresponds to the required parameter 'repo' of
+        'OrderService.OrderService(IOrderRepository, IUnitOfWork)'</code>.</li>
+      <li><strong>Тест не требует контейнера.</strong> <code>var service = new OrderService(fakeRepo, fakeUow);</code>
+        — и всё. В версии с <code>IServiceProvider</code> тесту придётся собирать <code>ServiceCollection</code>,
+        то есть повторять настройку приложения, иначе он упадёт на том же
+        <code>No service for type ...</code>.</li>
+      <li><strong>Ошибка ловится раньше.</strong> Вместо <code>InvalidOperationException</code> на живом запросе
+        пользователя — ошибка компиляции или падение при старте, если включён <code>ValidateOnBuild</code>
+        (глава 15 .NET-раздела): <code>Unable to resolve service for type 'IOrderRepository' while attempting to
+        activate 'OrderService'</code>.</li>
+    </ul>
+    <p>При этом сам <code>IServiceProvider</code> — не зло. Он уместен там, где объект создаёте <em>вы</em>, а не
+      контейнер: например в фабрике регистрации
+      (<code>AddScoped&lt;T&gt;(sp =&gt; new T(sp.GetRequiredService&lt;...&gt;()))</code> — так собран декоратор из
+      главы 5). Плохо не наличие <code>IServiceProvider</code>, а когда его протаскивают в бизнес-класс, чтобы
+      «достать что надо по ходу».</p>
 
     <div class="box note">
       <span class="t">Статистика: насколько часто</span>
