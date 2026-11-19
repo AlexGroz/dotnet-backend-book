@@ -117,7 +117,7 @@ public sealed class CachedProductRepository(
 
     public async Task SaveAsync(Product product, CancellationToken ct)
     {
-        await inner.SaveAsync(product, ct);      // пишет в БД тот, кто внутри: EfProductRepository
+        await inner.SaveAsync(product, ct);      // inner — тот, кого выбрали при регистрации (здесь EF)
         cache.Remove($"product:{product.Id}");   // и инвалидируем кэш
     }
 }</code></pre>
@@ -132,8 +132,8 @@ public sealed class CachedProductRepository(
         <strong>зарегистрированный</strong> тип. Что подставить вместо <code>inner</code>, решает одна строка
         регистрации — она в блоке ниже:</p>
       <pre><code class="language-csharp">sp =&gt; new CachedProductRepository(
-    sp.GetRequiredService&lt;EfProductRepository&gt;(),   // ← вот этот объект станет inner
-    sp.GetRequiredService&lt;IMemoryCache&gt;())</code></pre>
+    sp.GetRequiredService&lt;EfProductRepository&gt;(),   // ← первый аргумент = inner: кого оборачиваем
+    sp.GetRequiredService&lt;IMemoryCache&gt;())          // ← второй аргумент = cache</code></pre>
       <p>То же с <code>AppDbContext db</code> внутри <code>EfProductRepository</code>: он приходит из
         контейнера, потому что где-то в <code>Program.cs</code> вызван
         <code>AddDbContext&lt;AppDbContext&gt;(…)</code>. Ни EF, ни кэш «сами не заводятся» — каждый объект в
@@ -167,9 +167,93 @@ builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt;
       не меняется.</p>
     <p><strong>Почему нельзя короче — <code>AddScoped&lt;IProductRepository, CachedProductRepository&gt;()</code>?</strong>
       Потому что тогда контейнер, создавая декоратор, попросил бы у себя же
-      <code>IProductRepository</code> — то есть тот же декоратор, и так по кругу
-      (<code>circular dependency</code>). Фабричный вариант круг разрывает: внутри явно назван
+      <code>IProductRepository</code> — то есть тот же декоратор, и так по кругу. Проверено: такой вызов
+      падает с <code>InvalidOperationException: A circular dependency was detected for the service of type
+      'IProductRepository'.</code> Фабричный вариант круг разрывает: внутри явно назван
       <code>EfProductRepository</code> — конкретный класс, а не интерфейс.</p>
+
+    <h3>Кто именно станет <code>inner</code> — и почему не кэш</h3>
+    <p>Всё решает <strong>порядок аргументов конструктора</strong> и их типы:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class CachedProductRepository(
+    IProductRepository inner,     // ← 1-й параметр: сюда попадёт ПЕРВЫЙ аргумент new
+    IMemoryCache cache)           // ← 2-й параметр: сюда — второй
+    : IProductRepository</code></pre>
+    </div>
+    <p>Тип первого параметра — <code>IProductRepository</code>, поэтому в него можно передать только объект,
+      реализующий этот интерфейс. <code>IMemoryCache</code> его не реализует, и компилятор это проверит:
+      если перепутать аргументы местами, код просто не соберётся (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">new CachedProductRepository(cache, repo);
+
+error CS1503: Argument 1: cannot convert from 'Microsoft.Extensions.Caching.Memory.MemoryCache'
+              to 'IProductRepository'
+error CS1503: Argument 2: cannot convert from 'EfProductRepository'
+              to 'Microsoft.Extensions.Caching.Memory.IMemoryCache'</code></pre>
+    </div>
+    <p>То есть «кэш станет inner» невозможно не потому, что DI «так решил», а потому что это разные типы:
+      <code>inner</code> — это <em>декорируемый объект</em>, а <code>cache</code> — <em>зависимость самого
+      декоратора</em>. Внутри <code>CachedProductRepository</code> знает про <code>inner</code> только то, что
+      у него есть методы <code>IProductRepository</code>: ни про EF, ни про SQL там нет ни слова.</p>
+    <p>А вот <strong>какой конкретный класс</strong> попадёт в первый аргумент — решает не декоратор, а
+      регистрация. В главе это <code>GetRequiredService&lt;EfProductRepository&gt;()</code>, то есть явно
+      названный класс. То есть <code>new CachedProductRepository(...)</code> в проекте всё-таки есть — он
+      стоит в <code>Program.cs</code>, в фабрике; в самом классе декоратора его нет и быть не должно.
+      Поэтому <code>CachedProductRepository</code> и не нужно «знать» про <code>EfProductRepository</code>:
+      его туда передали снаружи, как и любой другой объект.</p>
+
+    <h4>Если реализаций станет две</h4>
+    <p>Допустим, появился <code>EfProductRepository2026 : IProductRepository</code>. Сам декоратор ничего не
+      заметит — он работает с интерфейсом. Вопрос решается на уровне регистраций, и вариантов ровно четыре
+      (все проверены на .NET 8):</p>
+    <table>
+      <thead><tr><th>Что сделали</th><th>Кто станет <code>inner</code></th><th>Проверено</th></tr></thead>
+      <tbody>
+        <tr><td>Зарегистрировали обе реализации <em>как интерфейс</em> (без фабрики):
+          <code>AddScoped&lt;IProductRepository, EfProductRepository&gt;()</code>, затем
+          <code>…, EfProductRepository2026&gt;()</code></td>
+          <td>Та, что зарегистрирована <strong>последней</strong></td>
+          <td><code>GetRequiredService&lt;IProductRepository&gt;()</code> → <code>EfProductRepository2026</code>,
+            а <code>GetServices&lt;IProductRepository&gt;()</code> → <code>EfProductRepository,
+            EfProductRepository2026</code> (обе, в порядке регистрации)</td></tr>
+        <tr><td>В фабрике декоратора явно указали класс</td>
+          <td>Ровно тот, что указан в фабрике</td>
+          <td><code>IProductRepository</code> → <code>CachedProductRepository</code>, inner =
+            <code>EfProductRepository</code>, хотя <code>EfProductRepository2026</code> тоже
+            зарегистрирован</td></tr>
+        <tr><td>Различили реализации ключами (keyed services, .NET 8)</td>
+          <td>Тот, что запросили по ключу</td>
+          <td><code>GetRequiredKeyedService&lt;IProductRepository&gt;("ef")</code> →
+            <code>EfProductRepository</code>, <code>("ef2026")</code> →
+            <code>EfProductRepository2026</code></td></tr>
+        <tr><td>Зарегистрировали декоратор коротко: <code>AddScoped&lt;IProductRepository,
+            CachedProductRepository&gt;()</code></td><td>Никто: контейнер уходит по кругу</td>
+          <td><code>InvalidOperationException: A circular dependency was detected for the service of type
+            'IProductRepository'.</code> (следующей строкой — цепочка
+            <code>IProductRepository(CachedProductRepository) -&gt; IProductRepository</code>)</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <p class="cap">Выбор inner через ключи (.NET 8)</p>
+      <pre><code class="language-csharp">builder.Services.AddKeyedScoped&lt;IProductRepository, EfProductRepository&gt;("ef");
+builder.Services.AddKeyedScoped&lt;IProductRepository, EfProductRepository2026&gt;("ef2026");
+
+builder.Services.AddScoped&lt;IProductRepository&gt;(sp =&gt; new CachedProductRepository(
+    sp.GetRequiredKeyedService&lt;IProductRepository&gt;("ef2026"),   // ← выбираем явно
+    sp.GetRequiredService&lt;IMemoryCache&gt;()));</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Почему в фабрике нельзя просить тот же интерфейс</span>
+      <p>Если написать <code>sp.GetRequiredService&lt;IProductRepository&gt;()</code> внутри фабрики, которая сама
+        регистрирует <code>IProductRepository</code>, получится бесконечная рекурсия: фабрика вызывает
+        фабрику. В прогоне на .NET 8 такой вызов <strong>не завершился за 20 секунд</strong> (процесс убит
+        таймаутом), а короткая регистрация через интерфейс падает с сообщением о циклической зависимости.
+        Именно поэтому в первом аргументе называют <em>конкретный</em> класс или ключ — это разрывает круг.</p>
+    </div>
+    <p>Вывод для практики: декоратор всегда один и тот же, а «кто внутри» — это строчка регистрации. Если
+      реализаций несколько и нужны обе, не полагайтесь на «последняя победит»: выбирайте явно (конкретный
+      тип в фабрике или ключ), иначе порядок регистраций станет неявной настройкой, которую легко сломать
+      перестановкой двух строк.</p>
     <p>Что происходит при первом запросе — целиком:</p>
     <div class="codewrap">
       <pre><code class="language-text">GET /products/42
