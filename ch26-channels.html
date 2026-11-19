@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 26 · Очереди и фоновая обработка</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +19,258 @@
   <div class="chapter">
     <div class="part">.NET · Часть VI · Данные и интеграции</div>
     <h1>Глава 26. Очереди и фоновая обработка</h1>
-    <p class="sublead">Channels, батчинг, BackgroundService</p>
+    <p class="sublead">Как принять запрос быстро, а работу сделать потом: <code>Channel&lt;T&gt;</code>,
+      батчинг и <code>BackgroundService</code> — с замерами того, что происходит при переполнении
+      и остановке.</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Зачем очередь внутри процесса</h2>
+    <p>Очередь нужна там, где <strong>принимать</strong> и <strong>обрабатывать</strong> выгодно с разной
+      скоростью. Классический пример — эндпоинт, который пишет событие в БД и должен ответить за 20 мс,
+      а обработка (пересчёт, вызов чужого API, отправка письма) занимает секунды. Варианты:</p>
+    <table>
+      <thead><tr><th>Подход</th><th>Что происходит с запросом</th><th>Когда подходит</th></tr></thead>
+      <tbody>
+        <tr><td>Сделать всё в обработчике</td><td>Клиент ждёт всю работу</td>
+          <td>Работа короткая и обязательная для ответа</td></tr>
+        <tr><td><code>Task.Run</code> и забыть</td><td>Ответ быстрый, но работа не переживёт рестарт
+          и никто не знает, сколько её</td><td>Только «необязательные» задачи вроде прогрева кэша</td></tr>
+        <tr><td><strong><code>Channel&lt;T&gt;</code> + воркер</strong></td>
+          <td>Ответ быстрый, работа идёт в фоне с ограничением скорости</td>
+          <td><strong>Один процесс</strong>, потеря работы при падении допустима</td></tr>
+        <tr><td>Брокер (RabbitMQ, Kafka)</td><td>Ответ быстрый, работа переживает рестарт</td>
+          <td>Нужны доставка, повтор, несколько потребителей (главы про брокеры)</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Главное отличие от брокера</span>
+      <p><code>Channel&lt;T&gt;</code> живёт <strong>в памяти процесса</strong>. Перезапустили приложение —
+        всё, что было в канале, исчезло. Никаких подтверждений, повторов и «прочитал заново» здесь нет.
+        Если потеря недопустима — сначала пишите в БД (outbox, глава 31) или в брокер, а канал используйте
+        как буфер между «принял» и «отправил».</p>
     </div>
+
+    <h2><code>Channel&lt;T&gt;</code>: три решения, которые надо принять</h2>
+    <ol>
+      <li><strong>Ограниченный или безграничный.</strong> <code>CreateBounded&lt;T&gt;(capacity)</code> —
+        производитель ждёт, когда очередь полна (это backpressure); <code>CreateUnbounded&lt;T&gt;()</code> —
+        принимает всё и растёт, пока не кончится память.</li>
+      <li><strong>Что делать при переполнении</strong> (<code>FullMode</code>):
+        <code>Wait</code> (по умолчанию для bounded), <code>DropOldest</code>, <code>DropNewest</code>,
+        <code>DropWrite</code>.</li>
+      <li><strong>Сколько читателей и писателей</strong> (<code>SingleReader</code>/<code>SingleWriter</code>) —
+        если их правда по одному, канал может работать без блокировок.</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var channel = Channel.CreateBounded&lt;OrderEvent&gt;(new BoundedChannelOptions(capacity: 100)
+{
+    FullMode = BoundedChannelFullMode.Wait,   // переполнился — производитель ждёт
+    SingleReader = true,                       // один воркер
+    SingleWriter = false,                      // пишут несколько обработчиков запросов
+});</code></pre>
+    </div>
+    <h2>Что реально происходит при переполнении</h2>
+    <p>Первый и самый важный факт: <strong><code>TryWrite</code> не ждёт</strong>. Если места нет, он просто
+      возвращает <code>false</code> — и элемент никуда не попал. Проверено на канале ёмкостью 2:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">A) TryWrite(1) = True
+A) TryWrite(2) = True
+A) TryWrite(3) = False   ← места нет, не ждём
+A) WriteAsync(3) завершился за 200 мс: False      ← ждёт освобождения
+A) прочитали 1
+A) WriteAsync(3) после чтения завершился за 200 мс: True</code></pre>
+    </div>
+    <p>Отсюда два правила. Первое: <strong>результат <code>TryWrite</code> надо проверять</strong> — иначе
+      вы теряете данные молча. Второе: если терять нельзя, используйте <code>WriteAsync</code> — он
+      притормозит производителя (это и есть backpressure). Насколько легко потерять всё, видно в замере:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">D1) TryWrite: принято 10, отвергнуто 90 (никто их больше не увидит)</code></pre>
+    </div>
+    <p>Сто событий в цикле, канал на 10 мест, результат не проверяется — 90 исчезли ещё до обработки.
+      В проде это выглядит как «иногда не приходят уведомления», и искать причину в логах бесполезно:
+      никто ничего не записал.</p>
+
+    <h3><code>DropOldest</code>: осознанная потеря</h3>
+    <p>Иногда терять можно, но нужно отдавать предпочтение свежим данным (телеметрия, «последнее значение
+      датчика»). Тогда переполнение решается явно:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var ch = Channel.CreateBounded&lt;int&gt;(new BoundedChannelOptions(2)
+{
+    FullMode = BoundedChannelFullMode.DropOldest,
+});
+ch.Writer.TryWrite(1); ch.Writer.TryWrite(2); ch.Writer.TryWrite(3);</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">C) DropOldest, записали 1,2,3 → прочитали: 2,3</code></pre>
+    </div>
+    <p>Единица вытеснена, и <code>TryWrite</code> при этом вернул <code>true</code> — то есть «принято» не
+      значит «будет обработано». Это нормально для метрик и ненормально для денежных операций.</p>
+
+    <h2>Чтение: <code>ReadAllAsync</code> и завершение канала</h2>
+    <p>Потребитель обычно выглядит так: <code>await foreach</code> по <code>ReadAllAsync</code>. Цикл
+      закончится сам, когда писатель вызовет <code>Complete()</code> — при этом всё, что уже в канале,
+      будет прочитано:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var ch = Channel.CreateBounded&lt;int&gt;(2);
+ch.Writer.TryWrite(1);
+ch.Writer.Complete();
+
+await ch.Writer.WriteAsync(2);                 // ✘ ChannelClosedException
+await foreach (var x in ch.Reader.ReadAllAsync())   // дочитает 1 и завершится БЕЗ ошибки
+    Console.WriteLine(x);</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">WriteAsync после Complete -> ChannelClosedException: The channel has been closed.
+дочитали 1
+ReadAllAsync завершился без ошибки (канал закрыт)</code></pre>
+    </div>
+    <p>Это же свойство делает канал удобным в тестах: <code>Complete()</code> — единственный корректный
+      способ сказать «данных больше не будет». Без него <code>ReadAllAsync</code> будет ждать вечно, и
+      тест повиснет.</p>
+
+    <h2>Батчинг: 1000 элементов → 20 пачек</h2>
+    <p>Второй смысл очереди — <strong>собирать пачки</strong>: один <code>INSERT</code> на 50 строк дешевле
+      50 отдельных (глава 24), один HTTP-вызов дешевле пятидесяти. Потребитель копит элементы и
+      обрабатывает, когда набралось:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var sizes = new List&lt;int&gt;();
+var consumer = Task.Run(async () =&gt;
+{
+    var buffer = new List&lt;int&gt;(50);
+    await foreach (var item in channel.Reader.ReadAllAsync())
+    {
+        buffer.Add(item);
+        if (buffer.Count == 50)          // набралась пачка — обрабатываем
+        {
+            sizes.Add(buffer.Count);
+            buffer.Clear();              // здесь был бы один INSERT на 50 строк
+        }
+    }
+    if (buffer.Count &gt; 0) sizes.Add(buffer.Count);   // ← хвост после Complete()
+});</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">B) пачек: 20, первые размеры: 50,50,50, всего элементов: 1000</code></pre>
+    </div>
+    <p>Два подводных камня батчинга:</p>
+    <ul>
+      <li><strong>Хвост.</strong> После <code>Complete()</code> в буфере может остаться меньше 50 элементов.
+        Если не обработать их отдельно, последние события потеряются — в примере это строка после цикла.</li>
+      <li><strong>Время.</strong> Пачка может не набраться: поток редкий, а ждать нельзя. Тогда копят «до 50
+        элементов <em>или</em> 100 мс»: рядом с <code>ReadAllAsync</code> держат таймер и обрабатывают
+        накопленное по его срабатыванию. Это стандартный приём в очередях и в Kafka-консьюмерах.</li>
+    </ul>
+    <h2>Воркер: <code>BackgroundService</code> и остановка</h2>
+    <p>Читатель канала живёт в фоновом сервисе. Регистрация — три строки: сам канал (Singleton), его
+      <code>Reader</code> и hosted-сервис (глава 16):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddSingleton(Channel.CreateBounded&lt;OrderEvent&gt;(new BoundedChannelOptions(1000)
+{
+    FullMode = BoundedChannelFullMode.Wait,
+    SingleReader = true,
+}));
+builder.Services.AddSingleton&lt;ChannelReader&lt;OrderEvent&gt;&gt;(sp =&gt;
+    sp.GetRequiredService&lt;Channel&lt;OrderEvent&gt;&gt;().Reader);
+builder.Services.AddHostedService&lt;OutboxWorker&gt;();
+
+// в эндпоинте: ждём, если очередь полна (backpressure), и отвечаем 202
+await _writer.WriteAsync(new OrderEvent(order.Id), ct);
+return Results.Accepted();</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class OutboxWorker(
+    ChannelReader&lt;OrderEvent&gt; reader,
+    IServiceScopeFactory scopes,          // Scoped-сервисы создаём на итерацию (глава 15)
+    ILogger&lt;OutboxWorker&gt; log) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await foreach (var evt in reader.ReadAllAsync(stoppingToken))
+                await HandleAsync(evt, stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // штатная остановка: токен отменили
+        }
+        finally
+        {
+            // дренаж: дочитываем то, что осталось, уже без отмены
+            while (reader.TryRead(out var evt))
+                await HandleAsync(evt, CancellationToken.None);
+        }
+    }
+}</code></pre>
+    </div>
+    <p>Что происходит при остановке, если дренажа нет, — видно в замере: писали через
+      <code>WriteAsync</code> (все 100 приняты), потребитель работал по 10 мс на элемент, через 60 мс
+      приложение начало останавливаться:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">D2) принято 100, обработано 95, осталось в канале 5, потеряно 0</code></pre>
+    </div>
+    <p>Числа зависят от машины, важен принцип: <strong>отмена токена не дочитывает канал</strong>.
+      Пять элементов остались лежать, и если процесс сейчас завершится — они исчезнут. Отсюда три вывода:</p>
+    <ul>
+      <li><strong>дренаж в <code>finally</code></strong> (<code>TryRead</code> в цикле) — минимум для того,
+        что уже принято;</li>
+      <li><strong>укладываться в <code>ShutdownTimeout</code></strong> (глава 28): если дренаж дольше,
+        платформа убьёт процесс — поэтому остаток работы лучше отдавать в durable-очередь;</li>
+      <li><strong>не терять по дороге</strong>: событие должно попасть в канал <em>после</em> коммита в БД
+        (outbox, глава 31), иначе «принято» и «сохранено» разъедутся.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Исключение в воркере останавливает приложение</span>
+      <p>По умолчанию <code>BackgroundServiceExceptionBehavior.StopHost</code>: необработанное исключение
+        в <code>ExecuteAsync</code> гасит весь хост (глава 16). Поэтому цикл оборачивают в
+        <code>try/catch</code> на <em>итерацию</em>: упавшее событие логируем и повторяем/откладываем,
+        а не роняем сервис. Если повтор невозможен — событие уходит в «мёртвую» таблицу, как DLX в
+        RabbitMQ (глава 4 книги про RabbitMQ).</p>
+    </div>
+    <h2>Чего не делать</h2>
+    <ul>
+      <li><strong>Безграничный канал с быстрым производителем.</strong> Проверено: миллион
+        <code>int</code> в unbounded-канале — это <strong>8 МБ</strong>, и все они остаются в памяти, пока
+        читатель не успевает. <code>TryWrite</code> всегда возвращает <code>true</code>, поэтому
+        «тормозить» производителя нечему: память заканчивается тихо, а вместе с ней — OOMKilled
+        (глава 16 Docker-книги).</li>
+      <li><strong>Игнорировать результат <code>TryWrite</code> на bounded-канале.</strong> Тот же замер:
+        из миллиона записей в канал на 1000 мест принято <strong>1000</strong> — остальные 999 000
+        отвергнуты, и никто об этом не узнал.</li>
+      <li><strong>Считать канал очередью с гарантией доставки.</strong> Нет ack, нет повтора, нет
+        сохранения на диск: рестарт = потеря всего, что в памяти.</li>
+      <li><strong>Ставить несколько читателей при <code>SingleReader = true</code></strong> (и наоборот):
+        это нарушение контракта, последствия — гонки и дубли, которые почти невозможно воспроизвести.</li>
+      <li><strong>Держать <code>DbContext</code> в воркере «на всё время жизни»</strong>: только scope на
+        итерацию, иначе получите тот самый captive dependency (глава 15).</li>
+    </ul>
+
+    <h2>Канал или брокер: как выбрать</h2>
+    <table>
+      <thead><tr><th>Требование</th><th><code>Channel&lt;T&gt;</code></th><th>Брокер</th></tr></thead>
+      <tbody>
+        <tr><td>Ответить быстро, работу сделать в этом же процессе</td><td>Да</td><td>Избыточно</td></tr>
+        <tr><td>Пережить рестарт и не потерять</td><td>Нет</td><td>Да</td></tr>
+        <tr><td>Несколько экземпляров сервиса делят работу</td><td>Нет</td><td>Да (конкурирующие потребители)</td></tr>
+        <tr><td>Повтор при ошибке, dead-letter, задержки</td><td>Писать самому</td><td>Есть из коробки</td></tr>
+        <tr><td>Стоимость</td><td>Ноль инфраструктуры</td><td>Кластер, эксплуатация, задержки сети</td></tr>
+      </tbody>
+    </table>
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p><code>Channel&lt;T&gt;</code> — это буфер в памяти, а не очередь с гарантиями. Ограничивайте
+        ёмкость и выбирайте <code>FullMode</code> осознанно; пишите через <code>WriteAsync</code>
+        (backpressure) или проверяйте <code>TryWrite</code>; собирайте пачки и не забывайте хвост;
+        в воркере — <code>BackgroundService</code> со scope на итерацию, обработкой исключений и дренажом
+        при остановке. Всё, что нельзя терять, — сначала в БД (outbox) или в брокер.</p>
+    </div>
+
     <div class="pager">
       <a href="ch25-cache.html">← <span class="sp">Глава 25. Кэширование</span></a>
       <a href="ch27-resilience.html"><span class="sp">Глава 27. Устойчивость внешних вызовов</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>

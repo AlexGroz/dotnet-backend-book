@@ -179,6 +179,188 @@ message OrderReply      { int32 id = 1; string status = 2; }</code></pre>
       <li>важна надёжность: «сделать обязательно, даже если сервис падал».</li>
     </ul>
 
+    <h2>Стриминг: gRPC, WebSockets и SignalR</h2>
+    <p>Отдельный вопрос — когда данные не «запросили и получили», а <strong>льются</strong>: телеметрия,
+      лог-файлы, прогресс длинной операции, живые обновления в браузере. Здесь REST с JSON перестаёт
+      подходить: каждый кадр — отдельный запрос с заголовками, а сервер не может сам начать разговор.
+      Вариантов четыре, и они не взаимозаменяемы.</p>
+
+    <h3>gRPC: четыре вида вызовов</h3>
+    <p>В <code>.proto</code> вид вызова задаётся одним словом <code>stream</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-protobuf">service TelemetryApi {
+  rpc GetOne    (PointRequest) returns (Point);            // unary: один запрос — один ответ
+  rpc Subscribe (RangeRequest) returns (stream Point);     // server streaming: один запрос — поток ответов
+  rpc Upload    (stream Point) returns (UploadReply);      // client streaming: поток запросов — один ответ
+  rpc Duplex    (stream Point) returns (stream Point);     // bidi: оба направления одновременно
+}</code></pre>
+    </div>
+    <p>Сервер реализует методы, клиент — вызывает. Ниже — реальный прогон (сервер на Kestrel,
+      клиент на <code>Grpc.Net.Client</code>), вывод клиента дословно:</p>
+    <div class="codewrap">
+      <p class="cap">Клиент: четыре вызова подряд</p>
+      <pre><code class="language-csharp">var channel = GrpcChannel.ForAddress("http://127.0.0.1:5300");   // h2c: только HTTP/2
+var client = new TelemetryApi.TelemetryApiClient(channel);
+
+var one = await client.GetOneAsync(new PointRequest { Sensor = "sensor-1" });
+
+using (var call = client.Subscribe(new RangeRequest { Sensor = "sensor-1", Count = 3 }))
+    await foreach (var p in call.ResponseStream.ReadAllAsync())
+        Console.WriteLine(p.Value);
+
+using (var upload = client.Upload())
+{
+    for (var i = 1; i &lt;= 3; i++)
+        await upload.RequestStream.WriteAsync(new Point { Value = i });
+    await upload.RequestStream.CompleteAsync();          // ← без этого сервер будет ждать вечно
+    var reply = await upload.ResponseAsync;
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что напечатал клиент</p>
+      <pre><code class="language-text">unary:            sensor-1 = 42.5
+server streaming: sensor-1 = 1
+server streaming: sensor-1 = 2
+server streaming: sensor-1 = 3
+client streaming: сервер принял 3
+bidi &lt;- 10
+bidi &lt;- 20
+bidi &lt;- 30</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Сервер: server streaming и двунаправленный вызов</p>
+      <pre><code class="language-csharp">public override async Task Subscribe(                  // server streaming
+    RangeRequest request, IServerStreamWriter&lt;Point&gt; responseStream, ServerCallContext context)
+{
+    for (var i = 1; i &lt;= request.Count; i++)
+    {
+        await Task.Delay(30, context.CancellationToken);   // токен отмены приходит от клиента
+        await responseStream.WriteAsync(new Point { Sensor = request.Sensor, Value = i });
+    }
+}
+
+public override async Task Duplex(                      // bidi: читаем и пишем одновременно
+    IAsyncStreamReader&lt;Point&gt; requestStream, IServerStreamWriter&lt;Point&gt; responseStream,
+    ServerCallContext context)
+{
+    await foreach (var p in requestStream.ReadAllAsync())
+        await responseStream.WriteAsync(new Point { Sensor = p.Sensor, Value = p.Value * 10 });
+}</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">gRPC требует HTTP/2 — это не «пожелание»</span>
+      <p>Проверено: если Kestrel на том же порту отдаёт и HTTP/1.1, и HTTP/2 без TLS, клиент получает</p>
+      <pre><code class="language-text">RpcException: Status(StatusCode="Internal", Detail="Error starting gRPC call.
+HttpRequestException: The HTTP/2 server closed the connection.
+HTTP/2 error code 'HTTP_1_1_REQUIRED' (0xd). (HttpProtocolError)")</code></pre>
+      <p>Причина: в cleartext-режиме протокол выбирается без ALPN, и Kestrel на таком эндпоинте
+        говорит по HTTP/1.1. Рабочие варианты: отдельный порт с <code>HttpProtocols.Http2</code>
+        (так сделано в примере: 5300 — gRPC, 5301 — SignalR) либо TLS, где протокол согласуется через
+        ALPN и оба живут на одном порту.</p>
+    </div>
+    <h3>SignalR: тот же стриминг, но «для браузера»</h3>
+    <p>SignalR — надстройка над WebSockets: он сам договаривается о транспорте (в прогоне ниже выбран
+      <code>WebSockets</code>), умеет переподключаться и даёт две модели — вызовы методов хаба и
+      <strong>стриминг</strong> в обе стороны. Сервер:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// using Microsoft.AspNetCore.Http.Connections.Features;
+public sealed class TelemetryHub : Hub
+{
+    // обычный вызов клиент → сервер, ответ только вызвавшему
+    public Task Push(string text)
+    {
+        var t = Context.Features.Get&lt;IHttpTransportFeature&gt;();
+        Console.WriteLine($"  [hub] transport = {t?.TransportType}");     // WebSockets
+        return Clients.Caller.SendAsync("tick", $"echo: {text}");
+    }
+
+    // стриминг сервер → клиент: обычный IAsyncEnumerable
+    public async IAsyncEnumerable&lt;int&gt; Counter(int count, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        for (var i = 1; i &lt;= count; i++)
+        {
+            await Task.Delay(30, ct);
+            yield return i;
+        }
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Клиент и его вывод</p>
+      <pre><code class="language-csharp">var hub = new HubConnectionBuilder().WithUrl("http://127.0.0.1:5301/hub").Build();
+hub.On&lt;string&gt;("tick", m =&gt; Console.WriteLine($"signalr:          {m}"));
+await hub.StartAsync();
+
+await hub.InvokeAsync("Push", "привет");
+await foreach (var n in hub.StreamAsync&lt;int&gt;("Counter", 3))
+    Console.WriteLine($"signalr stream:   {n}");</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">signalr:          echo: привет
+signalr stream:   1
+signalr stream:   2
+signalr stream:   3
+  [hub] transport = WebSockets          ← строка из лога сервера</code></pre>
+    </div>
+    <p>Обратите внимание на две вещи. Первая: на сервере стриминг — это обычный
+      <code>IAsyncEnumerable&lt;T&gt;</code> с <code>[EnumeratorCancellation]</code>, то есть тот же приём,
+      что и при отдаче данных в HTTP (глава 13). Вторая: <strong>хаб создаётся на каждый вызов</strong> —
+      это transient, а не «один объект на соединение». Проверяется полем-счётчиком:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// в хабе
+private int _n;
+public int Bump() =&gt; ++_n;
+
+// клиент вызывает дважды подряд
+Console.WriteLine("Bump#1 = " + await hub.InvokeAsync&lt;int&gt;("Bump"));
+Console.WriteLine("Bump#2 = " + await hub.InvokeAsync&lt;int&gt;("Bump"));</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Bump#1 = 1
+Bump#2 = 1</code></pre>
+    </div>
+    <p>То есть состояние между вызовами в хабе не живёт: для счётчиков, кэшей и подписок нужен
+      Singleton-сервис из DI, а «кто на этом соединении» — это <code>Context.ConnectionId</code>,
+      который надо хранить в своей коллекции.</p>
+
+    <table>
+      <thead><tr><th></th><th>gRPC streaming</th><th>WebSockets «руками»</th><th>SignalR</th><th>SSE</th></tr></thead>
+      <tbody>
+        <tr><td>Контракт</td><td><code>.proto</code>, кодогенерация</td><td>Нет: свой формат кадров</td>
+          <td>Методы хаба по имени</td><td><code>text/event-stream</code></td></tr>
+        <tr><td>Браузер</td><td>Через gRPC-Web и прокси</td><td>Нативно</td><td>JS-клиент</td>
+          <td>Нативно (<code>EventSource</code>)</td></tr>
+        <tr><td>Направление</td><td>Любое, включая bidi</td><td>Любое</td><td>Любое</td>
+          <td>Только сервер → клиент</td></tr>
+        <tr><td>Бинарные данные</td><td>Да (Protobuf)</td><td>Да</td><td>JSON, MessagePack опцией</td>
+          <td>Нет, только текст</td></tr>
+        <tr><td>Переподключение</td><td>Писать самому</td><td>Писать самому</td>
+          <td>Встроенное, с backoff</td><td>Встроенное в <code>EventSource</code></td></tr>
+        <tr><td>Что нужно от инфраструктуры</td><td>HTTP/2 end-to-end</td>
+          <td>Прокси, держащий upgrade</td><td>То же + backplane при нескольких инстансах</td>
+          <td>Обычный HTTP</td></tr>
+        <tr><td>Когда брать</td><td>Сервис ↔ сервис: телеметрия, выгрузки</td>
+          <td>Свой протокол, полный контроль</td><td>Живой UI в ASP.NET Core</td>
+          <td>Односторонние уведомления</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box warn">
+      <span class="t">Три вещи, которые ломают стриминг в проде</span>
+      <ul>
+        <li><strong>Стриминг — не очередь.</strong> Ни gRPC, ни SignalR не хранят историю: клиент
+          отключился — кадры потеряны, повторить их неоткуда. Если нужна доставка «обязательно» и
+          перечитывание с места — это брокер (Kafka, глава 1 книги про Kafka; RabbitMQ, глава 1).</li>
+        <li><strong>Прокси и idle-таймаут.</strong> Долгое соединение через балансировщик рвётся по
+          простою. SignalR держит его пингами, для gRPC-стримов нужно либо продлевать keep-alive, либо
+          перейти на периодические unary-вызовы.</li>
+        <li><strong>Соединение с базой на весь стрим.</strong> Если <code>IAsyncEnumerable</code> читает
+          из БД (глава 13), соединение занято, пока клиент читает последний кадр. Для длинных выгрузок
+          лучше keyset-пагинация порциями, а не один запрос на час.</li>
+      </ul>
+    </div>
+
     <h2>Сравнение</h2>
     <table>
       <thead><tr><th></th><th>REST</th><th>gRPC</th><th>Брокер сообщений</th></tr></thead>

@@ -243,6 +243,92 @@ foreach (char c in span)
         коде <code>string</code> и <code>List&lt;T&gt;</code> понятнее и достаточны.</p>
     </div>
 
+    <h2>Разбор бинарного потока: <code>PipeReader</code> и <code>SequenceReader</code></h2>
+    <p>Самый частый «горячий» сценарий на сервере — разобрать поток данных, который не влезает в память
+      целиком: бинарный лог, файл телеметрии, ответ чужого протокола. Наивный путь — прочитать всё в
+      <code>byte[]</code> и на каждую запись создать строку. Проверим цену на реальном файле:</p>
+    <div class="codewrap">
+      <p class="cap">Формат: 20 байт на запись — <code>int32</code> id, <code>double</code> value, 8 байт ASCII-кода</p>
+      <pre><code class="language-text">файл: 3906 КБ, записей: 200000</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">✘ Наивно: весь файл в память + строка на запись</p>
+      <pre><code class="language-csharp">var data = File.ReadAllBytes(path);                       // ~3,9 МБ в LOH
+for (var i = 0; i + 20 &lt;= data.Length; i += 20)
+{
+    var id = BitConverter.ToInt32(data, i);
+    var value = BitConverter.ToDouble(data, i + 4);
+    var code = Encoding.ASCII.GetString(data, i + 12, 8);  // 200 000 строк в куче
+    count++;
+    sum += id + (long)value + code[0];
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">✔ Потоково: <code>PipeReader</code> читает порциями, <code>SequenceReader</code> разбирает без копий</p>
+      <pre><code class="language-csharp">// using System.Buffers;  // ReadOnlySequence, SequenceReader, SequencePosition
+static SequencePosition ParseBuffer(ReadOnlySequence&lt;byte&gt; buffer, ref int count, ref long sum)
+{
+    var seq = new SequenceReader&lt;byte&gt;(buffer);          // ref struct: живёт только на стеке
+    Span&lt;byte&gt; raw  = stackalloc byte[8];
+    Span&lt;byte&gt; code = stackalloc byte[8];
+
+    while (seq.Remaining &gt;= 20)
+    {
+        seq.TryReadLittleEndian(out int id);              // 4 байта
+        seq.TryCopyTo(raw);  seq.Advance(8);              // 8 байт double
+        var value = BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(raw));
+        seq.TryCopyTo(code); seq.Advance(8);              // 8 байт кода — без строки
+        count++;
+        sum += id + (long)value + code[0];
+    }
+    return seq.Position;                                  // сколько реально разобрали
+}
+
+var reader = PipeReader.Create(File.OpenRead(path), new StreamPipeReaderOptions(bufferSize: 64 * 1024));
+while (true)
+{
+    var result = await reader.ReadAsync();
+    var consumed = ParseBuffer(result.Buffer, ref count, ref sum);
+    reader.AdvanceTo(consumed, result.Buffer.End);         // хвост (неполная запись) остаётся в буфере
+    if (result.IsCompleted) break;
+}
+await reader.CompleteAsync();</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Замер (.NET 8, Release, после прогрева; аллокации — <code>GC.GetTotalAllocatedBytes</code>)</p>
+      <pre><code class="language-text">naive        записей=200000  сумма=30016700000  аллокации=11719  КБ  gen0=4  время=8 мс
+pipe         записей=200000  сумма=30016700000  аллокации=2      КБ  gen0=0  время=4 мс</code></pre>
+    </div>
+    <ul>
+      <li><strong>Сумма совпала</strong> — оба разбора корректны; разница только в мусоре.</li>
+      <li><strong>11,7 МБ против 2 КБ.</strong> Основное — 3,9 МБ массива (это уже LOH, глава 6) плюс
+        <strong>200 000 строк</strong>, каждая из которых отдельный объект в куче. Строки — самый дорогой
+        подарок: их ещё и собирает Gen0.</li>
+      <li><strong><code>AdvanceTo(consumed, buffer.End)</code></strong> — ключевая строка: разобрали сколько
+        смогли, неполный «хвост» остался в буфере до следующего чтения. Поэтому запись может спокойно
+        пересекать границу порции — код этого даже не замечает.</li>
+      <li><strong>Буферы берутся из пула</strong>, а не создаются на каждое чтение; поэтому в замере
+        аллокаций почти нет, а <code>gen0=0</code>.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Если поток текстовый</span>
+      <p>Тот же приём работает и для текста: <code>SequenceReader</code> ищет разделитель
+        (<code>TryAdvanceTo</code>), а числа разбираются из <code>ReadOnlySpan&lt;byte&gt;</code> через
+        <code>Utf8Parser.TryParse</code> — без промежуточной строки. Строку создавайте только там, где она
+        действительно нужна (например, для ключа словаря), и тогда аллокаций будет ровно столько, сколько
+        записей вы решили сохранить.</p>
+      <p>Для файлов на диске тот же результат даёт <code>FileStream</code> с буфером +
+        <code>Span</code>-перегрузки <code>Read</code>/<code>Parse</code>; <code>PipeReader</code>
+        удобнее там, где источник — сеть (<code>NetworkStream</code>, Kestrel) и заранее неизвестно,
+        сколько байт придёт в следующий раз.</p>
+    </div>
+    <p>Подводные камни, о которых стоит помнить: <code>SequenceReader&lt;byte&gt;</code> —
+      <code>ref struct</code>, поэтому его нельзя объявить в <code>async</code>-методе (компилятор скажет
+      <code>CS4012</code>) — отсюда отдельный синхронный <code>ParseBuffer</code>; <code>stackalloc</code>
+      внутри цикла копит стек (предупреждение <code>CA2014</code>), поэтому буферы вынесены наружу; а
+      <code>AdvanceTo</code> нужно вызывать на <em>каждой</em> итерации, иначе <code>PipeReader</code>
+      заблокируется, ожидая освобождения буфера.</p>
+
     <h2>Исключения — не для управления потоком</h2>
     <p>Бросок исключения — <strong>дорогая</strong> операция: создаётся объект исключения (аллокация!) и
       собирается трассировка стека. Если этим обрабатывать <em>обычные</em> ситуации, платим и временем, и

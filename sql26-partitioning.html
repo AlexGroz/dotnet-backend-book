@@ -415,6 +415,151 @@ CALL partman.run_maintenance();</code></pre>
         цена — записи в каталоге, а не место на диске.</li>
     </ul>
 
+    <h2>Секционирование ≠ шардинг</h2>
+    <p>Эти два слова часто используют как синонимы, но разница принципиальная: <strong>секции</strong> —
+      это одна таблица внутри <em>одной</em> базы, которой управляет один планировщик; <strong>шарды</strong> —
+      это разные серверы (или как минимум разные базы), и приложение само решает, куда идти. Поэтому всё,
+      что даёт партиционирование (pruning, индексы на секцию, <code>DETACH</code>) — работает «бесплатно»,
+      а шардинг добавляет то, чего в SQL нет: <em>глобальных</em> запросов и глобальной уникальности.</p>
+    <table>
+      <thead><tr><th></th><th>Секционирование</th><th>Шардинг</th></tr></thead>
+      <tbody>
+        <tr><td>Где данные</td><td>Одна БД, одна таблица-родитель</td><td>Разные базы/серверы</td></tr>
+        <tr><td>Кто выбирает, куда идти</td><td>Планировщик (pruning)</td><td>Приложение (роутер) или прокси</td></tr>
+        <tr><td><code>JOIN</code>, агрегаты, транзакции</td><td>Как обычно</td><td>Только внутри шарда</td></tr>
+        <tr><td>Что масштабирует</td><td>Размер таблицы, обслуживание (<code>DETACH</code>)</td>
+          <td>Запись и размер <em>всей</em> системы</td></tr>
+        <tr><td>Когда нужен</td><td>Терабайты в одной таблице, архив по времени</td>
+          <td>Одна машина уже не тянет запись/объём</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Ключ секционирования и шард-ключ — разные вещи</h3>
+    <p>Ключ секционирования выбирают по <strong>фильтру запросов</strong> (чаще всего дата), а шард-ключ —
+      по <strong>владельцу данных</strong>, чтобы одна бизнес-операция не пересекала шарды. Для
+      мультитенантной системы это почти всегда <code>tenant_id</code>: тогда «заказ + позиции + платеж»
+      одного арендатора лежат в одном шарде, и транзакция остаётся локальной.</p>
+
+    <h3>Что именно ломается: проверено на двух базах</h3>
+    <p>Стенд: PostgreSQL 16, две базы <code>shard_a</code> и <code>shard_b</code> с одинаковой таблицей
+      <code>events(id, tenant, amount)</code>. Первое, что перестаёт работать, — обычный
+      <code>JOIN</code> между шардами:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- из shard_a пытаемся соединить с таблицей в shard_b
+SELECT * FROM events a JOIN shard_b.public.events b ON b.tenant = a.tenant;</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">ERROR:  cross-database references are not implemented: "shard_b.public.events"</code></pre>
+    </div>
+    <p>Второе — <strong>уникальность</strong>. Ключ уникален внутри шарда, а не глобально: одна и та же
+      строка <code>id = 1</code> спокойно живёт в обоих шардах, и «уникальный» id перестаёт быть
+      уникальным в системе:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">shard_a: 1|acme|100
+         2|acme|200
+shard_b: 1|globex|300      ← тот же id, другой арендатор</code></pre>
+    </div>
+    <p>Третье — <strong>агрегаты</strong>. «Сумма по всем заказам» — это N запросов и сложение в
+      приложении. Роутер по арендатору выглядит так:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var shards = new Dictionary&lt;string, string&gt;
+{
+    ["acme"]   = "…Database=shard_a",
+    ["globex"] = "…Database=shard_b",
+};
+
+async Task ExecAsync(string tenant, string sql)      // пишем ВСЕГДА в шард арендатора
+{
+    await using var c = new NpgsqlConnection(shards[tenant]);
+    await c.OpenAsync();
+    await using var cmd = new NpgsqlCommand(sql, c);
+    await cmd.ExecuteNonQueryAsync();
+}
+
+// глобальный итог: два запроса и сложение в коде
+// ScalarAsync — вспомогательный метод: открыть соединение, выполнить SQL, вернуть одно значение
+var total = 0m;
+foreach (var cs in shards.Values.Distinct())
+    total += await ScalarAsync(cs, "SELECT coalesce(sum(amount), 0) FROM events");</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Реальный прогон</p>
+      <pre><code class="language-text">сумма по acme   (шард a): 350
+сумма по globex (шард b): 370
+глобальный итог:        720
+sum на шарде a целиком: 350      ← ловушка: это НЕ глобальная сумма</code></pre>
+    </div>
+    <p>Последняя строка — самая частая ошибка при переходе: запрос остался прежним
+      (<code>SELECT sum(amount) FROM events</code>), но теперь он означает «сумма по одному шарду».
+      В отчёте цифра просто меньше — и никто не замечает.</p>
+    <h3>Вариант «прокси-шардинг»: <code>postgres_fdw</code></h3>
+    <p>Если глобальные запросы нужны, но приложение переписывать не хочется, можно подключить чужие базы
+      как <em>внешние таблицы</em>. В <code>shard_a</code> это выглядит так (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">CREATE EXTENSION IF NOT EXISTS postgres_fdw;
+
+CREATE SERVER shard_b_srv FOREIGN DATA WRAPPER postgres_fdw
+  OPTIONS (host '127.0.0.1', dbname 'shard_b', port '5432');
+
+CREATE USER MAPPING FOR postgres SERVER shard_b_srv
+  OPTIONS (user 'postgres', password 'postgres');
+
+CREATE FOREIGN TABLE events_b (id bigint, tenant text, amount numeric)
+  SERVER shard_b_srv OPTIONS (table_name 'events');</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Теперь «глобальный» агрегат — один SQL</p>
+      <pre><code class="language-sql">SELECT tenant, sum(amount) AS total
+FROM (SELECT tenant, amount FROM events
+      UNION ALL
+      SELECT tenant, amount FROM events_b) t
+GROUP BY tenant ORDER BY tenant;</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text"> tenant | total
+--------+-------
+ acme   |   350
+ globex |   370
+(2 rows)</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">План: данные всё равно едут по сети</p>
+      <pre><code class="language-text">HashAggregate
+  Group Key: events.tenant
+  -&gt;  Append
+        -&gt;  Seq Scan on events
+        -&gt;  Foreign Scan on events_b      ← удалённое чтение</code></pre>
+    </div>
+    <p>Это удобно для редких отчётов и админки, но не для горячего пути: <code>Foreign Scan</code> — это
+      сетевой вызов, а статистику по внешней таблице нужно собирать отдельно (<code>ANALYZE</code>),
+      иначе оценки строк будут далеки от реальности. И согласованность при сбое между шардами
+      по-прежнему не гарантируется: локальная транзакция и удалённый сервер — два разных участника,
+      а не одна распределённая транзакция.</p>
+
+    <h3>Как выбирают шардинг на практике</h3>
+    <ul>
+      <li><strong>Сначала исчерпать дешёвое:</strong> индексы, партиционирование, архивирование старых
+        секций, реплики для чтения (глава 27), кэш. Шардинг — последний шаг, а не первый.</li>
+      <li><strong>Ключ = владелец данных</strong> (<code>tenant_id</code>), а не «удобное поле»: иначе
+        бизнес-операция начнёт ходить в два шарда.</li>
+      <li><strong>Глобальные идентификаторы</strong> нужны заранее: UUIDv7, snowflake или последовательности
+        с разным шагом на каждом шарде. Просто <code>bigserial</code> в каждом шарде даст дубли (это и
+        видно в примере выше).</li>
+      <li><strong>Отчётность — отдельно:</strong> аналитику по всем арендаторам обычно делают на реплике,
+        куда данные стекаются, а не N запросами из приложения.</li>
+      <li><strong>Решардинг планируют сразу:</strong> перенос арендатора — это копирование его строк,
+        период двойной записи, переключение маршрута и удаление старых данных. Без этого «переехать»
+        потом будет больно.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Готовые варианты вместо самописного роутера</span>
+      <p><strong>Citus</strong> — расширение PostgreSQL, которое делает шардинг «изнутри»: таблица
+        объявляется распределённой по ключу, шарды живут в одном кластере, координатор планирует запросы.
+        <strong>Прокси</strong> (PgCat, pgpool-II, HAProxy-схемы) умеют маршрутизировать по ключу, но не
+        умеют склеивать результаты кросс-шардовых запросов. <strong>Приложение</strong> — самый гибкий и
+        самый дорогой вариант: весь роутинг, глобальные id и сборка отчётов на вас.</p>
+    </div>
+
     <h2>Частые ошибки</h2>
     <ol>
       <li><strong>Ключ выбран не по рабочим фильтрам.</strong> Тогда отсечения нет, а накладные расходы есть.</li>

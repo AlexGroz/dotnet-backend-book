@@ -196,6 +196,126 @@ await tx2.CommitAsync(ct);                                         // 6) сра�
       уведомление, брокер), — до или после; а событие для соседей надёжно сохраняется в <code>outbox</code> внутри
       той же транзакции.</p>
 
+    <h2><code>TransactionScope</code>: legacy-транзакция «через Ambient»</h2>
+    <p>В старом коде транзакцию часто открывали не на соединении, а «вокруг» кода:
+      <code>new TransactionScope()</code> создаёт <em>ambient</em>-транзакцию (<code>Transaction.Current</code>),
+      а соединение при открытии к ней присоединяется само. Npgsql это поддерживает, поэтому такой код
+      работает — но у него три ловушки, каждая из которых проверена ниже на .NET 8 + PostgreSQL 16.</p>
+    <div class="codewrap">
+      <p class="cap">Минимальный рабочий вариант</p>
+      <pre><code class="language-csharp">// using System.Transactions;
+using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+{
+    await using var conn = new NpgsqlConnection(cs);
+    await conn.OpenAsync();                                  // соединение присоединилось к ambient
+    await using var cmd = new NpgsqlCommand("INSERT INTO ledger VALUES (1, 'A')", conn);
+    await cmd.ExecuteNonQueryAsync();
+
+    scope.Complete();                                        // без этой строки — откат
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Проверено: с <code>Complete()</code> строка есть, без него — нет</p>
+      <pre><code class="language-text">A) одно соединение, Complete()      → строки после коммита: 1
+B) одно соединение, без Complete()  → строки после отката:  -</code></pre>
+    </div>
+
+    <h3>Ловушка 1: <code>await</code> без <code>TransactionScopeAsyncFlowOption.Enabled</code></h3>
+    <p>Без этого флага scope привязан к потоку, который его создал. Как только продолжение после
+      <code>await</code> оказывается на другом потоке, <code>Transaction.Current</code> становится
+      <code>null</code> — и работа уходит в базу <strong>вне транзакции</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">без AsyncFlowOption: ждём, пока продолжение окажется на другом потоке
+   поток создания=10, сейчас=5
+   Transaction.Current is null = True
+   строки после «отката»: 1          ← строка осталась, хотя Complete() не вызывали</code></pre>
+    </div>
+    <p>То есть <code>INSERT</code> ушёл автокоммитом, а «откат» откатил пустую транзакцию. Данные
+      разъехались молча — самый неприятный класс ошибок. В части запусков тот же код падает ещё и на
+      освобождении scope:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">InvalidOperationException: A TransactionScope must be disposed on the same thread that it was created.</code></pre>
+    </div>
+    <p>Правило простое: <strong>если внутри scope есть <code>await</code> — флаг обязателен</strong>
+      (<code>TransactionScopeAsyncFlowOption.Enabled</code>). Проверено: с ним
+      <code>Transaction.Current</code> остаётся непустым на любом потоке, и откат работает.</p>
+
+    <h3>Ловушка 2: два разных сервера — это уже распределённая транзакция</h3>
+    <p>Два соединения к <em>одному</em> серверу в одном scope работают атомарно (проверено: без
+      <code>Complete()</code> откатились обе вставки). А вот два <em>разных</em> сервера требуют
+      двухфазного коммита:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">2) два разных сервера в одном scope
+   TransactionAbortedException: The transaction has aborted.
+   PostgresException: 55000: prepared transactions are disabled
+   строки на сервере 1: -</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- значение по умолчанию в PostgreSQL 16
+SHOW max_prepared_transactions;   -- 0</code></pre>
+    </div>
+    <p>Двухфазный коммит в PostgreSQL включается параметром <code>max_prepared_transactions</code>
+      (по умолчанию 0 — выключен), а на Windows-хостах для координации ещё нужен MSDTC. Включать это
+      ради бизнес-операции — плохая идея: координатор становится точкой отказа, а блокировки живут до
+      конца распределённой транзакции. Правильное решение — <strong>не соединять два ресурса одной
+      транзакцией</strong>: outbox и саги (глава 31).</p>
+    <h3>Ловушка 3: EF Core внутри ambient</h3>
+    <p>EF Core видит ambient-транзакцию и <strong>присоединяется</strong> к ней: <code>SaveChangesAsync</code>
+      откатывается вместе со scope (проверено: после отката строк нет). Два разных <code>DbContext</code>
+      к одному серверу в одном scope тоже работают атомарно. А вот открыть <em>свою</em> транзакцию
+      внутри ambient нельзя:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using (new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+{
+    await using var db = new AppDb();
+    await using var tx = await db.Database.BeginTransactionAsync();   // ✘
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что будет</p>
+      <pre><code class="language-text">InvalidOperationException: An ambient transaction has been detected.
+The ambient transaction needs to be completed before starting a new transaction on this connection.</code></pre>
+    </div>
+
+    <h3>Ещё две цифры: таймаут и удержание соединения</h3>
+    <div class="codewrap">
+      <pre><code class="language-text">TransactionManager.DefaultTimeout = 00:01:00
+TransactionManager.MaximumTimeout   = 00:10:00</code></pre>
+    </div>
+    <ul>
+      <li><strong>По умолчанию scope живёт 60 секунд</strong> (проверено). Если работа дольше — транзакция
+        будет прервана, даже если код ещё не дошёл до <code>Complete()</code>. Увеличивать можно только
+        до <code>MaximumTimeout</code> (10 минут).</li>
+      <li><strong>Соединение занято до конца scope</strong>, ровно как в разделе выше: пока ambient-транзакция
+        открыта, соединение не вернулось в пул, а блокировки держатся. Всё, что делает вызовы по сети,
+        должно быть <em>вне</em> scope.</li>
+    </ul>
+
+    <table>
+      <thead><tr><th>Когда брать</th><th><code>TransactionScope</code></th><th><code>BeginTransactionAsync</code></th></tr></thead>
+      <tbody>
+        <tr><td>Новый код на EF Core / Npgsql</td><td>Не нужен</td>
+          <td>Да: одна транзакция, один контекст, всё явно</td></tr>
+        <tr><td>Legacy-код, где scope уже стоит и его нельзя переписать</td>
+          <td>Да, но обязательно <code>AsyncFlowOption.Enabled</code> и проверка, что внутри нет второго ресурса</td>
+          <td>Нет: внутри ambient выбросит исключение</td></tr>
+        <tr><td>Два ресурса (две БД, БД + брокер)</td><td>Нет (2PC, MSDTC, <code>prepared transactions</code>)</td>
+          <td>Нет</td></tr>
+        <tr><td>Как соединить две системы надёжно</td>
+          <td colspan="2">Outbox + идемпотентный воркер (глава 31) или саги с компенсациями</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Правило для интервью</span>
+      <p>«<code>TransactionScope</code> — это ambient-транзакция из <code>System.Transactions</code>.
+        С одним сервером она работает, но при <code>await</code> без
+        <code>TransactionScopeAsyncFlowOption.Enabled</code> транзакция теряется: <code>Transaction.Current</code>
+        становится <code>null</code>, вставки уходят автокоммитом. Два разных сервера требуют двухфазного
+        коммита: <code>max_prepared_transactions = 0</code> по умолчанию, и транзакция просто абортится.
+        Поэтому в новом коде — явная транзакция на соединении, а распределённую согласованность делают
+        через outbox».</p>
+    </div>
+
     <h2>Подготовленные запросы и типы параметров</h2>
     <ul>
       <li><strong>Prepared statements:</strong> сервер разбирает и планирует запрос один раз, затем выполняет по

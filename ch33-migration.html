@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 33 · Миграция legacy: .NET Framework → .NET Core</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/xml.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +20,427 @@
   <div class="chapter">
     <div class="part">.NET · Часть IX · Практика</div>
     <h1>Глава 33. Миграция legacy: .NET Framework → .NET Core</h1>
-    <p class="sublead">Боли перехода на практике</p>
+    <p class="sublead">Переезд — это не «поменять target framework», а замена целых подсистем: DI,
+      конфигурации, HTTP-конвейера и работы с потоками. Разберём, что именно болит и чем это лечится —
+      на сообщениях, которые реально печатает .NET 8.</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал этой главы добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Почему «просто пересобрать» не получается</h2>
+    <p>.NET Framework и современный .NET — <strong>разные платформы</strong>, а не две версии одной.
+      Часть API из Framework в .NET Core не попала вообще: нельзя «включить обратно» <code>System.Web</code>
+      или сборку, собранную под <code>net48</code>. Поэтому миграция всегда идёт по подсистемам:</p>
+    <table>
+      <thead><tr><th>Что было в .NET Framework</th><th>Почему не переносится</th><th>Чем заменяется</th></tr></thead>
+      <tbody>
+        <tr><td><code>System.Web</code>: <code>HttpContext.Current</code>, <code>Global.asax</code>,
+          HTTP-модули</td><td>В .NET Core <code>System.Web</code> нет</td>
+          <td>middleware (глава 19), <code>IHttpContextAccessor</code></td></tr>
+        <tr><td>Встроенного DI-контейнера нет — только сторонние
+          (Autofac, Unity, Ninject)</td><td>Контейнер стал частью платформы</td>
+          <td><code>Microsoft.Extensions.DependencyInjection</code> (глава 15)</td></tr>
+        <tr><td><code>web.config</code> / <code>app.config</code>, transform-файлы</td>
+          <td><code>System.Configuration</code> остался в Framework</td>
+          <td><code>appsettings*.json</code> + <code>IConfiguration</code> / <code>IOptions</code> (глава 17)</td></tr>
+        <tr><td>WCF (service references, <code>svcutil</code>)</td><td>WCF-сервер в .NET Core не входит</td>
+          <td>gRPC (глава 29), CoreWCF, обычный HTTP API</td></tr>
+        <tr><td>Web Forms</td><td>Технология не переносилась</td><td>MVC, Razor Pages, Blazor</td></tr>
+        <tr><td>EF6: EDMX, <code>Database.SetInitializer</code>, прокси-классы</td>
+          <td>Это другой ORM с другим API</td><td>EF Core (глава 24)</td></tr>
+        <tr><td><code>[ThreadStatic]</code>, <code>CallContext.LogicalSetData</code></td>
+          <td>При <code>await</code> значение теряется или не течёт в дочерние задачи</td>
+          <td><code>AsyncLocal&lt;T&gt;</code></td></tr>
+        <tr><td><code>SynchronizationContext</code> запроса (ASP.NET)</td>
+          <td>В ASP.NET Core его нет</td><td>Обычный <code>async/await</code> (глава 12)</td></tr>
+        <tr><td><code>System.Drawing.Common</code></td>
+          <td>С .NET 6 поддерживается только на Windows</td><td>SkiaSharp, ImageSharp</td></tr>
+      </tbody>
+    </table>
+    <p>Отдельно стоит <strong>.NET Standard 2.0</strong>: это не платформа, а «контракт API». Библиотека,
+      собранная под <code>netstandard2.0</code>, подключается и к <code>net48</code>, и к <code>net8.0</code>.
+      Именно поэтому путь миграции обычно такой: сначала вынести общий код в
+      <code>netstandard2.0</code>-библиотеки (их видят оба мира), потом переписать хост на .NET 8.
+      Сборку под <code>net48</code> подключить к .NET 8 <em>нельзя</em> — только пересобрать из исходников.</p>
+    <h2>DI: как это было в .NET Framework</h2>
+    <p>В .NET Framework контейнера «из коробки» не было. ASP.NET MVC 5 оставлял одну точку подключения —
+      <code>DependencyResolver</code>, и в неё вставляли сторонний контейнер. Выглядело это так (пример
+      исторический — на .NET 8 он не запускается, <code>System.Web</code> там нет):</p>
+    <div class="codewrap">
+      <p class="cap">Global.asax, MVC 5 + Autofac — типичный код 2015 года</p>
+      <pre><code class="language-csharp">// Application_Start() в Global.asax
+var builder = new ContainerBuilder();
+builder.RegisterType&lt;OrderRepository&gt;().As&lt;IOrderRepository&gt;().InstancePerRequest();
+builder.RegisterType&lt;ReportService&gt;().SingleInstance();          // «живёт всё приложение»
+builder.RegisterControllers(typeof(MvcApplication).Assembly);
+
+var container = builder.Build();
+DependencyResolver.SetResolver(new AutofacDependencyResolver(container));   // статическая точка входа</code></pre>
     </div>
+    <ul>
+      <li><strong>Жизненные циклы задавались методами контейнера</strong>, а не атрибутом регистрации:
+        <code>InstancePerDependency</code> (каждый раз новый), <code>InstancePerRequest</code>
+        (на HTTP-запрос), <code>SingleInstance</code> (один на приложение).</li>
+      <li><strong>Per-request lifetime работал только внутри ASP.NET-конвейера.</strong> В консольном
+        приложении или в WPF того же контейнера <code>InstancePerRequest</code> уже не «на запрос»: там
+        нет запроса, и поведение зависит от контейнера.</li>
+      <li><strong>В WPF</strong> контейнер строили один раз в <code>App.xaml.cs</code>, и почти всё
+        регистрировалось как <code>SingleInstance</code>: «на запрос» делить нечего, окно живёт долго.
+        Отсюда привычка «сервис = синглтон», которая в ASP.NET Core ломается (см. Captive Dependency).</li>
+      <li><strong>Состояние запроса</strong> брали из статики: <code>HttpContext.Current</code>
+        (в MVC), <code>DependencyResolver.Current.GetService&lt;T&gt;()</code> в любом месте кода.
+        Это и есть <em>Service Locator</em>: зависимость не видна в конструкторе, а тест требует
+        поднять «весь мир».</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Почему старый код «просто работал»</span>
+      <p>Потому что у старых приложений было одно состояние на поток процесса и одна БД. Проблемы
+        начинались позже: <code>DbContext</code> в синглтоне, «второй запрос на том же контексте»,
+        данные одного арендатора в другом запросе. В .NET Framework этого никто не проверял на старте —
+        валидации графа не было.</p>
+    </div>
+    <table>
+      <thead><tr><th>Autofac (legacy)</th><th>Microsoft.Extensions.DependencyInjection</th></tr></thead>
+      <tbody>
+        <tr><td><code>InstancePerDependency()</code></td><td><code>AddTransient&lt;I, T&gt;()</code></td></tr>
+        <tr><td><code>InstancePerRequest()</code> / <code>InstancePerLifetimeScope()</code></td>
+          <td><code>AddScoped&lt;I, T&gt;()</code></td></tr>
+        <tr><td><code>SingleInstance()</code></td><td><code>AddSingleton&lt;I, T&gt;()</code></td></tr>
+        <tr><td><code>RegisterGeneric(typeof(Repo&lt;&gt;))</code></td>
+          <td><code>AddScoped(typeof(IRepo&lt;&gt;), typeof(Repo&lt;&gt;))</code></td></tr>
+        <tr><td><code>RegisterDecorator&lt;T&gt;()</code></td>
+          <td>Встроенного нет: пакет Scrutor, <code>services.Decorate&lt;I, Decorator&gt;()</code>
+            (глава про декоратор)</td></tr>
+        <tr><td><code>DependencyResolver.SetResolver(...)</code></td>
+          <td>Регистрации в <code>builder.Services</code>, ничего «подключать» не нужно (глава 15)</td></tr>
+        <tr><td>Property injection, <code>Resolve&lt;T&gt;()</code> в коде</td>
+          <td>Только конструктор; <code>IServiceProvider</code> — лишь внутри фабрики</td></tr>
+      </tbody>
+    </table>
+    <h2>DI: как это стало — и что ловит контейнер</h2>
+    <p>В .NET Core контейнер встроен, а все жизненные циклы — это три метода: <code>AddTransient</code>,
+      <code>AddScoped</code>, <code>AddSingleton</code> (глава 15). Главное новшество для мигранта — не
+      синтаксис, а <strong>валидация графа</strong>: контейнер умеет проверять, что Singleton не тянет
+      Scoped. Именно этой проверки не было в legacy, и именно она ловит те самые баги, которые раньше
+      «всплывали в проде».</p>
+
+    <div class="codewrap">
+      <p class="cap">Program.cs: Singleton, которому нужен Scoped</p>
+      <pre><code class="language-csharp">builder.Host.UseDefaultServiceProvider(o =&gt;
+{
+    o.ValidateScopes = true;     // запрещает Singleton -&gt; Scoped и резолв Scoped из корня
+    o.ValidateOnBuild = true;    // проверяет ВЕСЬ граф на старте, а не при первом запросе
+});
+
+builder.Services.AddSingleton&lt;ReportService&gt;();    // живёт всё приложение
+builder.Services.AddScoped&lt;AppDbContext&gt;();       // AddDbContext тоже даёт Scoped (проверено)
+
+public sealed class ReportService(AppDbContext db); // Scoped попал в Singleton</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что печатает приложение (Development, exit code 134)</p>
+      <pre><code class="language-text">Unhandled exception. System.AggregateException: Some services are not able to be constructed
+(Error while validating the service descriptor 'ServiceType: ReportService Lifetime: Singleton
+ImplementationType: ReportService': Cannot consume scoped service 'AppDbContext' from singleton
+'ReportService'.)
+ ---&gt; System.InvalidOperationException: Error while validating the service descriptor
+     'ServiceType: ReportService Lifetime: Singleton ImplementationType: ReportService':
+     Cannot consume scoped service 'AppDbContext' from singleton 'ReportService'.
+ ---&gt; System.InvalidOperationException: Cannot consume scoped service 'AppDbContext'
+     from singleton 'ReportService'.</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Development и Production ведут себя по-разному</span>
+      <p>Проверено на .NET 8: с тем же кодом приложение в <code>Development</code>
+        <strong>падает на старте</strong> (сообщение выше), а в <code>Production</code>
+        <strong>стартует нормально</strong> — captive создаётся молча. Ошибка вылезает позже, когда два
+        запроса одновременно работают с одним и тем же <code>DbContext</code> (два параллельных
+        <code>GET /report</code> на боевом окружении):</p>
+      <pre><code class="language-text">req1: 500   req2: 200
+
+System.InvalidOperationException: An attempt was made to use the context instance
+while it is being configured. A DbContext instance cannot be used inside 'OnConfiguring'
+since it is still being configured at this point. This can happen if a second operation
+is started on this context instance before a previous operation completed.
+Any instance members are not guaranteed to be thread safe.</code></pre>
+      <p>Причина: <code>WebApplicationBuilder</code> включает <code>ValidateScopes</code> и
+        <code>ValidateOnBuild</code> только в Development. Вывод для миграции: включайте
+        <code>UseDefaultServiceProvider</code> <em>явно</em> и во всех окружениях — иначе прод
+        останется без проверки.</p>
+    </div>
+    <p>Вторая половина проверки — резолв «короткоживущего» сервиса из корневого провайдера. Это ровно то,
+      что делал legacy-код через <code>DependencyResolver.Current</code>:</p>
+    <div class="codewrap">
+      <p class="cap">Что печатает проверка (консольная программа на .NET 8)</p>
+      <pre><code class="language-text">1) ValidateOnBuild: Singleton -&gt; Scoped
+   AggregateException: Some services are not able to be constructed (Error while validating
+   the service descriptor 'ServiceType: ReportService Lifetime: Singleton ...':
+   Cannot consume scoped service 'AppDbContext' from singleton 'ReportService'.)
+2) GetRequiredService&lt;AppDbContext&gt;() из корневого провайдера
+   InvalidOperationException: Cannot resolve scoped service 'AppDbContext' from root provider.
+3) Singleton держит IServiceProvider и резолвит Scoped
+   запрос-1 получил запрос-1 -&gt; RequestContext#1 (tenant=tenant-A)
+   запрос-2 получил запрос-2 -&gt; RequestContext#1 (tenant=tenant-A)
+   один и тот же экземпляр: True
+3b) ValidateOnBuild: зависимость не зарегистрирована
+   AggregateException: ... Unable to resolve service for type 'AppDbContext'
+   while attempting to activate 'ReportService'.
+4) IServiceScopeFactory: свой scope на операцию
+   операция-1 получила операция-1 -&gt; RequestContext#2 (tenant=tenant-A)
+   операция-2 получила операция-2 -&gt; RequestContext#3 (tenant=tenant-A)</code></pre>
+    </div>
+    <p>Сценарий 3 — тот самый Service Locator из legacy-кода: Singleton получил <code>IServiceProvider</code>
+      и резолвит Scoped-сервис. Провайдер собран без валидации, и оба «запроса» получают
+      <strong>один и тот же</strong> <code>RequestContext#1</code>. Если в этом объекте арендатор, имя
+      пользователя или <code>DbContext</code> — данные первого запроса утекут во второй. Именно так
+      выглядит баг «иногда показываются чужие заказы».</p>
+    <p>Сценарий 4 — правильный: Singleton зависит не от сервиса, а от фабрики scope'ов и создаёт свой scope
+      на операцию (глава 15, раздел про Captive Dependency).</p>
+    <div class="codewrap">
+      <p class="cap">Код сценариев 3 и 4 (сокращённо)</p>
+      <pre><code class="language-csharp">public sealed class LegacyService(IServiceProvider sp)      // ✘ сервис-локатор в синглтоне
+{
+    public string Handle(string name) =&gt; $"{name} -&gt; {sp.GetRequiredService&lt;RequestContext&gt;}";
+}
+
+public sealed class FixedService(IServiceScopeFactory factory)   // ✔ свой scope на операцию
+{
+    public string Handle(string name)
+    {
+        using var scope = factory.CreateScope();
+        return $"{name} -&gt; {scope.ServiceProvider.GetRequiredService&lt;RequestContext&gt;}";
+    }
+}</code></pre>
+    </div>
+    <div class="box tip">
+      <span class="t">Чек-лист миграции DI</span>
+      <ol>
+        <li>Каждую регистрацию legacy-контейнера переписать в один из трёх методов: «на запрос» —
+          <code>AddScoped</code>, «на всё приложение» — <code>AddSingleton</code>.</li>
+        <li>Все <code>Resolve&lt;T&gt;()</code> / <code>DependencyResolver.Current</code> заменить на
+          параметры конструктора. Если без провайдера не обойтись — только <code>IServiceScopeFactory</code>.</li>
+        <li>Включить <code>ValidateScopes</code> + <code>ValidateOnBuild</code> во всех окружениях.</li>
+        <li>Добавить тест-сторож: собрать провайдер из реальных регистраций и получить каждый сервис
+          внутри scope (глава 15).</li>
+        <li>Проверить, что <code>DbContext</code> нигде не Singleton — в EF Core его время жизни Scoped.</li>
+      </ol>
+    </div>
+    <h2><code>HttpContext.Current</code> → <code>IHttpContextAccessor</code></h2>
+    <p>В MVC 5 контекст запроса был глобальной статикой: <code>HttpContext.Current</code> (и
+      <code>Thread.CurrentPrincipal</code> рядом). В .NET Core такой статики нет — есть сервис
+      <code>IHttpContextAccessor</code>. Первая ловушка: <strong>он не зарегистрирован по умолчанию</strong>.
+      Если внедрить его в конструктор и забыть <code>AddHttpContextAccessor()</code>, контейнер скажет:</p>
+    <div class="codewrap">
+      <p class="cap">Что печатает приложение (Development)</p>
+      <pre><code class="language-text">Unhandled exception. System.AggregateException: Some services are not able to be constructed
+(Error while validating the service descriptor 'ServiceType: Probe Lifetime: Singleton
+ImplementationType: Probe': Unable to resolve service for type
+'Microsoft.AspNetCore.Http.IHttpContextAccessor' while attempting to activate 'Probe'.)</code></pre>
+    </div>
+    <p>Проверка «а он вообще есть?» делается одной строкой, если сомневаетесь:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddHttpContextAccessor();   // без этой строки IHttpContextAccessor = null/ошибка
+var app = builder.Build();
+Console.WriteLine(app.Services.GetService&lt;IHttpContextAccessor&gt;() is not null);   // False → True после Add</code></pre>
+    </div>
+    <p>Дальше — как этим пользоваться правильно. Singleton может зависеть от аксессора: аксессор отдаёт
+      контекст <em>текущего</em> запроса, поэтому один и тот же Singleton видит разные запросы:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class CtxProbe(IHttpContextAccessor acc)      // Singleton — можно
+{
+    public string Describe() =&gt;
+        $"path={acc.HttpContext?.Request.Path}";             // ← контекст ТЕКУЩЕГО запроса
+}
+
+app.MapGet("/orders",   (CtxProbe p) =&gt; p.Describe());
+app.MapGet("/invoices", (CtxProbe p) =&gt; p.Describe());</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что вернули два запроса</p>
+      <pre><code class="language-text">path=/orders
+path=/invoices</code></pre>
+    </div>
+    <p>А теперь классическая ошибка мигранта: сохранить <code>HttpContext</code> в поле «чтобы не дёргать
+      аксессор». Контекст живёт один запрос; после его завершения объект уничтожается:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class StaleHolder(IHttpContextAccessor acc)
+{
+    private HttpContext? _saved;                   // ✘ так делать нельзя
+    public string Describe(string path)
+    {
+        _saved ??= acc.HttpContext;                // запомнили контекст ПЕРВОГО запроса
+        return $"пришёл {path}, в поле лежит {_saved?.Request.Path}";
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Что происходит со вторым запросом</p>
+      <pre><code class="language-text">GET /orders    200   пришёл /orders, в поле лежит /orders
+GET /invoices  500   System.ObjectDisposedException: IFeatureCollection has been disposed.
+                     Object name: 'Collection'.</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Правило вместо <code>HttpContext.Current</code></span>
+      <p>Внутри запроса берите <code>HttpContext</code> из параметра обработчика (он приходит сам), в
+        сервисах — <code>IHttpContextAccessor.HttpContext</code> <em>в момент вызова</em>. Хранить
+        контекст, <code>Request</code>, <code>Response</code>, <code>HttpContext.User</code> в полях
+        Singleton'а нельзя: после запроса это уже мусор. Всё, что нужно «после», копируйте в свои
+        объекты (например, <code>tenantId</code> строкой).</p>
+    </div>
+
+    <h2>Конфигурация: <code>web.config</code> → <code>appsettings.json</code></h2>
+    <p>Второй по частоте источник боли: в Framework настройки читали через
+      <code>ConfigurationManager.AppSettings[...]</code> и <code>&lt;connectionStrings&gt;</code>, а файл
+      <code>web.config</code> ещё и содержал модули, handlers и трансформации для сборок. В .NET Core
+      конфигурация — это набор источников «ключ-значение» (глава 17):</p>
+    <table>
+      <thead><tr><th>Было</th><th>Стало</th></tr></thead>
+      <tbody>
+        <tr><td><code>&lt;appSettings&gt;&lt;add key="Rate" value="5"/&gt;</code></td>
+          <td><code>appsettings.json</code> → <code>builder.Configuration["Rate"]</code></td></tr>
+        <tr><td><code>&lt;connectionStrings&gt;&lt;add name="Main" .../&gt;</code></td>
+          <td><code>ConnectionStrings:Main</code> и <code>builder.Configuration.GetConnectionString("Main")</code></td></tr>
+        <tr><td>Трансформации <code>Web.Release.config</code></td>
+          <td><code>appsettings.{Environment}.json</code> поверх основного файла</td></tr>
+        <tr><td><code>machine.config</code>, реестр, IIS-настройки</td>
+          <td>Переменные окружения и аргументы командной строки (последние в цепочке — главные)</td></tr>
+        <tr><td>Своя секция <code>ConfigurationSection</code></td>
+          <td>Класс настроек + <code>IOptions&lt;T&gt;</code> + валидация на старте</td></tr>
+      </tbody>
+    </table>
+    <p>HTTP-модули и handlers из <code>web.config</code> заменяются middleware в <code>Program.cs</code>
+      (глава 19), а <code>Global.asax</code> — обычным кодом до <code>app.Run()</code>: регистрации,
+      прогрев, <code>app.Use...</code>.</p>
+    <h2>Потоки и асинхронность: что изменилось</h2>
+    <p>В ASP.NET (System.Web) у запроса был <code>SynchronizationContext</code>: продолжение после
+      <code>await</code> возвращалось в него, а <code>HttpContext.Current</code> был привязан к потоку.
+      В ASP.NET Core контекста нет — это проверяется одной строкой в обработчике:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.MapGet("/sync", () =&gt; $"SynchronizationContext = {(SynchronizationContext.Current is null ? "null" : SynchronizationContext.Current.GetType().Name)}");</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Ответ эндпоинта</p>
+      <pre><code class="language-text">SynchronizationContext = null</code></pre>
+    </div>
+    <p>Из этого следуют два практических вывода. Первый: <code>ConfigureAwait(false)</code> в
+      ASP.NET Core почти ни на что не влияет (контекста нет), но в библиотеках его всё равно пишут —
+      библиотека не знает, куда её подключат (глава 18 C#-книги). Второй: «поток запроса» больше не
+      существует как понятие, поэтому любое состояние, привязанное к потоку, ломается при первом же
+      <code>await</code>.</p>
+    <div class="codewrap">
+      <p class="cap">Проверка на .NET 8: <code>[ThreadStatic]</code> против <code>AsyncLocal</code></p>
+      <pre><code class="language-csharp">[ThreadStatic] static string? _threadValue;                  // legacy-подход
+static readonly AsyncLocal&lt;string?&gt; _asyncValue = new();    // современный
+
+_threadValue = "tenant-A";
+_asyncValue.Value = "tenant-A";
+await Task.Delay(50).ConfigureAwait(false);                 // продолжение на другом потоке</code></pre>
+    </div>
+    <div class="codewrap">
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">до await:     ThreadStatic=tenant-A, AsyncLocal=tenant-A
+после await:  ThreadStatic=null,     AsyncLocal=tenant-A
+поток: 5
+после Task.Run: AsyncLocal=tenant-A</code></pre>
+    </div>
+    <ul>
+      <li><strong><code>[ThreadStatic]</code> теряет значение</strong> после <code>await</code>: продолжение
+        выполнилось на другом потоке, а поле принадлежит потоку.</li>
+      <li><strong><code>AsyncLocal&lt;T&gt;</code> течёт по цепочке вызовов</strong> — значение видно и после
+        <code>await</code>, и внутри вложенных асинхронных методов.</li>
+      <li><strong>Но не в обратную сторону:</strong> изменение внутри <code>Task.Run</code> не вернулось в
+        родителя — после него всё ещё <code>tenant-A</code>. Это «копия на ветку», а не общая переменная.</li>
+    </ul>
+    <p>Именно поэтому <code>CallContext.LogicalSetData</code>/<code>[ThreadStatic]</code> из legacy-кода
+      (контекст арендатора, корреляционный id, «текущий пользователь») при переезде заменяют на
+      <code>AsyncLocal</code> — или, что честнее, передают параметром. Тот же механизм лежит в основе
+      <code>HttpContextAccessor</code> и <code>Activity.Current</code> (трассировка, глава 20).</p>
+    <div class="box warn">
+      <span class="t">Чего в .NET 8 нет вообще</span>
+      <ul>
+        <li><strong>Второй AppDomain.</strong> <code>AppDomain.CreateDomain("second")</code> →
+          <code>PlatformNotSupportedException: Secondary AppDomains are not supported on this platform.</code>
+          Плагины, которые грузили в отдельный AppDomain «чтобы выгрузить», переписывают на
+          <code>AssemblyLoadContext</code> (он выгружаемый) или на отдельный процесс.</li>
+        <li><strong><code>BinaryFormatter</code>.</strong> В .NET 8 это ошибка компиляции
+          <code>SYSLIB0011</code>, а если её подавить — <code>NotSupportedException: BinaryFormatter
+          serialization and deserialization are disabled within this application.</code> Данные, которые
+          лежали в кэше/очереди в виде <code>BinaryFormatter</code>, придётся перечитать старым кодом и
+          переложить в JSON/Protobuf.</li>
+        <li><strong>WCF-сервер, Web Forms, <code>System.Web</code>, .NET Remoting.</strong> Только замена:
+          gRPC (глава 29), MVC/Razor Pages/Blazor, HTTP API.</li>
+      </ul>
+    </div>
+    <h2>Порядок миграции, который работает</h2>
+    <ol>
+      <li><strong>Инвентаризация.</strong> Список проектов и их target framework; зависимости, которые
+        нельзя пересобрать (COM, GAC-сборки, сторонние <code>net48</code>-библиотеки); места, где
+        используется <code>System.Web</code>, <code>HttpContext.Current</code>, <code>web.config</code>,
+        WCF, <code>BinaryFormatter</code>, AppDomain. Это и есть объём работ, а не «количество файлов».</li>
+      <li><strong>Вынести общий код в <code>netstandard2.0</code>.</strong> Модели, бизнес-логику,
+        клиентов внешних систем. Такие библиотеки собираются и для <code>net48</code>, и для
+        <code>net8.0</code> — старый хост продолжает работать, новый уже использует тот же код.</li>
+      <li><strong>Переписать хост.</strong> <code>Program.cs</code>: DI (глава 15), конфигурация
+        (глава 17), middleware вместо модулей (глава 19), <code>IHttpContextAccessor</code> вместо
+        статики. Сразу включить <code>ValidateScopes</code>/<code>ValidateOnBuild</code>.</li>
+      <li><strong>Данные.</strong> Схему ведёт <em>одна</em> сторона: пока пишет EF6 — EF Core
+        подключается к той же базе без своих миграций (и наоборот). Массовые операции и проекции — по
+        правилам главы 24.</li>
+      <li><strong>Сосуществование.</strong> Классический приём — <em>strangler</em>: ставим перед старым
+        приложением reverse proxy (например, YARP) и постепенно переводим маршруты на новое. Тогда
+        откат — это изменение одного маршрута, а не выкатка целиком.</li>
+      <li><strong>Проверка эквивалентности.</strong> Одни и те же запросы к старой и новой системе,
+        сравнение JSON (с точностью до порядка полей), сравнение планов SQL для тяжёлых запросов
+        (SQL-книга, глава 21). Только после этого — теневой трафик и канареечный выкат.</li>
+    </ol>
+    <div class="box note">
+      <span class="t">Две вещи, которые забывают</span>
+      <ul>
+        <li><strong>Аутентификация.</strong> Cookie, выданная старым приложением, не «просто работает» в
+          новом: нужны те же имя и схема cookie, общие ключи защиты данных и одинаковые claim'ы. Иначе
+          пользователи получат разлогин на каждом переключении маршрута.</li>
+        <li><strong>Фоновые задачи.</strong> В Framework это часто Windows-служба или
+          <code>HostingEnvironment.QueueBackgroundWorkItem</code>; в .NET Core —
+          <code>BackgroundService</code> (глава 16) с корректной остановкой (глава 28). Две копии
+          обработчика на одной таблице-очереди без блокировки — это двойная обработка (глава 31,
+          идемпотентность).</li>
+      </ul>
+    </div>
+
+    <h2>Что спросят на интервью</h2>
+    <ul>
+      <li><strong>«Что было самым сложным при переезде?»</strong> — не смена target framework, а
+        неявные контракты: времена жизни в DI, статика <code>HttpContext.Current</code>, конфигурация,
+        сериализация и фоновые задачи. Каждую из этих подсистем пришлось заменять целиком.</li>
+      <li><strong>«Как ловили Captive Dependency?»</strong> — <code>ValidateScopes</code> +
+        <code>ValidateOnBuild</code> во всех окружениях (в Development они включены сами, в Production —
+        нет), тест-сторож по графу, код-ревью на <code>DbContext</code>/<code>IServiceProvider</code> в
+        Singleton. Текст ошибки конкретный: <code>Cannot consume scoped service 'AppDbContext' from
+        singleton 'ReportService'</code>.</li>
+      <li><strong>«Куда девать <code>HttpContext.Current</code>?»</strong> — <code>IHttpContextAccessor</code>,
+        который надо зарегистрировать руками, и брать контекст в момент вызова. Сохранённый в поле
+        контекст после запроса — <code>ObjectDisposedException</code>.</li>
+      <li><strong>«Как перевозили данные?»</strong> — общий код в <code>netstandard2.0</code>, EF Core
+        рядом с EF6 на одной схеме, у схемы один хозяин, тесты эквивалентности выборок.</li>
+      <li><strong>«Как выкатывали?»</strong> — strangler через reverse proxy: маршрут за маршрутом,
+        теневой трафик, канарейка, откат переключением маршрута.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <p>Миграция — это замена подсистем, а не смена версии: DI (три времени жизни + валидация графа),
+        конфигурация (источники вместо <code>web.config</code>), контекст запроса
+        (<code>IHttpContextAccessor</code> вместо статики), состояние потока (<code>AsyncLocal</code>
+        вместо <code>[ThreadStatic]</code>). Всё, чего в .NET нет (AppDomain, BinaryFormatter, WCF,
+        Web Forms), заменяется, а не «включается обратно».</p>
+    </div>
+
+    <p>Дальше — глава 34: как из этого материала собрать ответ на интервью.</p>
+
     <div class="pager">
       <a href="ch32-case.html">← <span class="sp">Глава 32. Сквозной разбор: высоконагруженный эндпоинт</span></a>
       <a href="ch34-interview.html"><span class="sp">Глава 34. Как отвечать на интервью</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
