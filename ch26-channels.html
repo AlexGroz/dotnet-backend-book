@@ -50,6 +50,72 @@
         как буфер между «принял» и «отправил».</p>
     </div>
 
+    <h2><code>Channel&lt;T&gt;</code> против <code>ConcurrentQueue&lt;T&gt;</code>: что именно даёт канал</h2>
+    <p>Первый вопрос на интервью звучит как «в чём преимущество канала перед
+      <code>ConcurrentQueue</code>». Честный ответ начинается с того, что <strong>скоростью канал не
+      выигрывает</strong>. Замер: миллион целых, один производитель и один потребитель, ёмкость 1000
+      (минимум из трёх прогонов, .NET 8, 16 ядер):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Channel&lt;int&gt; bounded        129 мс   (CPU 390 мс — суммарно по всем потокам)
+ConcurrentQueue&lt;int&gt;         16 мс   (CPU  20 мс)
+BlockingCollection&lt;int&gt;     174 мс   (CPU 350 мс)</code></pre>
+    </div>
+    <p><code>ConcurrentQueue</code> здесь в 8 раз быстрее: это сегментированный список без ожидания и без
+      асинхронной машинерии, на каждый элемент не тратится ни сигнал, ни продолжение. Канал по скорости
+      сравним с <code>BlockingCollection</code>. Преимущество канала — не в скорости, а в
+      <strong>контракте</strong>:</p>
+    <ul>
+      <li><strong>Ожидание встроено.</strong> У <code>ConcurrentQueue</code> есть только
+        <code>TryDequeue</code>: «нет элемента» — это не «подожди», а «делай что-то сам». Приходится
+        крутить цикл, жечь CPU или спать по таймеру:</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ConcurrentQueue: «подожди» пишется руками, и завершение — тоже руками
+var queue = new ConcurrentQueue&lt;OrderEvent&gt;();
+var done = false;                       // кто и когда его выставит — ваша забота
+
+var consumer = Task.Run(async () =&gt;
+{
+    while (!done || !queue.IsEmpty)
+    {
+        if (queue.TryDequeue(out var e)) await HandleAsync(e);
+        else await Task.Delay(1);       // опрос: либо жечь CPU, либо спать
+    }
+});
+
+// Channel: и ожидание, и завершение — часть контракта
+await foreach (var e in channel.Reader.ReadAllAsync(ct))
+    await HandleAsync(e);               // цикл сам закончится после Writer.Complete()</code></pre>
+    </div>
+    <ul>
+      <li><strong>Противодавление.</strong> У очереди нет предела: производитель кладёт быстрее, чем
+        потребитель забирает, и очередь растёт до <code>OutOfMemoryException</code>. У ограниченного канала
+        предел есть, и его видно:</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-text">Медленный потребитель (1 мс на элемент), производитель хочет положить 10 000:
+
+ConcurrentQueue:        в очереди накопилось до 9999   ← растёт без предела
+Channel (Wait), 100:    до 100                          ← производитель ждёт (backpressure)
+Channel (DropOldest):   до 100, старое вытесняется      ← память не растёт, часть данных потеряна</code></pre>
+    </div>
+    <ul>
+      <li><strong>Завершение и «сколько осталось».</strong> <code>Writer.Complete()</code> закрывает канал,
+        <code>ReadAllAsync</code> дочитывает остаток и завершает <code>await foreach</code>. Для
+        <code>ConcurrentQueue</code> нужен отдельный флаг «больше не пишут» (в примере выше —
+        <code>done</code>), и его ещё надо правильно выставить и увидеть из другого потока. Длину
+        ограниченного канала можно посмотреть (<code>Reader.Count</code>) — она же и есть метрика
+        загрузки.</li>
+      <li><strong><code>SingleReader</code>/<code>SingleWriter</code>.</strong> Канал знает, сколько у него
+        читателей и писателей, и при одном каждом работает без блокировок.</li>
+    </ul>
+    <p>Итого: <code>ConcurrentQueue</code> — когда нужна <em>просто потокобезопасная коллекция</em> и её
+      разбирают в своём темпе (батчи, буферы, счётчики); <code>Channel&lt;T&gt;</code> — когда между
+      производителем и потребителем нужен <strong>асинхронный «стоп, подожди»</strong> и понятное
+      завершение. Разница в стоимости — единицы десятых микросекунды на элемент; на миллионе это 129 мс,
+      то есть ~8 млн элементов в секунду, что для очереди внутри процесса почти всегда достаточно (а если
+      нет — батчите, как в разделе ниже).</p>
+
     <h2><code>Channel&lt;T&gt;</code>: три решения, которые надо принять</h2>
     <ol>
       <li><strong>Ограниченный или безграничный.</strong> <code>CreateBounded&lt;T&gt;(capacity)</code> —
@@ -263,6 +329,9 @@ return Results.Accepted();</code></pre>
         (backpressure) или проверяйте <code>TryWrite</code>; собирайте пачки и не забывайте хвост;
         в воркере — <code>BackgroundService</code> со scope на итерацию, обработкой исключений и дренажом
         при остановке. Всё, что нельзя терять, — сначала в БД (outbox) или в брокер.</p>
+      <p><code>Channel&lt;T&gt;</code> не быстрее <code>ConcurrentQueue&lt;T&gt;</code> (в замере — в 8 раз
+        медленнее на миллионе элементов), зато даёт то, чего у очереди нет: асинхронное ожидание без
+        занятого потока, предел ёмкости с противодавлением и завершение через <code>Complete()</code>.</p>
     </div>
 
     <div class="pager">
