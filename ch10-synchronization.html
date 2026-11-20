@@ -63,6 +63,8 @@ public void IncrementShort() =&gt; _counter++;</code></pre>
         <tr><td><code>lock</code></td><td>Защитить короткий участок кода, чтобы в него входил только один поток</td></tr>
         <tr><td><code>Interlocked</code></td><td>Атомарные простые операции над числом/ссылкой, без блокировки</td></tr>
         <tr><td><code>SemaphoreSlim</code></td><td>Ограничить число одновременных операций; умеет ждать асинхронно</td></tr>
+        <tr><td><code>Lock</code> (.NET 9+)</td><td>То же, что <code>lock</code>, но объект блокировки — специальный
+          тип: чуть быстрее под конкуренцией (измерения — ниже)</td></tr>
         <tr><td><code>Concurrent*</code>-коллекции</td><td>Потокобезопасные словари/очереди и т. п.</td></tr>
       </tbody>
     </table>
@@ -185,11 +187,161 @@ if (_cache.TryRemove(id, out var removed))
         <code>typeof(T)</code>, не строка и не поле, которое меняется (подробнее — блок выше).</li>
     </ul>
 
-    <div class="box note">
-      <span class="t">Если нужно «ждать» внутри защиты</span>
-      <p>Для асинхронных сценариев используют <code>SemaphoreSlim</code> с <code>WaitAsync</code> — он умеет
-        освобождать поток на время ожидания. Это тот же <code>SemaphoreSlim</code>, которым мы будем
-        ограничивать параллелизм в главе 13.</p>
+    <h2>Почему <code>await</code> внутри <code>lock</code> запрещён — и что будет, если обойти</h2>
+    <p>Запрет из списка выше — не стилистика. <code>lock</code> компилируется в
+      <code>Monitor.Enter</code>/<code>Monitor.Exit</code>, а <code>Monitor</code> привязан к
+      <strong>потоку</strong>: выйти из блокировки обязан тот самый поток, который в неё вошёл. Компилятор это
+      знает, поэтому <code>await</code> внутри <code>lock</code> — ошибка компиляции (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">error CS1996: Cannot await in the body of a lock statement</code></pre>
+    </div>
+    <p>Причина в том, что <code>await</code> — это «отпусти поток и продолжи позже», а «позже» может случиться
+      <em>на другом потоке</em>. Тогда либо <code>Exit</code> вызовет чужой поток (а он не имеет права), либо
+      блокировка провисит всё время ожидания — секунды и минуты, если ждём сеть.</p>
+
+    <p><strong>Обход №1: <code>Monitor</code> вручную.</strong> Он компилируется — и иногда даже «работает»:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ компилируется, но нарушает инвариант Monitor
+Monitor.Enter(gate);
+try
+{
+    await Task.Delay(30).ConfigureAwait(false);   // продолжится, возможно, на другом потоке
+}
+finally
+{
+    Monitor.Exit(gate);                          // а выходить обязан тот же поток
+}</code></pre>
+    </div>
+    <p>Прогон этого метода 20 раз подряд на .NET 8 дал <code>SynchronizationLockException</code> в
+      <strong>5–7 случаях из 20</strong> — от запуска к запуску по-разному, потому что всё зависит от того,
+      вернётся ли продолжение на прежний поток:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">SynchronizationLockException: Object synchronization method was called from an unsynchronized block of code.</code></pre>
+    </div>
+    <p>«Иногда работает» — худший вид бага: тесты зелёные, прод падает раз в час.</p>
+
+    <p><strong>Обход №2: подождать синхронно.</strong> Самая частая попытка — оставить <code>lock</code> и
+      добавить <code>.Result</code>/<code>.Wait()</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// ✘ поток держит блокировку и при этом заблокирован
+lock (gate)
+{
+    order = LoadOrderAsync(id).GetAwaiter().GetResult();
+}</code></pre>
+    </div>
+    <p>Здесь две беды сразу. Первая: пока поток ждёт, блокировка занята — все остальные стоят в очереди, то есть
+      вся работа стала последовательной. Вторая — настоящая причина «голодания» из главы 9: продолжению
+      ожидаемой операции нужен <strong>поток пула</strong>, а все потоки заняты такими же ожиданиями. Задаче
+      негде завершиться, и код не двигается вообще.</p>
+    <p>Замер на маленьком пуле (4 потока — как в контейнере с 4 vCPU, ограничение задано
+      <code>ThreadPool.SetMaxThreads(4, 4)</code>), 8 задач по 30 мс «работы»:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">пул: max=4, SetMaxThreads=True, ProcessorCount=4
+
+lock { Task.Delay(30).Wait(); }              → завершилось 0 из 8 за 5000 мс — клинч
+await sem.WaitAsync(); await Task.Delay(30); → завершилось 8 из 8 за  249 мс</code></pre>
+    </div>
+    <p>Во втором случае потоков в пуле тоже четыре — но ни один не занят ожиданием: <code>await</code> вернул
+      поток в пул, пока таймер тикает. Это и есть разница между «ждать потоком» и «ждать асинхронно».</p>
+    <p>В проде то же самое видно по числам: <code>ThreadPool.ThreadCount</code> упирается в предел, очередь
+      пула (<code>ThreadPool.PendingWorkItemCount</code>) растёт, а latency запросов ползёт вверх при низком CPU.
+      Если видите эту картину — ищите в коде <code>lock</code> с ожиданием внутри, <code>.Result</code>,
+      <code>.Wait()</code> или <code>Task.Run(...).Wait()</code>.</p>
+    <div class="box warn">
+      <span class="t">Правило</span>
+      <p>Под <code>lock</code> — только короткий синхронный код: без ввода-вывода, без <code>await</code>, без
+        <code>.Result</code>/<code>.Wait()</code>. Если внутри критической секции нужно <em>ждать</em> —
+        это уже не <code>lock</code>, а <code>SemaphoreSlim</code>.</p>
+    </div>
+
+    <h2>Чем заменить: <code>SemaphoreSlim(1, 1)</code> и <code>System.Threading.Lock</code></h2>
+    <p>Если внутри критической секции нужно ждать — берут <code>SemaphoreSlim</code> с
+      <code>WaitAsync</code>. Это тот же <code>SemaphoreSlim</code>, которым мы будем ограничивать параллелизм в
+      главе 13; здесь у него счётчик <code>1</code>, то есть «пускать по одному»:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">private readonly SemaphoreSlim _gate = new(1, 1);   // один «пропуск»
+
+public async Task&lt;Order&gt; LoadAsync(Guid id, CancellationToken ct)
+{
+    await _gate.WaitAsync(ct);                      // ждём БЕЗ потока
+    try
+    {
+        return await _db.Orders.FirstAsync(o =&gt; o.Id == id, ct);   // await внутри — можно
+    }
+    finally
+    {
+        _gate.Release();                            // освобождать обязательно, иначе клинч
+    }
+}</code></pre>
+    </div>
+    <p>Три отличия от <code>lock</code>, о которых спрашивают (все проверены на .NET 8):</p>
+    <ul>
+      <li><strong>Не привязан к потоку.</strong> Именно поэтому <code>await</code> внутри допустим: вошёл один
+        поток, а <code>Release</code> может вызвать уже другой (проверено — исключения нет).</li>
+      <li><strong>Нет реентерабельности.</strong> <code>lock</code> тем же потоком берётся повторно, а
+        <code>SemaphoreSlim(1, 1)</code> на повторный <code>WaitAsync</code> просто зависнет: в прогоне
+        <code>WaitAsync(300)</code> вернул <code>False</code>, то есть «не дождался».</li>
+      <li><strong>Дороже.</strong> Вход — это операции над счётчиком и очередью ожидающих, а не флаг в заголовке
+        объекта. Замер: 20 млн входов в одном потоке — <code>lock</code> 235 мс, <code>SemaphoreSlim</code>
+        494 мс (≈2 раза медленнее).</li>
+    </ul>
+    <p>В .NET 9 появился третий вариант — <code>System.Threading.Lock</code>. Это <strong>только синхронная</strong>
+      блокировка (<code>await</code> внутри по-прежнему нельзя — тот же <code>CS1996</code>, проверено), но
+      устроена она легче, чем <code>Monitor</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">private readonly Lock _gate = new();          // System.Threading.Lock, .NET 9+
+
+public void Apply(Discount d)
+{
+    lock (_gate)                              // C# 13 разворачивает это в EnterScope()
+    {
+        _total -= d.Amount;
+    }
+
+    // то же самое явно, если нужен using-блок:
+    using (_gate.EnterScope())
+    {
+        _total -= d.Amount;
+    }
+}</code></pre>
+    </div>
+    <p>Что здесь именно измерено на .NET 9.0.23 (16 ядер), а не пересказано из блогов:</p>
+    <ul>
+      <li><strong><code>lock</code> на <code>Lock</code> — это <code>EnterScope</code>, а не
+        <code>Monitor</code>.</strong> Пока один поток держит <code>lock (_gate)</code>, ручной
+        <code>_gate.TryEnter()</code> из другого возвращает <code>False</code>. Если бы компилятор использовал
+        <code>Monitor</code>, это была бы <em>другая</em> блокировка и <code>TryEnter</code> бы прошёл.</li>
+      <li><strong>Выигрыш скромный и виден под конкуренцией.</strong> 20 млн входов в одном потоке:
+        <code>Monitor</code> 235 мс, <code>Lock</code> 242 мс — разницы нет. Четыре потока по 2 млн инкрементов:
+        <code>Monitor</code> 894 мс, <code>Lock</code> 802 мс — около 10 %.</li>
+      <li><strong>Возможности те же, ограничения те же:</strong> только синхронный код, привязка к потоку,
+        реентерабельность. «Асинхронным» <code>Lock</code> не стал.</li>
+    </ul>
+    <table>
+      <thead><tr><th>Что нужно</th><th>Чем пользоваться</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>Короткий синхронный участок (счётчик, список в памяти)</td><td><code>lock</code> на
+          <code>object</code>; в .NET 9+ — на <code>Lock</code></td><td>Дешевле всего; <code>Lock</code> чуть
+          быстрее под конкуренцией и понятнее по смыслу</td></tr>
+        <tr><td>Одна атомарная операция</td><td><code>Interlocked</code></td><td>Блокировки нет вообще</td></tr>
+        <tr><td>Ждать внутри критической секции (<code>await</code>, ввод-вывод)</td>
+          <td><code>SemaphoreSlim(1, 1)</code> + <code>WaitAsync</code></td><td>Не держит поток;
+          <code>lock</code> и <code>Lock</code> этого не умеют</td></tr>
+        <tr><td>Ограничить параллелизм: не 1, а N</td><td><code>SemaphoreSlim(N, N)</code>,
+          <code>Parallel.ForEachAsync</code></td><td>Счётчик семафора и есть «сколько одновременно»</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Две ловушки <code>SemaphoreSlim</code></span>
+      <ul>
+        <li><strong>Один <code>Release</code> на каждый успешный <code>WaitAsync</code>, и в
+          <code>finally</code>.</strong> Забыли — очередь встанет навсегда; лишний —
+          <code>SemaphoreFullException: Adding the specified count to the semaphore would cause it to exceed its
+          maximum count.</code> (проверено).</li>
+        <li><strong>Не ждите без токена.</strong> Передавайте <code>CancellationToken</code> в
+          <code>WaitAsync(ct)</code>: иначе при остановке приложения или таймауте запрос останется в очереди
+          навсегда (глава 28 — про остановку).</li>
+      </ul>
     </div>
 
     <h2>Лучшая синхронизация — её отсутствие</h2>
@@ -201,8 +353,13 @@ if (_cache.TryRemove(id, out var removed))
       <span class="t">★ Что запомнить из главы</span>
       <p>Потоки делят память → возможны гонки. Защищайтесь <code>lock</code>, <code>Interlocked</code>,
         <code>SemaphoreSlim</code> или конкурентными коллекциями. Блокировку держите коротко и никогда не
-        ждите под ней ввода-вывода. А ещё синхронизация нужна потому, что потоки <em>ждут</em> — об этом в
-        следующей главе.</p>
+        ждите под ней ввода-вывода. Если ждать всё-таки нужно — это <code>SemaphoreSlim(1, 1)</code> с
+        <code>WaitAsync</code>, а не <code>lock</code>: <code>await</code> внутри <code>lock</code> —
+        <code>CS1996</code>, а «обходы» дают <code>SynchronizationLockException</code> (Monitor через
+        <code>await</code>) или клинч пула (<code>.Wait()</code>/<code>.Result</code> под блокировкой).
+        В .NET 9 <code>System.Threading.Lock</code> заменяет <code>lock</code> на <code>object</code>, но
+        остаётся синхронным. А ещё синхронизация нужна потому, что потоки <em>ждут</em> — об этом в следующей
+        главе.</p>
     </div>
 
     <div class="pager">
