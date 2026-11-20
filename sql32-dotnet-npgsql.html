@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 32 · Работа с PostgreSQL из .NET</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +20,448 @@
   <div class="chapter">
     <div class="part">SQL · Часть IX · Практика</div>
     <h1>Глава 32. Работа с PostgreSQL из .NET</h1>
-    <p class="sublead">Npgsql, пул соединений, prepared statements, EF Core</p>
+    <p class="sublead">Npgsql по шагам: что значит каждый ключ в строке подключения, как передаются параметры и
+      почему строка вместо <code>Guid</code> ломает запрос, что приходит из базы в .NET, как ускорить вставку в
+      12 раз и какие поля есть у <code>PostgresException</code>. Все числа получены прогоном на PostgreSQL 16.15
+      и Npgsql 8.</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Кто с кем разговаривает</h2>
+    <table>
+      <thead><tr><th>Слой</th><th>Что делает</th><th>Кому нужен</th></tr></thead>
+      <tbody>
+        <tr><td><code>ADO.NET</code> (<code>DbConnection</code>, <code>DbCommand</code>, <code>DbDataReader</code>)</td>
+          <td>Общие абстракции .NET для любого провайдера БД</td><td>Всем, кто пишет «ручной» доступ к базе</td></tr>
+        <tr><td><code>Npgsql</code> (пакет <code>Npgsql</code>)</td>
+          <td>Реализация ADO.NET для PostgreSQL: протокол, пул, типы, COPY, батчи</td><td>Коду без ORM; под ним работает
+          и EF Core</td></tr>
+        <tr><td><code>Npgsql.EntityFrameworkCore.PostgreSQL</code></td>
+          <td>Провайдер EF Core: переводит LINQ в SQL для PostgreSQL (глава 24 .NET-раздела)</td>
+          <td>Проектам на EF Core</td></tr>
+      </tbody>
+    </table>
+    <p>Дальше — только <code>Npgsql</code>: то, что нужно понимать, даже если вы работаете через EF Core, потому
+      что все настройки и все ошибки приходят именно с этого уровня.</p>
+
+    <h2>Строка подключения: каждый ключ</h2>
+    <p>Строка — это набор пар <code>Ключ=Значение</code>, разделённых точкой с запятой. Регистр ключей не важен,
+      пробелы вокруг <code>=</code> допускаются. Ниже — рабочий набор с объяснением, что делает каждая пара:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Host=db.internal          -- имя хоста или IP сервера PostgreSQL
+Port=5432                 -- порт; по умолчанию 5432
+Database=app              -- имя базы (не схемы!), к которой подключаемся
+Username=app_user         -- роль PostgreSQL
+Password=***              -- пароль роли
+SSL Mode=Require          -- Require проверяет шифрование и требует доверенный сертификат
+Application Name=orders-api -- имя, которое видно в pg_stat_activity.application_name
+Search Path=app,public    -- какие схемы искать, если схема не указана в имени таблицы
+Pooling=true              -- включить пул соединений (по умолчанию true)
+Minimum Pool Size=2       -- сколько соединений держать открытыми даже без нагрузки
+Maximum Pool Size=50      -- предел одновременных соединений этого процесса
+Timeout=5                 -- сколько секунд ждать свободное соединение из пула
+Command Timeout=30        -- предел выполнения одной команды, секунды
+Keepalive=30              -- TCP keepalive, чтобы мёртвое соединение не висело вечно
+Include Error Detail=true -- вернуть Detail/Where из сервера (по умолчанию они скрыты)
+Max Auto Prepare=10       -- сколько разных запросов готовить на сервере автоматически</code></pre>
     </div>
+    <div class="box warn">
+      <span class="t">Две пары, которые путают чаще всего</span>
+      <ul>
+        <li><strong><code>Timeout</code> и <code>Command Timeout</code> — разные вещи.</strong> <code>Timeout</code>
+          — сколько ждать <em>свободное соединение из пула</em>; <code>Command Timeout</code> — сколько ждать
+          <em>ответа на уже отправленную команду</em>. В прогоне <code>Command Timeout=1</code> на
+          <code>SELECT pg_sleep(3)</code> дал <code>NpgsqlException: Exception while reading from stream</code> с
+          внутренним <code>TimeoutException: Timeout during reading attempt</code> — то есть ошибка приходит
+          обёрнутой, а не «сама по себе».</li>
+        <li><strong><code>Database</code> — это база, а не схема.</strong> Схема (<code>public</code>,
+          <code>app</code>) задаётся <code>Search Path</code> или полным именем таблицы
+          <code>app.orders</code>.</li>
+      </ul>
+    </div>
+    <p>Проверка «кто я и откуда» — тот же <code>application_name</code> виден на сервере:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- application_name и адрес клиента для всех соединений
+SELECT application_name, client_addr, state
+FROM pg_stat_activity
+WHERE datname = current_database();</code></pre>
+    </div>
+
+
+    <h2>Один запрос целиком, строка за строкой</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1) Источник соединений. Создаётся ОДИН раз на процесс: внутри него живёт пул.
+await using var dataSource = new NpgsqlDataSourceBuilder(connectionString).Build();
+
+// 2) Соединение берётся из пула. await using вернёт его в пул при выходе из области.
+await using var conn = await dataSource.OpenConnectionAsync(ct);
+
+// 3) Команда: SQL с позиционными параметрами $1, $2 (нумерация начинается с единицы).
+await using var cmd = new NpgsqlCommand(
+    "SELECT id, total FROM orders WHERE customer_id = $1 AND status = $2", conn);
+
+// 4) Параметры: тип задаётся кодом, а не выводится «как получится».
+cmd.Parameters.Add(new NpgsqlParameter&lt;Guid&gt; { TypedValue = customerId });   // $1 → uuid
+cmd.Parameters.Add(new NpgsqlParameter&lt;string&gt; { TypedValue = "new" });      // $2 → text
+
+// 5) Чтение: reader отдаёт строки по одной и не тянет весь результат в память.
+await using var reader = await cmd.ExecuteReaderAsync(ct);
+while (await reader.ReadAsync(ct))          // true — строка есть, false — набор закончился
+{
+    var id = reader.GetGuid(0);             // колонка 0: uuid → Guid
+    var total = reader.GetDecimal(1);       // колонка 1: numeric → decimal
+    Console.WriteLine($"{id}: {total}");
+}</code></pre>
+    </div>
+    <p>Разбор каждого элемента:</p>
+    <ul>
+      <li><code>NpgsqlDataSourceBuilder</code> — конструктор источника: принимает строку подключения и позволяет
+        донастроить типы/логирование; <code>Build()</code> создаёт <code>NpgsqlDataSource</code> — неизменяемый
+        объект с пулом внутри. Держать его в <code>static</code>/singleton — норма; создавать на каждый запрос —
+        ошибка (новый пул на каждый вызов).</li>
+      <li><code>OpenConnectionAsync(ct)</code> — взять соединение из пула; <code>ct</code> отменяет ожидание
+        (если пул исчерпан, ожидание закончится токеном или <code>Timeout</code>).</li>
+      <li><code>await using</code> — вернуть соединение в пул даже при исключении (глава 23 C#-книги); физически
+        TCP-соединение при этом не закрывается.</li>
+      <li><code>$1</code>, <code>$2</code> — <strong>позиционные</strong> параметры PostgreSQL. Именованный вид
+        <code>@status</code> Npgsql тоже поддерживает, но на сервер всё равно уходят позиционные — не смешивайте
+        стили в одном запросе.</li>
+      <li><code>NpgsqlParameter&lt;T&gt;</code> с <code>TypedValue</code> — параметр с известным типом: Npgsql
+        отправляет его как <code>uuid</code>/<code>text</code>, и серверу не нужно угадывать.</li>
+      <li><code>ExecuteReaderAsync</code> + <code>ReadAsync</code> — потоковое чтение. Для «одного значения»
+        короче <code>ExecuteScalarAsync</code>, для «сколько строк изменено» — <code>ExecuteNonQueryAsync</code>.</li>
+      <li><code>GetGuid(0)</code>/<code>GetDecimal(1)</code> — типизированные геттеры по номеру колонки; надёжнее
+        номера — <code>GetOrdinal("total")</code>, если порядок колонок может измениться.</li>
+    </ul>
+
+    <h2>Параметры: почему строка вместо <code>Guid</code> — не «мелочь»</h2>
+    <p>Классическая ошибка — положить в параметр строку, потому что «в базе uuid выглядит как строка».
+      Результат в прогоне:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">A) строковый параметр: 42883 — operator does not exist: uuid = text</code></pre>
+    </div>
+    <p><code>42883</code> — SQLSTATE «undefined_function»: у PostgreSQL нет оператора сравнения
+      <code>uuid = text</code>, и неявного приведения тут тоже нет. В <code>psql</code> такой же запрос работает,
+      потому что литерал <code>'86b6e5fa-…'</code> имеет «неизвестный» тип и сервер сам решает, что это
+      <code>uuid</code>. Параметр из приложения приходит с уже объявленным типом <code>text</code> — и сравнение
+      невозможно.</p>
+    <p>С правильным типом индекс используется (тот же запрос, параметр <code>Guid</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Bitmap Heap Scan on np_orders  (cost=14.74..734.08 rows=300 …)
+  Recheck Cond: (customer_id = '86b6e5fa-bb80-443f-909b-7ee713e8ef83'::uuid)
+  -&gt;  Bitmap Index Scan on np_orders_customer_idx
+        Index Cond: (customer_id = '86b6e5fa-…'::uuid)</code></pre>
+    </div>
+    <p>Три правила про параметры:</p>
+    <ul>
+      <li><strong>Не склеивайте SQL строками.</strong> Это и путь к SQL-инъекции, и удар по плану: каждый текст —
+        новый запрос, подготовка не работает.</li>
+      <li><strong>Не полагайтесь на <code>AddWithValue</code>.</strong> Он выводит тип из .NET-значения: для
+        <code>string</code> получится <code>text</code>, для <code>DateTime</code> — <code>timestamp</code>
+        (без зоны). Явный <code>NpgsqlParameter&lt;T&gt;</code> или <code>NpgsqlDbType</code> снимает
+        неоднозначность.</li>
+      <li><strong>Приведение в SQL — не решение.</strong> <code>WHERE customer_id = $1::text</code> или
+        <code>::uuid</code> вокруг колонки отключает индекс (подробно — глава 24 .NET-раздела про неявные
+        приведения).</li>
+    </ul>
+
+    <h2>Что приходит из базы в .NET</h2>
+    <p>Типы Npgsql сопоставляет сам, но знать соответствия нужно: именно здесь появляются «неожиданные»
+      <code>DateTime</code> вместо даты и <code>string</code> вместо объекта. Замер: один запрос возвращает
+      значения разных типов, справа — что вернул <code>GetValue</code>:</p>
+    <table>
+      <thead><tr><th>PostgreSQL</th><th>Что вернул <code>GetValue</code> в прогоне</th><th>Как просить явно</th></tr></thead>
+      <tbody>
+        <tr><td><code>uuid</code></td><td><code>System.Guid</code></td><td><code>GetFieldValue&lt;Guid&gt;(i)</code></td></tr>
+        <tr><td><code>timestamptz</code></td><td><code>System.DateTime</code> с <code>Kind=Utc</code></td>
+          <td><code>GetFieldValue&lt;DateTimeOffset&gt;(i)</code> — если нужна зона</td></tr>
+        <tr><td><code>numeric</code></td><td><code>System.Decimal</code></td><td><code>GetDecimal(i)</code></td></tr>
+        <tr><td><code>jsonb</code></td><td><code>System.String</code> (текст JSON)</td>
+          <td><code>GetFieldValue&lt;Meta&gt;(i)</code> — если включён динамический JSON</td></tr>
+        <tr><td><code>int[]</code></td><td><code>System.Int32[]</code></td><td><code>GetFieldValue&lt;int[]&gt;(i)</code></td></tr>
+        <tr><td><code>interval</code></td><td><code>System.TimeSpan</code></td><td><code>GetFieldValue&lt;TimeSpan&gt;(i)</code></td></tr>
+        <tr><td><code>date</code></td><td><code>System.DateTime</code></td><td><code>GetFieldValue&lt;DateOnly&gt;(i)</code></td></tr>
+        <tr><td><code>time</code></td><td><code>System.TimeSpan</code></td><td><code>GetFieldValue&lt;TimeOnly&gt;(i)</code></td></tr>
+        <tr><td><code>int8</code> / <code>float8</code> / <code>bool</code></td>
+          <td><code>long</code> / <code>double</code> / <code>bool</code></td>
+          <td><code>GetInt64</code>, <code>GetDouble</code>, <code>GetBoolean</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Почему <code>date</code> — это <code>DateTime</code></span>
+      <p>Так сложилось исторически: Npgsql отдаёт <code>date</code> как <code>DateTime</code> с временем
+        <code>00:00:00</code>, чтобы не ломать старый код. Явный <code>GetFieldValue&lt;DateOnly&gt;</code> в
+        прогоне вернул <code>1/1/2024</code> — современный тип доступен, но его нужно попросить. С
+        <code>timestamptz</code> наоборот: <code>DateTime</code> уже помечен <code>Kind=Utc</code>
+        (<code>2026-11-20T11:03:29.3534130Z</code>), а <code>DateTimeOffset</code> сохраняет смещение.</p>
+    </div>
+    <p><code>jsonb</code> по умолчанию — просто строка. Чтобы читать и писать объекты, у источника включают
+      динамический JSON (проверено: POCO ушёл в <code>jsonb</code> и вернулся объектом):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1) Источник с поддержкой POCO ↔ jsonb
+var builder = new NpgsqlDataSourceBuilder(connectionString);
+builder.EnableDynamicJson();                 // разрешает сериализовать объекты в jsonb и обратно
+await using var dataSource = builder.Build();
+
+// 2) Запись: параметр-объект отправляется как jsonb
+await using var insert = dataSource.CreateCommand("INSERT INTO meta (id, data) VALUES ($1, $2)");
+insert.Parameters.Add(new NpgsqlParameter&lt;int&gt; { TypedValue = 1 });                    // $1 → int4
+var json = insert.Parameters.Add(new NpgsqlParameter&lt;Meta&gt; { TypedValue = new Meta("gold", 3) });
+json.NpgsqlDbType = NpgsqlDbType.Jsonb;      // без этого объект уйдёт как составной тип, а не JSON
+await insert.ExecuteNonQueryAsync();
+
+// 3) Чтение: строка JSON или сразу объект
+await using var read = dataSource.CreateCommand("SELECT data FROM meta WHERE id = 1");
+await using var reader = await read.ExecuteReaderAsync();
+await reader.ReadAsync();
+Console.WriteLine(reader.GetValue(0));              // String = {"Level": "gold", "Points": 3}
+Console.WriteLine(reader.GetFieldValue&lt;Meta&gt;(0));  // Meta  = gold/3</code></pre>
+    </div>
+
+
+    <h2>Много строк: batch, COPY и одна транзакция</h2>
+    <p>Три способа записать много строк и цена каждого — замер на одном и том же наборе:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">10 000 INSERT по одному, каждый в своей транзакции   4736 мс
+10 000 INSERT по одному, но в ОДНОЙ транзакции       1577 мс
+10 000 INSERT через NpgsqlBatch                       378 мс
+100 000 строк через COPY BINARY                       802 мс  (≈8 мкс на строку)</code></pre>
+    </div>
+    <p>Откуда разница. «По одному» без транзакции — это 10 000 отдельных транзакций, и каждая завершается
+      <code>COMMIT</code> с записью журнала на диск (<code>fsync</code>): отсюда 4.7 с. Те же вставки в одной
+      транзакции убирают цену коммита — 1.6 с, но остаются накладные расходы на круг «запрос → ответ» (около
+      0.15 мс каждый). <code>NpgsqlBatch</code> отправляет все команды одним пакетом — 0.38 с. <code>COPY</code>
+      — потоковый протокол загрузки без разбора SQL на каждую строку — 0.8 с на 100 000.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// NpgsqlBatch: команды копятся в объекте и уходят на сервер одним пакетом
+await using var batch = new NpgsqlBatch(conn);                       // пакет привязан к соединению
+foreach (var row in rows)
+{
+    var item = new NpgsqlBatchCommand(                              // одна команда внутри пакета
+        "INSERT INTO orders (id, customer_id, total, status) VALUES ($1, $2, $3, 'batch')");
+    item.Parameters.Add(new NpgsqlParameter&lt;Guid&gt; { TypedValue = row.Id });        // $1
+    item.Parameters.Add(new NpgsqlParameter&lt;Guid&gt; { TypedValue = row.Customer });  // $2
+    item.Parameters.Add(new NpgsqlParameter&lt;decimal&gt; { TypedValue = row.Total });  // $3
+    batch.BatchCommands.Add(item);                                  // положили в пакет, на сервер пока нет
+}
+await batch.ExecuteNonQueryAsync();                                 // один round-trip на всё</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// COPY: строки идут потоком, формат BINARY — без текстового разбора
+await using var importer = await conn.BeginBinaryImportAsync(
+    "COPY orders (id, customer_id, total, status) FROM STDIN (FORMAT BINARY)");   // открыть поток
+for (var i = 0; i &lt; 100_000; i++)
+{
+    await importer.StartRowAsync();                                 // отметить начало строки
+    await importer.WriteAsync(Guid.NewGuid(), NpgsqlDbType.Uuid);   // колонка 1 → uuid
+    await importer.WriteAsync(Guid.NewGuid(), NpgsqlDbType.Uuid);   // колонка 2 → uuid
+    await importer.WriteAsync(10m + i, NpgsqlDbType.Numeric);       // колонка 3 → numeric
+    await importer.WriteAsync("copy", NpgsqlDbType.Text);           // колонка 4 → text
+}
+await importer.CompleteAsync();                                     // закрыть поток и зафиксировать</code></pre>
+    </div>
+    <p>Когда что: <strong>одиночные</strong> операции — обычные <code>INSERT</code>/<code>UPDATE</code> в своих
+      транзакциях; <strong>пачка десятков-сотен</strong> — <code>NpgsqlBatch</code>; <strong>загрузка
+      тысяч и миллионов</strong> — <code>COPY</code> (это же самый быстрый способ наполнить таблицу для тестов).
+      Важное ограничение: <code>COPY</code> не умеет <code>INSERT ... ON CONFLICT</code> — конфликты он не
+      разрешает, поэтому для «вставь или обнови» он не подходит.</p>
+
+    <h2>Подготовленные запросы</h2>
+    <p>Подготовка — это когда сервер один раз разбирает и планирует запрос, а дальше получает только параметры.
+      В Npgsql она автоматическая: при <code>Max Auto Prepare=N</code> запрос готовится после
+      <strong>третьего</strong> выполнения (по умолчанию <code>Auto Prepare Min Usages=3</code>) — проверено
+      подсчётом <code>pg_prepared_statements</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">выполнений 1 → подготовлено 0
+выполнений 2 → подготовлено 0
+выполнений 3 → подготовлено 1
+выполнений 5 → подготовлено 1</code></pre>
+    </div>
+    <p>Сколько это даёт: на запросе, который сам выполняется 6 мс (<code>count(*)</code> по 130 тысячам строк),
+      тысяча вызовов заняла <strong>6541 мс без подготовки и 6162 мс с ней</strong> — около 6 %. Выгода мала,
+      потому что время уходит на выполнение, а не на планирование. На сложных запросах с дорогим планом и на
+      коротких повторяемых запросах (точечный <code>SELECT</code> по индексу) доля планирования выше — там эффект
+      заметнее. Настройки:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">Max Auto Prepare=10            -- держать до 10 подготовленных запросов на соединение (0 = выключено)
+Auto Prepare Min Usages=3      -- после скольких выполнений готовить (ключ проверен: принимается)</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- что реально подготовлено на этом соединении
+SELECT name,        -- имя, которое выдал сервер (у Npgsql — вида _p1)
+       statement,   -- нормализованный текст запроса
+       prepare_time -- когда подготовлен
+FROM pg_prepared_statements;</code></pre>
+    </div>
+    <p>Ловушка: подготовленный план зависит от параметров. Если данные распределены неравномерно (95 %
+      заказов в статусе <code>new</code>), план «через индекс» может оказаться хуже для частого значения —
+      это та же история, что с generic-планами, и лечится <code>Auto Prepare Min Usages=0</code> для таких
+      запросов или переписыванием запроса.</p>
+
+
+
+    <h2>Ошибки: что именно читать</h2>
+    <p>Ошибки БД приходят двумя разными типами, и путать их нельзя:</p>
+    <ul>
+      <li><strong><code>PostgresException</code></strong> — сервер вернул ошибку (<code>ErrorResponse</code>).
+        У неё есть <code>SqlState</code>, <code>ConstraintName</code>, <code>TableName</code>,
+        <code>Detail</code>, <code>Hint</code>.</li>
+      <li><strong><code>NpgsqlException</code></strong> — проблема на стороне клиента или сети: таймаут,
+        разорванное соединение, исчерпанный пул. Внутри обычно лежит настоящее исключение.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">try
+{
+    await cmd.ExecuteNonQueryAsync(ct);                 // любая команда может нарушить ограничение
+}
+catch (PostgresException ex)                            // сервер ответил ошибкой
+{
+    Console.WriteLine($"SQLSTATE={ex.SqlState}");        // код по стандарту SQL, например 23505
+    Console.WriteLine($"constraint={ex.ConstraintName}");// имя нарушенного ограничения: np_orders_pkey
+    Console.WriteLine($"detail={ex.Detail}");            // подробности; по умолчанию скрыты, см. ниже
+    Console.WriteLine($"transient={ex.IsTransient}");    // «стоит ли повторить»: для 23505 false
+}
+catch (NpgsqlException ex)                              // сеть, пул, таймаут
+{
+    Console.WriteLine($"{ex.GetType().Name}: {ex.Message}; inner={ex.InnerException?.Message}");
+}</code></pre>
+    </div>
+    <p>Коды, которые надо узнавать в лицо:</p>
+    <table>
+      <thead><tr><th>SQLSTATE</th><th>Что случилось</th><th>Что делать</th></tr></thead>
+      <tbody>
+        <tr><td><code>23505</code></td><td>unique_violation: дубль в уникальном ключе</td><td>Вернуть 409/«уже
+          существует», не ретраить</td></tr>
+        <tr><td><code>23503</code></td><td>foreign_key_violation</td><td>Проверить ссылочную целостность в
+          приложении</td></tr>
+        <tr><td><code>23514</code></td><td>check_violation</td><td>Значение не прошло <code>CHECK</code> —
+          валидация на клиенте слабее</td></tr>
+        <tr><td><code>40001</code></td><td>serialization_failure</td><td>Повторить транзакцию целиком (главы 22
+          и 24 SQL-раздела)</td></tr>
+        <tr><td><code>40P01</code></td><td>deadlock_detected</td><td>Повторить; проверить порядок блокировок
+          (глава 24)</td></tr>
+        <tr><td><code>55P03</code></td><td>lock_not_available (например, <code>NOWAIT</code>)</td><td>Решить
+          бизнес-логикой, не ретраить слепо</td></tr>
+        <tr><td><code>57014</code></td><td>query_canceled — отмена по токену или таймауту</td><td>Не считать
+          ошибкой, если это ваш <code>CancellationToken</code></td></tr>
+        <tr><td><code>42883</code></td><td>undefined_function — нет оператора/функции для типов</td><td>Проверить
+          тип параметра (пример с <code>uuid = text</code>)</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t"><code>Detail</code> скрыт по умолчанию</span>
+      <p>В прогоне без настройки сообщение содержало:
+        <code>Detail redacted as it may contain sensitive data. Specify 'Include Error Detail' in the connection
+        string to include this information.</code> С <code>Include Error Detail=true</code> пришло настоящее:
+        <code>Key (id)=(5550b1f-…) already exists.</code> Сделано специально: подробности могут содержать значения
+        из строк. Включайте осознанно — в разработке полезно, в проде это утечка данных в логи.</p>
+    </div>
+    <p>Ретраи: повторяют только «конкурентные» коды (<code>40001</code>, <code>40P01</code>,
+      <code>55P03</code>) и сетевые сбои, и только если операция идемпотентна или транзакция целиком
+      повторяема. Нарушение уникальности (<code>23505</code>) не ретраят никогда — повтор даст ту же ошибку.</p>
+
+
+    <h2>Пул соединений: правила и как проверить</h2>
+    <p>Соединение в PostgreSQL — это отдельный серверный процесс, и их число ограничено
+      <code>max_connections</code>. Поэтому Npgsql держит пул: <code>OpenAsync</code> не создаёт новое
+      TCP-соединение каждый раз, а берёт готовое; <code>Dispose</code> возвращает его обратно. Если свободных нет,
+      начинается ожидание до <code>Timeout</code>, после чего приходит понятная ошибка (проверено на пуле из
+      одного соединения):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">The connection pool has been exhausted, either raise 'Max Pool Size' (currently 1)
+or 'Timeout' (currently 1 seconds) in your connection string.</code></pre>
+    </div>
+    <ul>
+      <li><strong>Один источник на процесс.</strong> <code>NpgsqlDataSource</code> создаётся один раз и живёт всё
+        время работы приложения; новый экземпляр — это новый пул, то есть соединения сверх бюджета.</li>
+      <li><strong>Открывайте поздно, закрывайте рано.</strong> Не держите соединение, пока идёт расчёт или
+        HTTP-вызов: пул считает именно <em>открытые</em> соединения (глава 23 .NET-раздела).</li>
+      <li><strong>Бюджет.</strong> <code>Maximum Pool Size × число инстансов ≤ max_connections − запас</code>.
+        При трёх инстансах и пуле 100 на сервере с <code>max_connections=200</code> вы упрётесь в лимит сервера,
+        а не в свой.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- сколько соединений занято приложением и что они делают
+SELECT application_name,                -- имя из строки подключения
+       state,                           -- active / idle / idle in transaction
+       count(*) AS connections          -- сколько таких
+FROM pg_stat_activity
+WHERE datname = current_database()      -- только текущая база
+GROUP BY application_name, state
+ORDER BY connections DESC;
+
+-- «забытые» транзакции: соединение держится, но ничего не делает
+SELECT pid, application_name, state, now() - state_change AS how_long
+FROM pg_stat_activity
+WHERE state = 'idle in transaction'     -- открыли транзакцию и не закрыли
+ORDER BY how_long DESC;</code></pre>
+    </div>
+    <p><code>idle in transaction</code> — самый частый источник проблем: транзакция не закрыта, снимок держится,
+      <code>VACUUM</code> не может убрать мёртвые версии (глава 25). Причина обычно одна: транзакцию открыли и
+      ушли в HTTP-вызов.</p>
+
+    <h2>DI и EF Core</h2>
+    <p>В приложении источник регистрируется как singleton, а соединения открываются на операцию:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Источник соединений — один на приложение; контейнер вызовет Dispose при остановке
+builder.Services.AddSingleton(_ =&gt; new NpgsqlDataSourceBuilder(connectionString).Build());
+
+// Источник внедряется туда, где нужен ручной SQL
+public sealed class ReportStore(NpgsqlDataSource dataSource)      // зависимость из DI
+{
+    public async Task&lt;int&gt; CountAsync(CancellationToken ct)       // токен запроса
+    {
+        await using var conn = await dataSource.OpenConnectionAsync(ct);  // взяли из пула
+        await using var cmd = conn.CreateCommand();               // команда на этом соединении
+        cmd.CommandText = "SELECT count(*) FROM orders";          // текст SQL
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)); // при выходе вернётся в пул
+    }
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// EF Core: тот же Npgsql работает под провайдером
+builder.Services.AddDbContext&lt;AppDbContext&gt;(o =&gt;
+    o.UseNpgsql(connectionString));        // пакет Npgsql.EntityFrameworkCore.PostgreSQL
+
+// Миграции — из командной строки, с тем же провайдером:
+// dotnet ef migrations add Initial     -- создать миграцию
+// dotnet ef database update            -- применить её к базе</code></pre>
+    </div>
+    <p>Практическое разделение: EF Core — сущности и обычные запросы (глава 24 .NET-раздела); ручной
+      <code>Npgsql</code> — массовые операции (<code>COPY</code>, <code>NpgsqlBatch</code>), сложные отчёты и
+      места, где нужен полный контроль над SQL. Оба варианта должны смотреть на один
+      <code>NpgsqlDataSource</code>/строку подключения, иначе пулы и бюджеты соединений считаются отдельно.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li>Строка подключения: <code>Timeout</code> — ожидание соединения из пула, <code>Command Timeout</code>
+          — предел выполнения команды; <code>Database</code> — база, а не схема.</li>
+        <li>Параметры — типизированные (<code>NpgsqlParameter&lt;T&gt;</code>/<code>NpgsqlDbType</code>). Строка
+          вместо <code>Guid</code> даёт <code>42883 operator does not exist: uuid = text</code>; с правильным
+          типом запрос идёт по индексу.</li>
+        <li><code>jsonb</code> по умолчанию — <code>string</code>; POCO включается
+          <code>EnableDynamicJson()</code>. <code>date</code> приходит как <code>DateTime</code>, но
+          <code>GetFieldValue&lt;DateOnly&gt;</code> работает.</li>
+        <li>Массовая запись: 10 000 по одному — 4736 мс, в одной транзакции — 1577 мс,
+          <code>NpgsqlBatch</code> — 378 мс, <code>COPY</code> на 100 000 — 802 мс.</li>
+        <li>Автоподготовка включается после третьего выполнения (<code>Max Auto Prepare</code>,
+          <code>Auto Prepare Min Usages</code>); на «тяжёлых» запросах выигрыш мал, на коротких повторяемых —
+          заметнее.</li>
+        <li>Ошибки: <code>PostgresException.SqlState</code> — код, <code>ConstraintName</code> — ограничение,
+          <code>Detail</code> скрыт без <code>Include Error Detail=true</code>; ретраят только
+          <code>40001</code>/<code>40P01</code>/<code>55P03</code>.</li>
+        <li>Пул: один <code>NpgsqlDataSource</code> на процесс, соединение открывается на операцию, бюджет
+          считается по <code>max_connections</code>; <code>idle in transaction</code> — красный флаг.</li>
+      </ul>
+    </div>
+
     <div class="pager">
       <a href="sql31-convert-types-syntax.html">← <span class="sp">Глава 31. Типы, синтаксис и план миграции</span></a>
       <a href="sql33-monitoring.html"><span class="sp">Глава 33. Мониторинг и эксплуатация</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+

@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 33 · Мониторинг и эксплуатация</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,17 +20,386 @@
   <div class="chapter">
     <div class="part">SQL · Часть IX · Практика</div>
     <h1>Глава 33. Мониторинг и эксплуатация</h1>
-    <p class="sublead">pg_stat_statements, блокировки, bloat, slow query log</p>
+    <p class="sublead">Четыре вопроса дежурного — «кто работает», «что тормозит», «кто кого блокирует», «не
+      раздулась ли таблица» — и представления PostgreSQL, которые отвечают на них. Все выводы в главе получены
+      на живой базе PostgreSQL 16.15.</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>Материал добавляется постепенно, в порядке следования книги.</p>
+
+    <h2>Что вообще мониторить</h2>
+    <table>
+      <thead><tr><th>Вопрос</th><th>Где смотреть</th><th>Глава</th></tr></thead>
+      <tbody>
+        <tr><td>Кто сейчас работает и чего ждёт</td><td><code>pg_stat_activity</code></td><td>эта</td></tr>
+        <tr><td>Что тормозит и сколько раз вызывалось</td><td><code>pg_stat_statements</code></td><td>эта</td></tr>
+        <tr><td>Кто кого блокирует</td><td><code>pg_locks</code> + <code>pg_blocking_pids()</code></td><td>эта, 24</td></tr>
+        <tr><td>Не раздулась ли таблица и не мусорят ли индексы</td><td><code>pg_stat_user_tables</code>,
+          <code>pgstattuple</code></td><td>эта, 25</td></tr>
+        <tr><td>Как читается конкретный запрос</td><td><code>EXPLAIN (ANALYZE, BUFFERS)</code></td><td>15, 17, 19</td></tr>
+      </tbody>
+    </table>
+    <p>Всё это — обычные представления и функции; их можно опрашивать из того же <code>psql</code>, из
+      <code>Npgsql</code> (глава 32) и из систем мониторинга. Права: обычный пользователь видит свои запросы
+      полностью, а чужие — с усечённым текстом, поэтому для дежурства нужна роль с
+      <code>pg_read_all_stats</code> (или суперпользователь).</p>
+
+    <h2><code>pg_stat_activity</code>: кто работает и чего ждёт</h2>
+    <p>Одна строка — одно соединение. Важные колонки:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT pid,                  -- идентификатор серверного процесса (по нему можно убить/отменить)
+       usename,              -- роль, под которой подключились
+       application_name,     -- имя из строки подключения (глава 32)
+       client_addr,          -- IP клиента; NULL — локальное подключение
+       state,                -- active / idle / idle in transaction / idle in transaction (aborted)
+       wait_event_type,      -- чего ждёт: Lock, IO, Client, Timeout, LWLock, …
+       wait_event,           -- конкретнее: transactionid, PgSleep, ClientRead, …
+       now() - query_start AS running_for,   -- сколько выполняется текущий запрос
+       now() - state_change AS in_state_for, -- сколько находится в этом состоянии
+       left(query, 80) AS query              -- текст; чужие запросы могут быть усечены
+FROM pg_stat_activity
+WHERE backend_type = 'client backend'   -- только клиентские соединения, без фоновых процессов
+ORDER BY query_start NULLS LAST;        -- сверху — самые давно работающие</code></pre>
     </div>
+    <p>Главное различие: <code>state</code> отвечает «что делает», а <code>wait_event</code> — «на что
+      застряло». Пример из прогона: две сессии, первая держит транзакцию и спит, вторая ждёт её блокировку.</p>
+    <div class="codewrap">
+      <pre><code class="language-text"> pid  | state  | wait_event_type |  wait_event   | blockers
+------+--------+-----------------+---------------+----------
+ 4043 | active | Timeout         | PgSleep       | {}
+ 4050 | active | Lock            | transactionid | {4043}</code></pre>
+    </div>
+    <p>Читается так: <code>4043</code> «работает», но на самом деле спит в <code>pg_sleep</code> (тип ожидания
+      <code>Timeout</code>), а <code>4050</code> ждёт <em>блокировку транзакции</em> (<code>Lock</code> /
+      <code>transactionid</code>), и виноват в этом <code>4043</code> — колонка <code>blockers</code> из
+      <code>pg_blocking_pids(pid)</code>.</p>
+    <div class="box warn">
+      <span class="t">Три состояния, которые надо узнавать</span>
+      <ul>
+        <li><strong><code>idle in transaction</code></strong> — транзакция открыта, но сервер ничего не делает.
+          Это худшее состояние: снимок держится, <code>VACUUM</code> не может убрать мёртвые версии, блокировки
+          висят. Причина почти всегда — «открыли транзакцию и ушли в HTTP-вызов».</li>
+        <li><strong><code>idle in transaction (aborted)</code></strong> — в транзакции была ошибка, и её забыли
+          завершить; дальше все команды в этой сессии будут падать.</li>
+        <li><strong><code>active</code> + <code>wait_event_type = Lock</code></strong> — запрос ждёт чужую
+          блокировку, а не работает. Высокий CPU тут не при чём: время уходит на ожидание.</li>
+      </ul>
+    </div>
+
+    <h2>Блокировки: кто кого держит</h2>
+    <p>Читать <code>pg_locks</code> напрямую утомительно, но в паре с <code>pg_blocking_pids()</code> он отвечает
+      на главный вопрос сразу. Снимок во время ожидания из прогона:</p>
+    <div class="codewrap">
+      <pre><code class="language-text"> pid  | locktype |       mode       | granted | blockers
+------+----------+------------------+---------+----------
+ 4043 | relation | RowExclusiveLock | t       | {}
+ 4050 | relation | RowExclusiveLock | t       | {4043}
+ 4050 | tuple    | ExclusiveLock    | t       | {4043}</code></pre>
+    </div>
+    <p>Разбор: обе сессии взяли <code>RowExclusiveLock</code> на таблицу — он совместим, поэтому обе получили
+      его (<code>granted = t</code>). А вот <code>tuple</code>-блокировку на строку вторая сессия получить не
+      смогла: она ждёт освобождения <em>транзакции</em> первой, на что и указывают
+      <code>wait_event = transactionid</code> и <code>blockers = {4043}</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT pid,                 -- чей процесс
+       locktype,             -- relation / tuple / transactionid / virtualxid / …
+       mode,                 -- RowExclusiveLock, ExclusiveLock, AccessShareLock, …
+       granted,              -- t — блокировка получена, f — ждём
+       pg_blocking_pids(pid) -- массив PID, которые держат нужную блокировку
+FROM pg_locks
+WHERE relation = 'mon_orders'::regclass   -- только блокировки этой таблицы
+ORDER BY pid, locktype, mode;</code></pre>
+    </div>
+
+    <h3>Таймауты вместо бесконечного ожидания</h3>
+    <p>Чтобы приложение не висело в очереди на блокировку, ставят два предела — оба проверены на живой базе:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SET lock_timeout = '500ms';                          -- сколько ждать блокировку, максимум
+UPDATE mon_orders SET total = total WHERE id = 1;    -- ждёт чужую транзакцию
+-- ERROR:  canceling statement due to lock timeout
+-- CONTEXT:  while updating tuple (0,2) in relation "mon_orders"
+
+SET statement_timeout = '200ms';                     -- сколько может выполняться сама команда
+SELECT pg_sleep(1);                                  -- заведомо дольше предела
+-- ERROR:  canceling statement due to statement timeout</code></pre>
+    </div>
+    <p>Разница: <code>lock_timeout</code> ограничивает <em>ожидание блокировки</em>, а
+      <code>statement_timeout</code> — <em>всё время команды</em>. Оба можно выставить на уровне роли
+      (<code>ALTER ROLE app SET lock_timeout = '2s'</code>) — это надёжнее, чем надеяться на дисциплину в коде.</p>
+
+    <h3>Отменить или убить</h3>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- отменить текущий запрос: соединение остаётся, транзакция будет откачена
+SELECT pg_cancel_backend(4118);   -- вернул t — сигнал отправлен
+
+-- закрыть соединение целиком: когда сессия «залипла» (idle in transaction)
+SELECT pg_terminate_backend(4118);</code></pre>
+    </div>
+    <p>В логе отменённый запрос выглядит так (проверено): <code>ERROR: canceling statement due to user
+      request</code>, SQLSTATE <code>57014</code> (<code>query_canceled</code>) — в приложении это не сбой БД,
+      если отменяли вы сами (например, по <code>CancellationToken</code>).</p>
+
+
+    <h2><code>pg_stat_statements</code>: что тормозит</h2>
+    <p>Расширение собирает статистику по <strong>нормализованным</strong> запросам: параметры заменяются на
+      <code>$1</code>, поэтому тысяча вызовов с разными id — одна строка. Включается в два шага:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># 1) Загрузить библиотеку при старте сервера (нужен перезапуск).
+docker run -d --name sqldemo \                     # -d: в фоне, --name: имя контейнера
+  -e POSTGRES_PASSWORD=secret \                    # -e: переменная окружения, пароль postgres
+  -e POSTGRES_DB=demo \                            # создать базу demo при первом старте
+  -p 55432:5432 \                                  # -p хост:контейнер — пробросить порт 5432 наружу
+  postgres:16-alpine \                             # образ и тег
+  -c shared_preload_libraries=pg_stat_statements \ # -c: параметр сервера, загрузить расширение
+  -c pg_stat_statements.track=all \                # считать все запросы, включая вложенные
+  -c log_min_duration_statement=200 \              # в лог — всё, что дольше 200 мс
+  -c track_io_timing=on                            # измерять время ввода-вывода в статистике
+
+# 2) Создать расширение в базе (один раз)
+docker exec -i sqldemo psql -U postgres -d demo -c 'CREATE EXTENSION pg_stat_statements'</code></pre>
+    </div>
+    <p>Дальше — обычный SQL. Замер после сброса статистики и нескольких запросов:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT pg_stat_statements_reset();          -- обнулить накопленное (перед экспериментом)
+
+SELECT calls,                                -- сколько раз вызывали
+       round(total_exec_time::numeric, 1) AS total_ms,   -- суммарное время выполнения
+       round(mean_exec_time::numeric, 2) AS mean_ms,     -- среднее на вызов
+       rows,                                 -- сколько строк вернули всего
+       shared_blks_hit AS hit,               -- страниц взято из кеша
+       shared_blks_read AS read,             -- страниц прочитано с диска
+       left(query, 45) AS query              -- нормализованный текст
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC                -- «что съело больше всего времени суммарно»
+LIMIT 6;</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text"> calls | total_ms | mean_ms | rows | hit | read |                     query
+-------+----------+---------+------+-----+------+-----------------------------------------------
+     1 |    300.4 |  300.37 |    1 |   0 |    0 | SELECT pg_sleep($1)
+     1 |     18.0 |   17.98 |    2 | 358 |    0 | SELECT status, count(*) FROM mon_orders GROUP
+     1 |      4.4 |    4.38 |    1 | 148 |    0 | SELECT count(*) FROM mon_orders WHERE status
+     1 |      0.1 |    0.11 |    5 |   8 |    0 | SELECT * FROM mon_orders WHERE total = $1 LIM
+     1 |      0.1 |    0.07 |    1 |   7 |    0 | SELECT * FROM mon_orders WHERE id = $1</code></pre>
+    </div>
+    <p>Как читать: <code>total_exec_time</code> отвечает «куда уходит время в сумме», <code>mean_exec_time</code>
+      — «что медленно по одному вызову». Частый запрос с маленьким средним может съесть больше, чем один
+      медленный, поэтому смотрят два среза — по сумме и по среднему с фильтром по числу вызовов:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT round(mean_exec_time::numeric, 1) AS mean_ms, calls, left(query, 60) AS query
+FROM pg_stat_statements
+WHERE calls &gt; 100                -- отбрасываем редкие «одноразовые» запросы
+ORDER BY mean_exec_time DESC     -- самый медленный в среднем
+LIMIT 10;</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Что ещё есть в <code>pg_stat_statements</code></span>
+      <ul>
+        <li><code>shared_blks_hit</code>/<code>shared_blks_read</code> — попадания в кеш и чтения с диска:
+          запрос с большим <code>read</code> — кандидат на индекс или на уменьшение выборки.</li>
+        <li><code>temp_blks_written</code> — временные файлы: сортировка или хеш не влезли в
+          <code>work_mem</code>.</li>
+        <li><code>wal_bytes</code> — сколько журнала записал запрос: видно нагрузку на репликацию.</li>
+        <li>Сбрасывать статистику (<code>pg_stat_statements_reset()</code>) стоит перед экспериментом, но не в
+          проде «просто так»: история пропадёт.</li>
+      </ul>
+    </div>
+
+
+    <h2>Индексы: кто работает, а кто мёртвый груз</h2>
+    <p>Два представления закрывают вопрос «нужен ли этот индекс»: <code>pg_stat_user_indexes</code> (сколько раз
+      индекс использовали) и <code>pg_stat_user_tables</code> (сколько раз таблицу читали последовательно).</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT indexrelname,     -- имя индекса
+       idx_scan,         -- сколько раз по нему искали
+       idx_tup_read      -- сколько строк из него прочитали
+FROM pg_stat_user_indexes
+WHERE relname = 'mon_orders'      -- таблица, к которой относится индекс
+ORDER BY indexrelname;</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">     indexrelname      | idx_scan | idx_tup_read
+-----------------------+----------+--------------
+ mon_orders_pkey       |        7 |            7
+ mon_orders_status_idx |        5 |       333333
+ mon_orders_unused_idx |        1 |            5</code></pre>
+    </div>
+    <p>Читается так: <code>pkey</code> использовался 7 раз (точечные выборки по id), индекс по
+      <code>status</code> — 5 раз, но вытащил 333 тысячи строк, а <code>unused_idx</code> — 1 раз и 5 строк.
+      Индекс с <code>idx_scan = 0</code> на протяжении недели-двух — кандидат на удаление: он занимает место и
+      замедляет каждую вставку и обновление. Но сначала проверьте, что он не обслуживает уникальность или
+      внешний ключ: такие индексы «не читаются», а работают как ограничение.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT relname, seq_scan, seq_tup_read, idx_scan, n_live_tup, n_dead_tup,
+       last_autovacuum, autovacuum_count
+FROM pg_stat_user_tables
+ORDER BY seq_scan DESC           -- сверху — таблицы, которые читают целиком
+LIMIT 10;</code></pre>
+    </div>
+    <p><code>seq_scan</code> много больше <code>idx_scan</code> при большой <code>n_live_tup</code> — сигнал, что
+      либо индекса нет, либо он не подходит под запросы (глава 12), либо запрос написан так, что индекс
+      невозможен.</p>
+
+    <h3>Раздувание индекса: <code>pgstatindex</code></h3>
+    <p>Индекс тоже состоит из страниц, и после массовых <code>UPDATE</code> в нём остаются «мёртвые» страницы.
+      Проверка одного индекса (расширение <code>pgstattuple</code>, в прогоне — после 400 тысяч обновлений):</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT * FROM pgstatindex('mon_orders_unused_idx');</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text"> tree_level | index_size | leaf_pages | deleted_pages | avg_leaf_density | leaf_fragmentation
+------------+------------+------------+---------------+------------------+--------------------
+          2 |   20783104 |       1524 |          1000 |            32.52 |              62.86</code></pre>
+    </div>
+    <p><code>deleted_pages = 1000</code> и <code>avg_leaf_density = 32.52 %</code>: две трети места в листьях
+      пустует, страницы разбросаны (<code>leaf_fragmentation = 62.86 %</code>). Лечится пересборкой —
+      <code>REINDEX INDEX CONCURRENTLY mon_orders_unused_idx</code>: <code>CONCURRENTLY</code> строит новый
+      индекс параллельно и подменяет его без блокировки записи (обычный <code>REINDEX</code> берёт блокировку и
+      останавливает работу с таблицей).</p>
+
+
+    <h2>Bloat: почему <code>VACUUM</code> не уменьшает размер</h2>
+    <p>Самый частый вопрос дежурного: «сделал <code>VACUUM</code>, а таблица того же размера». Прогон на таблице
+      в 200 тысяч строк, у которой отключён autovacuum и сделано 400 тысяч обновлений:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">до VACUUM:          n_dead_tup = 466666, total_size = 70 MB (heap 31 MB, indexes 39 MB)
+после VACUUM:       n_dead_tup = 0,      total_size = 70 MB (heap 31 MB, indexes 39 MB)
+после VACUUM FULL:                       total_size = 21 MB</code></pre>
+    </div>
+    <p>Причина: <code>VACUUM</code> помечает место как <strong>свободное для повторного использования</strong>,
+      но не отдаёт его операционной системе. Таблица не «худеет», она перестаёт расти: новые версии строк
+      ложатся в освободившиеся страницы. Это видно через <code>pgstattuple</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT * FROM pgstattuple('mon_orders');   -- расширение pgstattuple</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text"> table_len | tuple_percent | dead_tuple_percent | free_percent
+-----------+---------------+--------------------+--------------
+  36143104 |         30.99 |               0.00 |        66.42</code></pre>
+    </div>
+    <p><code>free_percent = 66.42</code> — две трети файла пустует, но место занято. Вернуть его можно только
+      перезаписью: <code>VACUUM FULL mon_orders</code> (в прогоне 70 МБ → 21 МБ), но он держит
+      <code>ACCESS EXCLUSIVE</code> — таблица недоступна всё время работы. Для больших таблиц вместо него
+      используют пересборку без блокировки (расширение <code>pg_repack</code>) — отдельная установка и отдельная
+      процедура.</p>
+    <div class="box note">
+      <span class="t">Порог autovacuum: откуда берётся</span>
+      <p>Autovacuum запускается, когда мёртвых строк больше, чем
+        <code>autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × n_live_tup</code>. Значения по
+        умолчанию в прогоне: <code>autovacuum_vacuum_threshold = 50</code>,
+        <code>autovacuum_vacuum_scale_factor = 0.2</code>, <code>autovacuum_naptime = 1min</code>. Для таблицы на
+        200 000 строк порог = 50 + 0.2 × 200 000 = <strong>40 050</strong> мёртвых строк. Для таблицы на 50 млн
+        это уже 10 млн — слишком поздно, поэтому у больших таблиц <code>scale_factor</code> понижают на уровне
+        таблицы: <code>ALTER TABLE big SET (autovacuum_vacuum_scale_factor = 0.01)</code>.</p>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT relname, n_live_tup, n_dead_tup,
+       round(100.0 * n_dead_tup / nullif(n_live_tup + n_dead_tup, 0), 1) AS dead_pct,
+       last_vacuum, last_autovacuum, vacuum_count, autovacuum_count
+FROM pg_stat_user_tables
+ORDER BY n_dead_tup DESC          -- сверху — самые «грязные» таблицы
+LIMIT 10;</code></pre>
+    </div>
+
+
+    <h2>Общая картина: <code>pg_stat_database</code> и <code>pg_stat_io</code></h2>
+    <p>Прежде чем лезть в конкретные запросы, полезно посмотреть на базу целиком — один запрос даёт большинство
+      «здоровых» метрик:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT datname,                                   -- имя базы
+       xact_commit,                               -- успешных транзакций
+       xact_rollback,                             -- откатов
+       blks_read,                                 -- страниц прочитано с диска
+       blks_hit,                                  -- страниц взято из кеша
+       round(100.0 * blks_hit / nullif(blks_hit + blks_read, 0), 2) AS cache_hit_pct,
+       temp_files,                                -- временных файлов создано
+       deadlocks                                  -- обнаруженных дедлоков
+FROM pg_stat_database
+WHERE datname = current_database();</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text"> datname | xact_commit | xact_rollback | blks_read | blks_hit | cache_hit_pct | temp_files | deadlocks
+---------+-------------+---------------+-----------+----------+---------------+------------+-----------
+ demo    |       77861 |            19 |      1178 | 36988237 |        100.00 |         11 |         0</code></pre>
+    </div>
+    <p>Как читать: <code>cache_hit_pct</code> близко к 100 — данные в памяти, диск почти не читается (на
+      «прогретой» базе это норма). Рост <code>temp_files</code> — нехватка <code>work_mem</code> для сортировок
+      и хешей. Ненулевые <code>deadlocks</code> — повод смотреть порядок блокировок в коде (глава 24). Много
+      <code>xact_rollback</code> относительно <code>xact_commit</code> — приложение часто падает в ошибку.</p>
+    <p>С PostgreSQL 16 появилось представление <code>pg_stat_io</code>: ввод-вывод по типам процессов. Оно
+      отвечает на вопрос «кто именно читает и пишет»:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT backend_type,                    -- checkpointer / client backend / autovacuum worker / …
+       object,                          -- relation или temp relation
+       round(sum(reads)::numeric, 0)  AS reads,    -- сколько блоков прочитано
+       round(sum(writes)::numeric, 0) AS writes,   -- сколько записано
+       round(sum(extends)::numeric, 0) AS extends  -- сколько блоков файла расширено
+FROM pg_stat_io
+GROUP BY backend_type, object
+ORDER BY backend_type;</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">    backend_type     |    object     | reads | writes | extends
+---------------------+---------------+-------+--------+---------
+ autovacuum worker   | relation      |   450 |        |      20
+ checkpointer        | relation      |       |  17504 |
+ client backend      | relation      |  2167 |        |   37747</code></pre>
+    </div>
+    <p>Пустая ячейка — показатель не отслеживается для этого типа процессов. Полезное наблюдение: клиентские
+      процессы расширяют файл (<code>extends</code> — новые страницы), а записывает их потом checkpointer; всплеск
+      <code>writes</code> у checkpointer совпадает с контрольными точками.</p>
+
+
+    <h2>Логи: что включить и как читать</h2>
+    <p>Логи — второй источник после представлений: в них попадают ошибки, отмены и медленные запросы. Параметры,
+      которые имеют смысл (в прогоне включены первые три):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">log_min_duration_statement = 200      -- в лог каждый запрос дольше 200 мс
+log_lock_waits = on                   -- писать, когда сессия ждёт блокировку дольше deadlock_timeout
+log_autovacuum_min_duration = 250ms   -- писать про autovacuum дольше 250 мс
+log_checkpoints = on                  -- писать про контрольные точки
+log_temp_files = 0                    -- писать про любые временные файлы (0 = все)</code></pre>
+    </div>
+    <p>Так выглядят медленный запрос и работа checkpointer в логе контейнера (реальные строки прогона):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker logs sqldemo 2&gt;&amp;1 | grep duration | tail -3   # 2&gt;&amp;1: stderr тоже в поток; tail: последние строки</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">LOG:  duration: 300.740 ms  statement: SELECT pg_sleep(0.3);
+LOG:  duration: 380.979 ms  statement: VACUUM FULL mon_orders;
+LOG:  checkpoint complete: wrote 9075 buffers (55.4%); … write=269.318 s, total=269.343 s;</code></pre>
+    </div>
+    <p>Порог <code>log_min_duration_statement</code> — компромисс: слишком низкий завалит диск, слишком высокий
+      пропустит проблему. Рабочий вариант: 200–500 мс, а «хвост» медленных запросов смотреть по
+      <code>pg_stat_statements</code>.</p>
+
+    <div class="box gold">
+      <span class="t">★ Алгоритм дежурного (по шагам)</span>
+      <ol>
+        <li><strong>Что сейчас происходит:</strong> <code>pg_stat_activity</code> — сколько <code>active</code>,
+          есть ли <code>idle in transaction</code>, на чём висят <code>wait_event</code>.</li>
+        <li><strong>Кто кого блокирует:</strong> <code>pg_blocking_pids(pid)</code> и <code>pg_locks</code>;
+          если блокировка чужая и надолго — <code>pg_cancel_backend</code>, затем
+          <code>pg_terminate_backend</code>.</li>
+        <li><strong>Что тормозит:</strong> <code>pg_stat_statements</code> по <code>total_exec_time</code> и по
+          <code>mean_exec_time</code> с <code>calls &gt; 100</code>; дальше <code>EXPLAIN (ANALYZE,
+          BUFFERS)</code> на конкретном запросе.</li>
+        <li><strong>Индексы и bloat:</strong> <code>pg_stat_user_indexes</code> (<code>idx_scan = 0</code>),
+          <code>pgstatindex</code>/<code>pgstattuple</code>, <code>n_dead_tup</code> и
+          <code>last_autovacuum</code>.</li>
+        <li><strong>Общее здоровье:</strong> <code>pg_stat_database</code> (cache hit, temp_files, deadlocks) и
+          <code>pg_stat_io</code>; затем логи по <code>duration</code>.</li>
+        <li><strong>Профилактика:</strong> <code>lock_timeout</code>/<code>statement_timeout</code> на роли,
+          пониженный <code>autovacuum_vacuum_scale_factor</code> у больших таблиц, <code>REINDEX
+          CONCURRENTLY</code> для раздутых индексов.</li>
+      </ol>
+    </div>
+
     <div class="pager">
       <a href="sql32-dotnet-npgsql.html">← <span class="sp">Глава 32. Работа с PostgreSQL из .NET</span></a>
       <a href="sql34-interview.html"><span class="sp">Глава 34. Как отвечать на интервью по SQL</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
