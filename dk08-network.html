@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Глава 8 · Сеть: порты, DNS и localhost</title>
 <link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/dockerfile.min.js"></script>
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -16,29 +20,236 @@
   <div class="chapter">
     <div class="part">Docker · Часть II · Каждый день</div>
     <h1>Глава 8. Сеть: порты, DNS и localhost</h1>
-    <p class="sublead">Почему <code>localhost</code> внутри контейнера — это не хост, и как сервисы
-      находят друг друга по имени</p>
+    <p class="sublead">Почему <code>localhost</code> внутри контейнера — это не хост, зачем нужна своя сеть и как
+      сервисы находят друг друга по имени. Все команды и выводы в главе проверены на Docker с образом
+      <code>nginx:alpine</code> и <code>alpine</code>.</p>
     <p><span class="tag core">основная глава</span></p>
-    <div class="wip">
-      <span class="t">Глава в работе</span>
-      <p>План главы:</p>
+
+    <h2>Три направления трафика</h2>
+    <p>Первое, что нужно держать в голове: у контейнера <strong>свой сетевой стек</strong> (namespaces из главы 2).
+      Поэтому «localhost» и «порт» означают разное в зависимости от того, <em>откуда</em> смотреть:</p>
+    <table>
+      <thead><tr><th>Кто к кому</th><th>Что писать</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>Хост → контейнер</td><td><code>http://localhost:18080</code> (если опубликован
+          <code>-p 18080:80</code>)</td><td>Порт опубликован на хосте и ведёт внутрь контейнера</td></tr>
+        <tr><td>Контейнер → хост</td><td>IP шлюза (<code>172.17.0.1</code>) или
+          <code>host.docker.internal</code> с <code>--add-host</code></td><td><code>localhost</code> внутри — это
+          сам контейнер, а не хост</td></tr>
+        <tr><td>Контейнер → контейнер</td><td>имя контейнера в <strong>пользовательской</strong> сети:
+          <code>http://web</code></td><td>В своей сети Docker поднимает встроенный DNS</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-bash"># Поднимаем веб-сервер и публикуем порт: -d — в фоне, --name — имя, -p хост:контейнер
+docker run -d --name web -p 18080:80 nginx:alpine
+
+# С хоста: обращаемся к ОПУБЛИКОВАННОМУ порту 18080
+curl -s -o /dev/null -w 'host-&gt;18080: %{http_code}\n' http://localhost:18080/
+# host-&gt;18080: 200
+
+# Внутри контейнера работает ЕГО порт 80 (тут слушает nginx), а 18080 внутри нет
+docker exec web wget -qO- -T2 http://localhost:80 | head -1      # HTML nginx
+docker exec web wget -qO- -T2 http://localhost:18080             # Connection refused</code></pre>
+    </div>
+    <p>Разбор флагов: <code>-d</code> — запустить в фоне и вернуть управление; <code>--name web</code> — задать
+      имя (по нему потом <code>docker exec</code>, <code>logs</code>, <code>network connect</code>);
+      <code>-p 18080:80</code> — <em>слева порт хоста, справа порт контейнера</em>; <code>nginx:alpine</code> —
+      образ и тег.</p>
+    <div class="box warn">
+      <span class="t">Почему <code>-p 8080:80</code> «не работает» с .NET 8</span>
+      <p>Официальный образ <code>mcr.microsoft.com/dotnet/aspnet:8.0</code> задаёт переменную
+        <code>ASPNETCORE_HTTP_PORTS=8080</code> (проверено: <code>docker run --rm
+        mcr.microsoft.com/dotnet/aspnet:8.0-alpine sh -c 'echo $ASPNETCORE_HTTP_PORTS'</code> печатает
+        <code>8080</code>). Приложение слушает <strong>8080 внутри контейнера</strong>, поэтому правильная
+        публикация — <code>-p 8080:8080</code>: левый порт можно менять, правый должен совпадать с тем, что
+        слушает приложение. Подробнее — глава 13.</p>
+    </div>
+
+    <h2>Публикация портов: <code>-p</code>, <code>-P</code> и <code>EXPOSE</code></h2>
+    <div class="codewrap">
+      <pre><code class="language-bash"># 1) Конкретный порт хоста
+docker run -d --name web -p 18080:80 nginx:alpine
+
+# 2) Только на loopback хоста: снаружи (из другой машины) порт недоступен
+docker run -d --name web4 -p 127.0.0.1:18082:80 nginx:alpine
+
+# 3) Случайный свободный порт хоста: Docker выберет сам
+docker run -d --name web7 -P nginx:alpine        # -P (большая) публикует все EXPOSE-порты образа
+
+# 4) Посмотреть, что куда опубликовано
+docker port web        # 80/tcp -&gt; 0.0.0.0:18080  и  [::]:18080
+docker port web7       # 80/tcp -&gt; 0.0.0.0:32768  (случайный)</code></pre>
+    </div>
+    <p>Что показали проверки:</p>
+    <ul>
+      <li><code>-p 127.0.0.1:18082:80</code> — с хоста <code>200</code>, а из другого контейнера через шлюз
+        <code>172.17.0.1:18082</code> — <code>Connection refused</code>: порт привязан только к loopback
+        хоста.</li>
+      <li><code>-P</code> дал <code>32768</code>, и запрос на него вернул <code>200</code>. Полезно, когда
+        параллельно запускают несколько копий одного сервиса.</li>
+      <li><strong><code>EXPOSE</code> в Dockerfile ничего не публикует</strong> — это только документация и
+        значение по умолчанию для <code>-P</code>. Контейнер без <code>-p</code>: с хоста
+        <code>curl localhost:18081</code> не отвечает, а из другого контейнера по IP
+        <code>172.17.0.x</code> — отвечает.</li>
+      <li>Занятый порт даёт ошибку демона (проверено):
+        <code>Bind for 0.0.0.0:18080 failed: port is already allocated</code>.</li>
+    </ul>
+
+    <h2>DNS: почему имя работает не всегда</h2>
+    <p>У Docker есть три предустановленные сети (проверено <code>docker network ls</code>):
+      <code>bridge</code> (по умолчанию), <code>host</code> и <code>none</code>. В <strong>дефолтной</strong>
+      <code>bridge</code> имена контейнеров <em>не резолвятся</em>:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># Пробуем обратиться к контейнеру по имени из другого контейнера (оба в дефолтной bridge)
+docker run --rm alpine wget -qO- -T2 http://web
+# wget: bad address 'web'      ← DNS-имени нет
+
+# А по IP — работает: узнаём адрес через inspect
+IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' web)
+echo $IP                       # 172.17.0.3
+docker run --rm alpine wget -qO- -T2 http://$IP | head -1     # HTML nginx</code></pre>
+    </div>
+    <p>Разбор: <code>docker inspect -f '{{…}}'</code> — вывод по шаблону Go: <code>.NetworkSettings.Networks</code>
+      — карта сетей, <code>.IPAddress</code> — адрес в каждой. Команда возвращает то, что нужно, без
+      огромного JSON.</p>
+    <p>Своя сеть решает проблему: в <strong>пользовательской</strong> сети Docker поднимает встроенный DNS, и
+      имя контейнера становится адресом.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># Создаём свою сеть (драйвер bridge по умолчанию)
+docker network create appnet
+
+# Подключаем уже запущенный контейнер в эту сеть (он остаётся и в старой)
+docker network connect appnet web
+
+# Теперь имя резолвится: клиент в той же сети ходит по имени
+docker run --rm --network appnet alpine wget -qO- -T2 http://web | head -1    # HTML nginx
+
+# Смотрим параметры сети: подсеть и шлюз
+docker network inspect appnet --format '{{.Name}} sub={{range .IPAM.Config}}{{.Subnet}} gw={{.Gateway}}{{end}}'
+# appnet sub=172.18.0.0/16 gw=172.18.0.1
+
+# У контейнера теперь два адреса — по одному в каждой сети
+docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}' web
+# appnet=172.18.0.2 bridge=172.17.0.3</code></pre>
+    </div>
+    <p>Флаги и слова: <code>docker network create</code> — создать сеть; <code>connect</code> — подключить
+      контейнер к ещё одной сети (можно и <code>disconnect</code>); <code>--network appnet</code> при
+      <code>docker run</code> — сразу запустить в этой сети; <code>--format</code> — шаблон вывода;
+      <code>.IPAM.Config</code> — настройки адресации (<code>Subnet</code>, <code>Gateway</code>).</p>
+    <div class="box note">
+      <span class="t">Правило, которое экономит часы</span>
+      <p>Если сервисы должны видеть друг друга по имени — запускайте их в <strong>одной пользовательской
+        сети</strong>. Именно это делает <code>docker compose</code> автоматически: создаёт сеть проекта и
+        поднимает в ней все сервисы, поэтому в compose-файле хост базы — <code>db</code>, а не
+        <code>localhost</code> (глава 11).</p>
+    </div>
+
+    <h2>Из контейнера в хост</h2>
+    <p>Обратное направление сложнее: <code>localhost</code> внутри контейнера — это сам контейнер. Вариантов
+      три, и все проверены:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># 1) Шлюз сети — это хост со стороны контейнера
+docker run --rm alpine sh -c 'ip route | grep default'
+# default via 172.17.0.1 dev eth0        ← 172.17.0.1 и есть хост
+
+# 2) host.docker.internal: на Linux имени нет по умолчанию
+docker run --rm alpine wget -qO- -T2 http://host.docker.internal:18080
+# wget: bad address 'host.docker.internal:18080'
+
+# 2b) …пока не добавим запись в /etc/hosts контейнера
+docker run --rm --add-host=host.docker.internal:host-gateway alpine \
+  wget -qO- -T2 http://host.docker.internal:18080 | head -1     # HTML nginx
+
+# 3) --network host: контейнер вообще без своей сети, порты — хостовые
+docker run -d --name web5 --network host nginx:alpine
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:80/    # 200</code></pre>
+    </div>
+    <ul>
+      <li><code>--add-host имя:host-gateway</code> — добавить запись в <code>/etc/hosts</code> контейнера;
+        специальное значение <code>host-gateway</code> Docker заменяет на адрес шлюза. На Docker Desktop
+        (macOS/Windows) <code>host.docker.internal</code> существует из коробки, на Linux — только так.</li>
+      <li><code>--network host</code> — контейнер использует сетевой стек хоста: своего IP нет, порт 80 занят
+        самим хостом. Удобно для отладки, но плохо для прода: два контейнера с одним портом конфликтуют, а
+        изоляция сети исчезает.</li>
+    </ul>
+
+
+    <h2>Разбор «Connection refused» к базе</h2>
+    <p>Самая частая жалоба: «приложение в контейнере не подключается к PostgreSQL». Причина всегда в одном из
+      четырёх мест, и проверяются они по порядку:</p>
+    <table>
+      <thead><tr><th>Проверка</th><th>Команда</th><th>Что значит</th></tr></thead>
+      <tbody>
+        <tr><td>Имя резолвится?</td><td><code>docker exec app getent hosts db</code></td><td>Пусто — контейнеры
+          в разных сетях или в дефолтной bridge</td></tr>
+        <tr><td>Порт открыт?</td><td><code>docker exec app nc -zv db 5432</code></td><td><code>refused</code> —
+          процесс не слушает или слушает не там</td></tr>
+        <tr><td>На каком порту слушает сервер?</td><td><code>docker port db</code></td><td>Показывает публикацию;
+          без <code>-p</code> пусто — и это нормально внутри сети</td></tr>
+        <tr><td>Что видит само приложение?</td><td><code>docker logs app | tail</code></td><td>Строка подключения
+          в логе — половина ответа</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-bash"># Имя и адрес: getent смотрит те же источники, что и приложение (/etc/hosts, DNS)
+docker exec app getent hosts db
+
+# Доступность порта: -z — только проверить, -v — рассказать
+docker exec app nc -zv db 5432
+
+# Куда Docker опубликовал порты контейнера (пусто, если -p не задавали)
+docker port db
+
+# Внутри контейнера приложения: какой URL реально используется
+docker exec app printenv | grep -i -E 'ConnectionStrings|POSTGRES|DB_'</code></pre>
+    </div>
+    <p>Типичные комбинации ошибок:</p>
+    <ul>
+      <li><strong><code>bad address</code></strong> — имя не резолвится: разные сети (лечится
+        <code>docker network connect</code> или общим compose-файлом).</li>
+      <li><strong><code>Connection refused</code> на <code>localhost:5432</code></strong> — приложение ищет базу
+        <em>внутри себя</em>; в строке подключения должен быть <code>db</code> (имя сервиса), а не
+        <code>localhost</code>.</li>
+      <li><strong><code>Connection refused</code> на <code>db:5432</code></strong> — база ещё не поднялась или
+        слушает другой порт; проверьте <code>docker logs db</code> и <code>nc -zv</code>.</li>
+      <li><strong>Таймаут вместо отказа</strong> — обычно файрвол или порт опубликован на другом интерфейсе
+        (см. привязку к <code>127.0.0.1</code> выше).</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Проверять изнутри того же контейнера</span>
+      <p>Все проверки выше делаются <em>из контейнера приложения</em> (<code>docker exec app …</code>), а не с
+        хоста: с хоста видно опубликованные порты, а не сеть контейнеров. Разница ровно та, из-за которой
+        «у меня <code>curl</code> работает, а приложение нет».</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
       <ul>
-        <li><code>-p хост:контейнер</code>, привязка к <code>127.0.0.1</code>, случайный порт, почему
-          <code>-p 8080:80</code> «не работает» на .NET 8.</li>
-        <li>Три направления трафика: с хоста в контейнер, из контейнера в хост, из контейнера в
-          контейнер — таблица «что писать вместо localhost».</li>
-        <li>Сеть по умолчанию (bridge) без DNS и user-defined network с DNS по имени сервиса.</li>
-        <li><code>docker network create/ls/inspect</code>; контейнер в двух сетях.</li>
-        <li><code>host.docker.internal</code> и <code>--add-host</code> на Linux.</li>
-        <li>Разбор ошибки <code>Connection refused</code> к базе: как проверить имя, порт и
-          доступность изнутри.</li>
+        <li><code>-p хост:контейнер</code>: слева порт на хосте, справа — внутри контейнера. <code>EXPOSE</code>
+          ничего не публикует, <code>-P</code> публикует все <code>EXPOSE</code>-порты на случайные порты
+          хоста.</li>
+        <li><code>localhost</code> внутри контейнера — это сам контейнер. Хост — шлюз сети
+          (<code>172.17.0.1</code>) или <code>host.docker.internal</code> с
+          <code>--add-host=host.docker.internal:host-gateway</code>.</li>
+        <li>Имена контейнеров резолвятся только в <strong>пользовательской</strong> сети; в дефолтной
+          <code>bridge</code> — <code>bad address</code>.</li>
+        <li><code>docker network create/connect/inspect</code>, <code>docker port</code>,
+          <code>docker inspect -f</code> — четыре команды, которые закрывают почти всю диагностику.</li>
+        <li>.NET 8 в контейнере слушает <code>8080</code> (<code>ASPNETCORE_HTTP_PORTS=8080</code>), поэтому
+          публикация — <code>-p 8080:8080</code>, а не <code>-p 8080:80</code>.</li>
+        <li>При ошибке подключения к базе проверяйте по порядку: имя (<code>getent hosts</code>), порт
+          (<code>nc -zv</code>), публикацию (<code>docker port</code>), строку подключения в логах.</li>
       </ul>
     </div>
+
     <div class="pager">
       <a href="dk07-dotnet-multistage.html">← <span class="sp">Глава 7. Multi-stage: сборка .NET-образа построчно</span></a>
       <a href="dk09-volumes.html"><span class="sp">Глава 9. Данные: volumes и bind mounts</span> →</a>
     </div>
   </div>
 </div>
+<script>if (window.hljs) hljs.highlightAll();</script>
 </body>
 </html>
+
