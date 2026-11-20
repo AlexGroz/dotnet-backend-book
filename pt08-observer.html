@@ -106,7 +106,7 @@ void OnPaid(object? sender, decimal total) =&gt; Console.WriteLine($"[письм
       <pre><code class="language-csharp">public async Task PayAsync(Guid orderId)
 {
     var order = await _db.Orders.FindAsync(orderId);
-    order.Status = OrderStatus.Paid;
+    order!.MarkAsPaid();                   // «!» — заказ точно есть, подробно ниже
     await _db.SaveChangesAsync();          // 1) сохранили заказ
 
     await _email.SendReceiptAsync(order);  // 2) письмо клиенту
@@ -145,7 +145,7 @@ public sealed class OrderService(AppDbContext db, IEnumerable&lt;IOrderPaidHandl
     public async Task PayAsync(Guid orderId, CancellationToken ct)
     {
         var order = await db.Orders.FindAsync([orderId], ct);
-        order!.Status = OrderStatus.Paid;
+        order!.MarkAsPaid();                    // правило живёт в сущности — глава 7
 
         await db.SaveChangesAsync(ct);          // СНАЧАЛА фиксируем в базе
 
@@ -154,6 +154,76 @@ public sealed class OrderService(AppDbContext db, IEnumerable&lt;IOrderPaidHandl
             await handler.HandleAsync(e, ct);
     }
 }</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Разбор <code>FindAsync([orderId], ct)</code>: что за <code>orderId</code>, зачем скобки и зачем <code>!</code></span>
+      <p><code>orderId</code> — это <strong>параметр самого метода</strong>, объявленный строкой выше:
+        <code>PayAsync(Guid orderId, CancellationToken ct)</code>. Значение приходит снаружи, из endpoint'а
+        (раздел «Кто и когда вызывает <code>OrderService</code>»):
+        <code>app.MapPost("/orders/{id:guid}/pay", async (Guid id, OrderService orders, CancellationToken ct)
+        =&gt; await orders.PayAsync(id, ct))</code> — <code>id</code> из адреса, дальше он же внутри сервиса
+        называется <code>orderId</code>. <code>FindAsync</code> у <code>DbSet&lt;Order&gt;</code> значит «найди
+        заказ по первичному ключу» и существует в двух видах:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">ValueTask&lt;Order?&gt; FindAsync(params object?[]? keyValues);                             // без токена
+ValueTask&lt;Order?&gt; FindAsync(object?[]? keyValues, CancellationToken cancellationToken); // с токеном</code></pre>
+      </div>
+      <ul>
+        <li><strong>Почему ключ в массиве, хотя он один.</strong> <code>Find</code> всегда принимает
+          <em>набор</em> ключевых значений: первичный ключ бывает составным, и тогда пишут
+          <code>FindAsync([tenantId, orderId], ct)</code>. Сколько значений ждёт EF, он знает из модели и
+          сверяет с переданным набором — два значения для одного ключа дают
+          <code>ArgumentException: Entity type 'Order' is defined with a single key property, but 2 values were
+          passed to the 'Find' method.</code> (проверено).</li>
+        <li><strong>Почему не просто <code>FindAsync(orderId, ct)</code>.</strong> Такой вызов компилятор
+          отправит в <code>params</code>-перегрузку и упакует в массив <em>оба</em> аргумента:
+          <code>{ orderId, ct }</code> — токен поедет как «второе ключевое значение». EF это терпит (токен он
+          распознаёт, см. ниже), но держится такое на договорённости, а не на сигнатуре: поставьте рядом другое
+          значение — и вызов либо не найдёт заказ, либо упадёт с <code>ArgumentException</code>. Форма
+          <code>[orderId], ct</code> выбирает перегрузку с токеном <em>по типам аргументов</em>:
+          <code>[orderId]</code> — collection expression (C# 12), он создаёт <code>object?[] { orderId }</code>.
+          До C# 12 писали <code>new object?[] { orderId }</code> — работает и сейчас, результат тот же
+          (проверено: обе формы находят заказ).</li>
+        <li><strong>Почему <code>order!</code>.</strong> <code>FindAsync</code> возвращает <code>Order?</code>:
+          заказа с таким id может не быть. Без <code>!</code> компилятор предупреждает
+          <code>warning CS8602: Dereference of a possibly null reference.</code>, а <code>!</code>
+          (null-forgiving) — это «я знаю, что тут не null»: он <em>только глушит предупреждение</em> и
+          <strong>никакой проверки в рантайме не делает</strong>. Если заказа нет,
+          <code>order!.Total</code> упадёт с <code>NullReferenceException: Object reference not set to an
+          instance of an object.</code> (проверено). Строже — как в главе 7:
+          <code>?? throw new NotFoundException(orderId)</code>.</li>
+      </ul>
+      <p>Ловушка рядом, которую легко не заметить: <code>FindAsync(orderId, default)</code> компилируется и
+        <strong>молча возвращает <code>null</code></strong> — в <code>params</code>-позиции литерал
+        <code>default</code> становится <code>null</code>, то есть вторым «ключевым значением». А
+        <code>FindAsync(orderId, ct)</code> с настоящим <code>CancellationToken</code> работает: EF распознаёт
+        токен в последнем значении и вынимает его сам. Поэтому в книге выбрана явная форма
+        <code>[orderId], ct</code>: она не зависит от того, догадается ли EF опознать токен.</p>
+    </div>
+    <div class="box note">
+      <span class="t">Откуда <code>OrderStatus</code> и почему <code>MarkAsPaid()</code>, а не <code>Status = …</code></span>
+      <p><code>OrderStatus</code> — это <strong>enum из главы 7</strong>, там же объявлена и сущность
+        <code>Order</code>. В главе 8 он не переобъявляется, чтобы в книге не было двух разных
+        <code>OrderStatus</code>:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">// глава 7, рядом с сущностью Order
+public enum OrderStatus { New, Paid, Cancelled }
+
+public OrderStatus Status { get; private set; }              // сеттер закрыт
+public void MarkAsPaid() =&gt; Status = OrderStatus.Paid;       // единственный способ сменить статус</code></pre>
+      </div>
+      <p>Поэтому в сервисе стоит <code>order!.MarkAsPaid();</code>, а не <code>order.Status = OrderStatus.Paid;</code>:
+        второе из чужого класса <strong>не компилируется</strong> —
+        <code>error CS0272: The property or indexer 'Order.Status' cannot be used in this context because the set
+        accessor is inaccessible</code> (проверено). Смысл тот же, что у <code>record OrderPaid</code> без
+        <code>set</code>: сервис не может выставить произвольный статус в обход правила (например, «оплатить»
+        отменённый заказ) — правило живёт в одном месте. Знак <code>!</code> здесь по-прежнему про возможный
+        <code>null</code> из <code>FindAsync</code>, к статусу он отношения не имеет.</p>
+      <p>EF Core при этом ничего специального не требует: он отслеживает загруженный объект, видит, что после
+        вызова метода изменилось свойство, и при <code>SaveChangesAsync</code> отправляет
+        <code>UPDATE "Orders" SET "Status" = @p0 WHERE "Id" = @p1 RETURNING 1;</code> (лог EF Core 8 — глава 7).
+        Ещё одно отличие: у сущности в главе 7 сумма не показана, а здесь у заказа есть <code>Total</code> — она
+        уходит в событие <code>OrderPaid</code>.</p>
     </div>
     <div class="box note">
       <span class="t">«Никакой логики» — а данные куда деваются? Разбор <code>record OrderPaid</code></span>
@@ -235,8 +305,8 @@ app.MapPost("/orders/{id:guid}/pay", async (Guid id, OrderService orders, Cancel
       <pre><code class="language-text">POST /orders/7f3a…/pay
   └ контейнер создаёт OrderService(db: AppDbContext, handlers: [SendReceipt…, ReserveStock…])
       └ PayAsync(orderId, ct):
-          1. читаем заказ из базы              db.Orders.FindAsync
-          2. ставим статус Paid                в памяти, ещё не в базе
+          1. читаем заказ из базы              db.Orders.FindAsync([orderId], ct)
+          2. order.MarkAsPaid()                статус Paid в памяти, ещё не в базе
           3. UPDATE … COMMIT                   db.SaveChangesAsync
           4. new OrderPaid(order.Id, Total, UtcNow)
           5. foreach по handlers → HandleAsync(e, ct)
@@ -336,6 +406,9 @@ public sealed class PriceView : IDisposable
           в самой лямбде, а значения им передаёт <code>Invoke</code> в момент события.</li>
         <li>Доменное событие (<code>record OrderPaid</code>) — <strong>конверт с данными</strong> и без
           поведения: данные читают обработчики, изменить их нельзя.</li>
+        <li><code>FindAsync([orderId], ct)</code>: <code>[orderId]</code> — это <code>object?[]</code> из одного
+          элемента (collection expression, C# 12), <code>orderId</code> — параметр метода. <code>!</code>
+          только глушит предупреждение о возможном <code>null</code> и в рантайме ничего не проверяет.</li>
         <li><code>OrderService(…)</code> — объявление класса с зависимостями в конструкторе; объект создаёт
           DI, а исполняется код тогда, когда endpoint вызовет <code>PayAsync</code>.</li>
         <li>В прикладном коде чаще берут <strong>список обработчиков за интерфейсом</strong>: работает с
