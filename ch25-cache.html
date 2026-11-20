@@ -258,6 +258,75 @@ public sealed class TariffService(AppDbContext db, IMemoryCache cache)
       <li><strong>Прогрев</strong> после деплоя: заранее положить горячие ключи (гл. 28 — прогрев реплики).</li>
     </ul>
 
+    <h2><code>HybridCache</code>: L1 + L2 и защита от шторма «из коробки» (.NET 9)</h2>
+    <p>Всё, что выше, — ручная сборка: <code>IMemoryCache</code> как L1, <code>IDistributedCache</code> как L2 и
+      <code>SemaphoreSlim</code> для single flight. В .NET 9 появился <code>HybridCache</code> (пакет
+      <code>Microsoft.Extensions.Caching.Hybrid</code>), который собирает это в один API:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddSingleton&lt;IDistributedCache&gt;(  // L2: Redis в проде
+    new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
+
+builder.Services.AddHybridCache(o =&gt;
+{
+    o.DefaultEntryOptions = new HybridCacheEntryOptions
+    {
+        LocalCacheExpiration = TimeSpan.FromSeconds(30),   // L1 — в процессе
+        Expiration = TimeSpan.FromMinutes(5),              // L2 — общий для реплик
+    };
+});
+
+// использование: один вызов вместо «проверь L1, проверь L2, сходи в источник, положи обратно»
+var tariff = await cache.GetOrCreateAsync($"tariff:{id}", async ct =&gt;
+    await db.Tariffs.AsNoTracking().FirstAsync(t =&gt; t.Id == id, ct), cancellationToken: ct);</code></pre>
+    </div>
+    <p>Замеры на .NET 9 с <code>MemoryDistributedCache</code> в роли L2 (пакет 9.3.0), фабрика «источника»
+      отвечает 200 мс:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">A) 100 одновременных запросов на один ключ: вызовов фабрики 1, всего 220 мс
+B) 100 000 чтений из L1: 47 мс (≈0,5 мкс на чтение), вызовов фабрики всё ещё 1
+C) второй экземпляр приложения с тем же L2: вызовов фабрики 0 — значение пришло из L2
+D) L1 истёк (400 мс), L2 жив: вызовов фабрики по-прежнему 1; истёк и L2 (1000 мс): 2
+E) после RemoveAsync("k1"): фабрика вызвана снова, значение свежее</code></pre>
+    </div>
+    <p>То есть <strong>защита от cache stampede уже встроена</strong>: сто одновременных запросов дают один
+      поход в источник, а не сто — ровно то, что в предыдущем разделе приходилось делать семафором вручную.
+      Что <code>HybridCache</code> действительно ходит в L2, видно, если обернуть <code>IDistributedCache</code>
+      логгером:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">GET k1 -&gt; miss      ← L2 пуст
+SET k1              ← положили после похода в источник
+GET k1 -&gt; hit       ← следующее чтение взяло из L2 (L1 к этому моменту истёк)
+GET __MSFT_HCT__* -&gt; miss   ← служебный ключ пакета (учёт тегов)</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Что важно знать до включения</span>
+      <ul>
+        <li><strong>L1 у каждой реплики свой.</strong> Десять подов — десять копий в памяти; согласованность
+          держится на L2 и на инвалидации. Для «общего» значения берите <code>LocalCacheExpiration</code>
+          коротким (секунды), а не минуты.</li>
+        <li><strong>Значения сериализуются в L2.</strong> Для настройки формата есть
+          <code>IHybridCacheSerializer&lt;T&gt;</code> и <code>IHybridCacheSerializerFactory</code>, а для
+          работы с «сырыми» байтами — <code>IBufferDistributedCache</code> (проверено по публичным типам
+          пакета).</li>
+        <li><strong>Теги — это и есть инвалидация групп.</strong>
+          <code>GetOrCreateAsync(key, factory, tags: ["tariff"])</code>, затем
+          <code>await cache.RemoveAsync(["tariff"])</code>. Обратите внимание: удаление по тегу возвращает
+          <code>Task</code> без результата — попытка присвоить его переменной не компилируется
+          (<code>CS0815</code>, проверено).</li>
+        <li><strong><code>AddHybridCache</code> возвращает <code>IHybridCacheBuilder</code></strong>, а не
+          <code>IServiceCollection</code>: <code>.AddHybridCache(o =&gt; …).BuildServiceProvider()</code> не
+          скомпилируется (<code>CS1929</code>, проверено) — стройте провайдер из самой коллекции.</li>
+        <li><strong>Атрибута <code>[HybridCacheable]</code> в пакете 9.3.0 нет</strong> — проверено перебором
+          публичных типов сборки (есть <code>HybridCache</code>, <code>HybridCacheEntryOptions</code>,
+          сериализаторы, <code>IBufferDistributedCache</code>). Кэширование задаётся вызовом, а не атрибутом.</li>
+      </ul>
+    </div>
+    <p>Когда брать <code>HybridCache</code>, а когда ручной вариант из этой главы: если проект на .NET 9 и нужен
+      именно L1+L2 с защитой от шторма — берите <code>HybridCache</code>, кода меньше и меньше шансов забыть
+      single flight. Если .NET 8, или нужны операции над структурами Redis (<code>HSET</code>,
+      <code>ZADD</code> — глава 4 раздела Redis), или требуется полный контроль над ключами и сериализацией —
+      остаётся <code>IDistributedCache</code> плюс паттерн из предыдущего раздела.</p>
+
     <h2>Что кэшировать и что нельзя</h2>
     <table>
       <tr><th>Кэшируем</th><th>Не кэшируем (или только с оговорками)</th></tr>
@@ -326,6 +395,9 @@ public sealed class TariffService(AppDbContext db, IMemoryCache cache)
         <li><strong>Cache-aside</strong> — базовая схема: кэш → промах → источник → кэш.</li>
         <li>Инвалидация: TTL обязателен, версия в ключе — дёшево, событийная — после коммита.</li>
         <li><strong>Cache stampede</strong> лечится single-flight, jitter и stale-while-revalidate.</li>
+        <li>В .NET 9 <code>HybridCache</code> даёт L1+L2 и single-flight одним вызовом
+          <code>GetOrCreateAsync</code>; L1 у каждой реплики свой, поэтому <code>LocalCacheExpiration</code>
+          держат коротким.</li>
         <li>Кэш никогда не единственный источник; hit ratio и p95 показывают, полезен ли он.</li>
       </ul>
     </div>
