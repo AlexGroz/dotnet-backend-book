@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 24 · Сериализация без рефлексии: System.Text.Json, source generators и AOT</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="csharp.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть III · Типы, делегаты и асинхронность</div>
+    <h1>Глава 24. Сериализация без рефлексии: System.Text.Json, source generators и AOT</h1>
+    <p class="sublead">По умолчанию <code>System.Text.Json</code> строит метаданные о типе <em>рефлексией</em>
+      при первом вызове. Разбираем, сколько это стоит (с замерами), как включить генератор исходников
+      (<code>JsonSerializerContext</code>), какие ограничения он накладывает на DTO и почему в Native AOT без
+      него нельзя. Всё измерено на .NET 9 в Release.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что делает сериализатор по умолчанию</h2>
+    <p>Вызов <code>JsonSerializer.Serialize(order)</code> без явных настроек использует
+      <code>JsonSerializerOptions.Default</code>. При первом обращении к типу сериализатор <strong>строит
+      метаданные рефлексией</strong>: перечисляет свойства, читает атрибуты, создаёт план сериализации и кэширует
+      его в объекте настроек. Дальше работа идёт по готовому плану, но:</p>
+    <ul>
+      <li>первый вызов дороже — рефлексия и создание делегатов;</li>
+      <li>метаданные и делегаты — это управляемая память, живущая столько же, сколько процесс;</li>
+      <li>триммер (trimming) и AOT <em>не видят</em>, какие свойства нужны: они используются по имени,
+        которого в коде нет (глава 22 про рефлексию и AOT).</li>
+    </ul>
+    <p>Замер: сто тысяч сериализаций одного заказа (две позиции), минимум из трёх прогонов в Release:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">100 000 сериализаций одного и того же заказа (.NET 9, Release, 16 ядер):
+   рефлексия:   400 мс, выделено 74 МБ
+   source-gen:  280 мс, выделено 45 МБ
+
+первый вызов в свежем процессе:
+   рефлексия:  49.3 мс
+   source-gen: 33.9 мс</code></pre>
+    </div>
+    <p>То есть выигрыш — примерно <strong>30 % по времени и 40 % по аллокациям</strong>, а не «в десять раз»,
+      как иногда обещают. На один запрос это доли микросекунды. Зачем тогда генератор? Ответ ниже: из-за
+      AOT.</p>
+
+    <h2>Как включить: <code>JsonSerializerContext</code></h2>
+    <p>Генератор исходников — это анализатор в SDK: он видит атрибуты и <em>дописывает</em> класс с готовым
+      планом сериализации. Нужен <code>partial</code>-класс, унаследованный от <code>JsonSerializerContext</code>,
+      с атрибутами <code>[JsonSerializable]</code> на каждый корневой тип:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+                             UseStringEnumConverter = true)]
+[JsonSerializable(typeof(OrderDto))]
+[JsonSerializable(typeof(List&lt;OrderDto&gt;))]
+internal partial class AppJsonContext : JsonSerializerContext;   // вторая половина генерируется</code></pre>
+    </div>
+    <p>Сгенерированный код появляется в <code>obj/Release/net9.0/System.Text.Json.SourceGeneration/…</code> —
+      это обычный C#, его можно открыть и посмотреть. Использование — через <code>Default</code>, где на каждый
+      тип есть свойство <code>JsonTypeInfo&lt;T&gt;</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var json = JsonSerializer.Serialize(order, AppJsonContext.Default.OrderDto);
+var dto  = JsonSerializer.Deserialize(json, AppJsonContext.Default.OrderDto);
+
+// вариант «по типу»: план берётся из контекста, а не из рефлексии
+var loose = JsonSerializer.Serialize(order, typeof(OrderDto), AppJsonContext.Default);</code></pre>
+    </div>
+    <p>В ASP.NET Core контекст подключается к Minimal API одной строкой (проверено: компилируется и
+      работает):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.ConfigureHttpJsonOptions(o =&gt;
+    o.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonContext.Default));</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Что такое <code>TypeInfoResolverChain</code></span>
+      <p>Это список «поставщиков метаданных». Первым ставится сгенерированный контекст: если тип в нём есть —
+        используется он; если нет — цепочка идёт дальше, к рефлексии. Так можно включить генератор постепенно,
+        не переписывая все DTO сразу.</p>
+    </div>
+
+    <h2>Что генератор накладывает на DTO</h2>
+    <p>Ограничения не выдуманные: каждое видно в прогоне. Ниже — то, на чём чаще всего спотыкаются.</p>
+
+    <h3>1. Все типы должны быть известны заранее</h3>
+    <p>Если типа нет в контексте и он не достижим из перечисленных, сериализация падает (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">InvalidOperationException: JsonTypeInfo metadata for type 'LegacyDto' was not provided by
+TypeInfoResolver of type 'AppJsonContext'. If using source generation, ensure that all root types
+passed to the serializer have been annotated with 'JsonSerializableAttribute', along with any
+types that might be serialized polymorphically.</code></pre>
+    </div>
+    <p>Это же и плюс: ошибка видна сразу, а не в проде. Но цена — <code>[JsonSerializable]</code> нужно
+      поддерживать: новый DTO в API = новая строка в контексте.</p>
+
+    <h3>2. Полиморфизм: без атрибута поля наследника пропадают</h3>
+    <p>Свойство базового типа сериализуется по плану <em>базового</em> типа. Замер на
+      <code>abstract record PaymentDto(decimal Amount)</code> и наследнике с номером карты:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">без [JsonDerivedType]: {"amount":100}
+с  [JsonDerivedType]: {"kind":"card","pan":"4111","amount":100}</code></pre>
+    </div>
+    <p>В первом случае <code>pan</code> исчез <strong>молча</strong> — ни ошибки, ни предупреждения в рантайме.
+      Лечится явным описанием иерархии:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">[JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
+[JsonDerivedType(typeof(CardPaymentDto), "card")]
+public abstract record PaymentDto(decimal Amount);
+
+public sealed record CardPaymentDto(string Pan, decimal Amount) : PaymentDto(Amount);
+// в JSON появится "kind":"card" — по нему при десериализации выбирается наследник</code></pre>
+    </div>
+
+    <h3>3. <code>object</code> и <code>dynamic</code>: в JIT работает, в AOT — нет</h3>
+    <p>Свойство типа <code>object</code> сериализуется по фактическому типу значения (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">{"type":"order.paid","data":{"pan":"4111","amount":100}}</code></pre>
+    </div>
+    <p>Но «по фактическому типу» — это ровно тот сценарий, который требует метаданных во время работы.
+      В обычном .NET он поддержан, в Native AOT — нет: там действует правило «тип известен на компиляции».
+      Поэтому <code>object</code>/<code>dynamic</code> в DTO — красный флаг для AOT-сборки.</p>
+
+    <h3>4. Настройки контекста и рантайма должны совпадать</h3>
+    <p>Политика именования задаётся в <code>[JsonSourceGenerationOptions]</code> и должна совпадать с
+      <code>JsonSerializerOptions</code>, которыми вы пользуетесь в остальном коде. Проверка: контекст с
+      <code>camelCase</code> против <code>JsonSerializer.Serialize(order)</code> без настроек дал
+      <strong>разный</strong> JSON — <code>"id"</code> против <code>"Id"</code>. После выравнивания настроек
+      строки совпали (проверено).</p>
+
+    <h3>5. Enum: по умолчанию число</h3>
+    <p>Без настройки перечисление уходит числом — <code>"status":0</code>. Чтобы строками, нужен флаг
+      (проверено):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+                             UseStringEnumConverter = true)]
+// → "status":"New"   (значения перечисления политикой именования не меняются)</code></pre>
+    </div>
+    <p>Мелочь, но именно она чаще всего ломает контракт при переходе с рефлексии на генератор: раньше
+      <code>JsonStringEnumConverter</code> мог быть добавлен в <code>Converters</code> где-то в другом месте, и
+      никто об этом не помнил.</p>
+
+
+    <h2>Связь с Native AOT и trimming</h2>
+    <p>Native AOT компилирует приложение в машинный код <strong>до запуска</strong>. Значит, «построить
+      метаданные рефлексией в рантайме» негде: кода, который это делает, в сборке нет. Поэтому
+      рефлексивные перегрузки <code>JsonSerializer</code> помечены атрибутами
+      <code>[RequiresUnreferencedCode]</code> и <code>[RequiresDynamicCode]</code>, а анализатор говорит об этом
+      прямо. Проверка — сборка с <code>&lt;IsAotCompatible&gt;true&lt;/IsAotCompatible&gt;</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">warning IL2026: Using member 'JsonSerializer.Serialize&lt;TValue&gt;(TValue, JsonSerializerOptions)'
+which has 'RequiresUnreferencedCodeAttribute' can break functionality when trimming application
+code. JSON serialization and deserialization might require types that cannot be statically analyzed.
+Use the overload that takes a JsonTypeInfo or JsonSerializerContext, or make sure all of the required
+types are preserved.
+
+warning IL3050: Using member 'JsonSerializer.Serialize&lt;TValue&gt;(TValue, JsonSerializerOptions)'
+which has 'RequiresDynamicCodeAttribute' can break functionality when AOT compiling. JSON
+serialization and deserialization might require types that cannot be statically analyzed and might
+need runtime code generation. Use System.Text.Json source generation for native AOT applications.</code></pre>
+    </div>
+    <p>Читается это так: <strong>для AOT сериализация обязана быть сгенерированной</strong>. Перегрузки,
+      принимающие <code>JsonTypeInfo</code>/<code>JsonSerializerContext</code>, таких предупреждений не дают —
+      ровно поэтому в контексте есть свойства вида <code>Default.OrderDto</code>.</p>
+    <div class="box warn">
+      <span class="t">Trimming ломает мягче, чем AOT</span>
+      <p>При обрезке кода свойство, к которому обращаются только по имени, может быть вырезано: сборка
+        соберётся, а в рантайме придёт <code>null</code> вместо значения — тот же механизм, что описан в
+        главе 22. Сгенерированный план ссылается на свойства <em>кодом</em>, поэтому триммер их видит и
+        сохраняет.</p>
+    </div>
+
+    <h2>Когда включать, а когда не стоит</h2>
+    <table>
+      <thead><tr><th>Ситуация</th><th>Решение</th><th>Почему</th></tr></thead>
+      <tbody>
+        <tr><td>Native AOT, CLI, serverless</td><td><strong>Обязательно</strong></td>
+          <td>Без генератора сериализация не работает (IL3050)</td></tr>
+        <tr><td>Trimmed-публикация</td><td><strong>Обязательно</strong></td><td>Иначе свойства вырежутся
+          (IL2026)</td></tr>
+        <tr><td>Горячий API на JIT</td><td>Стоит включить</td><td>−30 % CPU и −40 % аллокаций на сериализацию,
+          меньше давления на GC (глава 6)</td></tr>
+        <tr><td>Пара эндпоинтов, редкая сериализация</td><td>Можно не включать</td><td>Кодоген добавляет
+          строки в контекст, которые надо поддерживать</td></tr>
+      </tbody>
+    </table>
+    <p>Практическое правило: один контекст на приложение, подключённый первым в
+      <code>TypeInfoResolverChain</code>; тест, который сериализует каждый публичный DTO, ловит забытый
+      <code>[JsonSerializable]</code> до прода — ошибка из раздела выше
+      (<code>InvalidOperationException</code> про отсутствующие метаданные) и есть этот сигнал.</p>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li><code>System.Text.Json</code> по умолчанию строит метаданные <strong>рефлексией</strong> и кэширует
+          их; первый вызов дороже, и этот путь несовместим с AOT.</li>
+        <li>Генератор включается <code>partial</code>-классом <code>: JsonSerializerContext</code> с
+          <code>[JsonSerializable]</code>; в Minimal API — через
+          <code>ConfigureHttpJsonOptions(... TypeInfoResolverChain.Insert(0, Context.Default))</code>.</li>
+        <li>Выигрыш на JIT — около 30 % времени и 40 % аллокаций (замер), главная же причина — AOT и
+          trimming.</li>
+        <li>Ограничения на DTO: все типы перечислены (иначе <code>InvalidOperationException</code> про
+          метаданные); полиморфизм — только через <code>[JsonPolymorphic]</code>/<code>[JsonDerivedType]</code>,
+          иначе поля наследника исчезают молча; <code>object</code>/<code>dynamic</code> в AOT не работают;
+          настройки контекста и <code>JsonSerializerOptions</code> должны совпадать; enum — число, пока не
+          включён <code>UseStringEnumConverter</code>.</li>
+        <li>Для AOT сериализация обязана идти через <code>JsonTypeInfo</code>/контекст: рефлексивные перегрузки
+          дают IL2026 и IL3050.</li>
+      </ul>
+    </div>
+
+    <p>Связь с остальными главами: рефлексия, trimming и AOT — глава 22; аллокации и GC — главы 6–7;
+      сериализация в брокерах и outbox — глава 31 и раздел про Kafka.</p>
+
+    <div class="pager">
+      <a href="cs23-dispose-using.html">← <span class="sp">Глава 23. using, await using и IDisposable: кто освобождает ресурсы</span></a>
+      <a href="csharp.html"><span class="sp">Оглавление</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
