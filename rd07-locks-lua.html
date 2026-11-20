@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 7 · Распределённые блокировки и Lua-скрипты</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="redis.html">← Оглавление</a>
+  <span class="booktitle">Redis</span>
+  <a href="redis.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Redis · Часть IV · Прикладные задачи</div>
+    <h1>Глава 7. Распределённые блокировки и Lua-скрипты</h1>
+    <p class="sublead"><code>SET NX PX</code> по словам, атомарное освобождение через Lua, что происходит, когда
+      TTL истёк, а работа ещё идёт, и почему Redlock — не серебряная пуля. Все команды и выводы проверены на
+      Redis 7 и StackExchange.Redis 2.8.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Зачем нужна распределённая блокировка</h2>
+    <p><code>lock</code> и <code>SemaphoreSlim</code> (глава 10 C#-книги) работают <em>внутри процесса</em>: они
+      разводят потоки одной реплики. Но в проде реплик несколько, и два экземпляра сервиса ничего не знают о
+      блокировках друг друга — оба начнут «единственную» операцию. Примеры: ночной пересчёт, отправка отчёта,
+      взятие задачи из очереди, миграция данных.</p>
+    <p>Идея простая: общий для всех реплик флаг в Redis. Взять можно только тогда, когда флага нет, и он сам
+      исчезнет, если процесс упал. В Redis это одна команда:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># SET ключ значение NX PX миллисекунды
+docker exec rds redis-cli SET lock:42 ownerA NX PX 3000
+# OK                     ← блокировка взята, TTL 3000 мс
+
+docker exec rds redis-cli SET lock:42 ownerB NX PX 3000
+# (nil)                  ← уже занято, не наша
+
+docker exec rds redis-cli GET lock:42
+# "ownerA"               ← значение — это токен владельца
+docker exec rds redis-cli TTL lock:42
+# 3                      ← осталось секунд (PTTL — в миллисекундах)</code></pre>
+    </div>
+    <p>Каждое слово важно:</p>
+    <table>
+      <thead><tr><th>Элемент</th><th>Что делает</th><th>Почему именно так</th></tr></thead>
+      <tbody>
+        <tr><td><code>SET</code></td><td>Записать значение по ключу</td><td>Атомарная команда; в отличие от
+          «GET + SET», не даёт двоим пройти одновременно</td></tr>
+        <tr><td><code>lock:42</code></td><td>Ключ блокировки</td><td>Гранулярность: лок на конкретный заказ, а не
+          на всю систему</td></tr>
+        <tr><td><code>ownerA</code></td><td>Значение — токен владельца</td><td>По нему видно, <em>кто</em> держит
+          лок; без него нельзя безопасно освободить</td></tr>
+        <tr><td><code>NX</code></td><td>Not eXists: писать только если ключа нет</td><td>Это и есть «взять
+          блокировку»; иначе команда просто перезапишет чужую</td></tr>
+        <tr><td><code>PX 3000</code></td><td>Срок жизни в миллисекундах</td><td>Страховка от вечной блокировки:
+          процесс упал — ключ исчезнет сам</td></tr>
+      </tbody>
+    </table>
+    <p>Родственные опции: <code>EX</code> — то же, но в секундах; <code>XX</code> — писать только если ключ
+      <em>уже есть</em>; <code>GET</code> — вернуть старое значение; <code>KEEPTTL</code> — сохранить прежний TTL
+      при перезаписи.</p>
+
+    <h2>Освобождение: почему <code>DEL</code> — ошибка</h2>
+    <p>Первое, что хочется написать в <code>finally</code>, — <code>DEL lock:42</code>. И это удаляет
+      <em>любую</em> блокировку по этому ключу, даже чужую. Проверка: владелец <code>ownerA</code> взял лок, а
+      «уборщик» другой реплики вызвал <code>DEL</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec rds redis-cli SET lock:42 ownerA NX PX 3000   # OK — ownerA взял
+docker exec rds redis-cli DEL lock:42                     # 1  — удалено чужой рукой
+docker exec rds redis-cli GET lock:42                     # (nil) — лока нет, хотя ownerA работает</code></pre>
+    </div>
+    <p>Правильно — удалять только своё: сравнить значение с токеном и удалить, причём <strong>одной атомарной
+      операцией</strong>. Иначе между <code>GET</code> и <code>DEL</code> снова влезет другой процесс. Для этого
+      в Redis есть серверные скрипты на Lua:</p>
+    <div class="codewrap">
+      <pre><code class="language-lua">-- KEYS[1] — ключ блокировки, ARGV[1] — наш токен
+if redis.call('get', KEYS[1]) == ARGV[1] then   -- значение совпало с нашим?
+    return redis.call('del', KEYS[1])           -- да: удаляем и сообщаем 1
+end
+return 0                                        -- нет: чужая блокировка, ничего не делаем</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-bash"># EVAL скрипт количество_ключей ключ аргументы
+docker exec rds redis-cli EVAL "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end" 1 lock:42 ownerB
+# 0                      ← чужой токен: не удалили
+docker exec rds redis-cli EXISTS lock:42
+# 1                      ← блокировка на месте
+
+docker exec rds redis-cli EVAL "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end" 1 lock:42 ownerA
+# 1                      ← свой токен: удалили
+docker exec rds redis-cli EXISTS lock:42
+# 0</code></pre>
+    </div>
+    <p>Почему Lua атомарен: Redis исполняет скрипт <strong>целиком, без переключения на другие команды</strong> —
+      внутри скрипта не может вклиниться другой клиент. Ровно того и не хватает паре <code>GET</code> +
+      <code>DEL</code>.</p>
+
+    <h2><code>EVAL</code> и <code>EVALSHA</code>: не гоняйте текст скрипта каждый раз</h2>
+    <p>Текст скрипта можно один раз загрузить на сервер (<code>SCRIPT LOAD</code>) и дальше вызывать по
+      SHA1-хешу — это быстрее и меньше трафика. Проверено:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># Загрузить скрипт: сервер вернёт его SHA1
+docker exec rds redis-cli SCRIPT LOAD "return redis.call('incr', KEYS[1])"
+# 2bab3b661081db58bd2341920e0ba7cf5dc77b25
+
+# Вызвать по хешу: 1 — количество ключей
+docker exec rds redis-cli EVALSHA 2bab3b661081db58bd2341920e0ba7cf5dc77b25 1 cnt:x
+# 1
+
+# Если кеш скриптов очистить, тот же EVALSHA падает — и это надо обрабатывать
+docker exec rds redis-cli SCRIPT FLUSH
+docker exec rds redis-cli EVALSHA 2bab3b661081db58bd2341920e0ba7cf5dc77b25 1 cnt:x
+# NOSCRIPT No matching script. Please use EVAL.</code></pre>
+    </div>
+    <p>Правильная стратегия в коде: попробовать <code>EVALSHA</code>, при ошибке <code>NOSCRIPT</code> —
+      загрузить скрипт и повторить. В StackExchange.Redis это делает <code>ScriptEvaluateAsync</code> сам.</p>
+
+    <h2>Что происходит, когда TTL истёк, а работа идёт</h2>
+    <p>TTL — это компромисс: слишком маленький — блокировка исчезнет под работающим процессом, слишком большой —
+      после падения процесса другие будут ждать. Проверка «слишком маленького»:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec rds redis-cli SET lock:1 ownerA NX PX 150    # ownerA взял лок на 150 мс
+sleep 0.3                                                 # ownerA всё ещё работает
+docker exec rds redis-cli GET lock:1                      # (nil) — лок исчез
+docker exec rds redis-cli SET lock:1 ownerB NX PX 150     # OK — ownerB взял тот же лок</code></pre>
+    </div>
+    <p>Теперь <strong>два процесса одновременно считают, что держат блокировку</strong>. Никакой TTL этого не
+      решает: он лишь ограничивает время ожидания. Что делать:</p>
+    <ul>
+      <li><strong>Продлевать TTL</strong>, пока работа идёт (watchdog: раз в TTL/3 выполнять
+        <code>PEXPIRE</code> тем же Lua-скриптом с проверкой токена).</li>
+      <li><strong>Fencing token</strong>: каждому взятию блокировки выдавать монотонно растущий номер
+        (<code>INCR lock:42:fence</code>) и передавать его в операцию; ресурс отвергает запись с меньшим
+        номером. Это защита на стороне ресурса, а не «на честном слове» блокировки.</li>
+      <li><strong>Идемпотентность</strong>: операция, которую можно безопасно повторить, снимает большую часть
+        проблемы (глава 31 .NET-раздела).</li>
+    </ul>
+
+
+    <h2>То же самое в .NET</h2>
+    <p>Ниже — рабочий сценарий на StackExchange.Redis: десять задач одновременно пытаются взять один лок, затем
+      освобождение «своим» и «чужим» токеном. Код проверен прогоном, в комментариях — результат.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Одно соединение на процесс: ConnectionMultiplexer потокобезопасен и переподключается сам
+await using var redis = await ConnectionMultiplexer.ConnectAsync("localhost:6379");
+var db = redis.GetDatabase();                    // логическая база 0
+
+// Десять задач пытаются взять ОДНУ блокировку
+var winners = 0;
+var attempts = Enumerable.Range(0, 10).Select(i =&gt; Task.Run(async () =&gt;
+{
+    var token = $"worker-{i}";                   // уникальный токен владельца
+    // StringSetAsync(key, value, expiry, when): when = NotExists — это NX
+    var taken = await db.StringSetAsync("lock:42", token, TimeSpan.FromSeconds(5), When.NotExists);
+    if (taken) Interlocked.Increment(ref winners);   // прошёл только один
+}));
+await Task.WhenAll(attempts);
+// A) взяли блокировку 1, значение worker-9  ← победитель зависит от гонки
+
+// Освобождение: сравнить токен и удалить — одним скриптом
+const string ReleaseScript = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('del', KEYS[1])
+    end
+    return 0
+    """;
+
+var asStranger = await db.ScriptEvaluateAsync(ReleaseScript, ["lock:42"], ["worker-99"]);
+// B) чужой токен: результат 0, ключ существует True
+
+var owner = await db.StringGetAsync("lock:42");   // реальный владелец (worker-9 в прогоне)
+var asOwner = await db.ScriptEvaluateAsync(ReleaseScript, ["lock:42"], [owner]);
+// C) свой токен: результат 1, ключ существует False</code></pre>
+    </div>
+    <p>Разбор вызовов: <code>ConnectAsync</code> — установить соединение (<code>host:port</code>);
+      <code>GetDatabase()</code> — выбрать базу; <code>StringSetAsync</code> — обёртка над <code>SET</code> с
+      опциями, где <code>When.NotExists</code> — это <code>NX</code>, а <code>TimeSpan</code> превращается в
+      <code>PX</code>; <code>ScriptEvaluateAsync</code> — выполнить Lua: первым аргументом ключи
+      (<code>KEYS</code>), вторым — аргументы (<code>ARGV</code>).</p>
+
+    <h2>Lua не только для блокировок: rate limiter</h2>
+    <p>Второй частый сценарий — «не больше N операций в окно». Проблема наивного кода: <code>INCR</code> и
+      <code>EXPIRE</code> — две команды, и между ними процесс может упасть, оставив ключ навсегда. Проверка:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">docker exec rds redis-cli INCR rl:bad      # 1
+docker exec rds redis-cli TTL rl:bad       # -1 — TTL нет, ключ будет жить вечно</code></pre>
+    </div>
+    <p>Один скрипт решает обе задачи атомарно — счётчик и срок выставляются вместе (проверено: счётчики 1, 2, 3
+      и <code>PTTL</code> около 997 мс):</p>
+    <div class="codewrap">
+      <pre><code class="language-lua">local c = redis.call('incr', KEYS[1])                    -- +1 к счётчику окна
+if c == 1 then                                           -- первый запрос в окне?
+    redis.call('pexpire', KEYS[1], ARGV[1])              -- тогда задаём срок жизни окна
+end
+return c                                                 -- вызывающий сравнивает с лимитом</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">const string RateScript = """
+    local c = redis.call('incr', KEYS[1])
+    if c == 1 then redis.call('pexpire', KEYS[1], ARGV[1]) end
+    return c
+    """;
+
+for (var i = 0; i &lt; 3; i++)
+{
+    var count = await db.ScriptEvaluateAsync(RateScript, ["rl:user"], [1000]);   // окно 1000 мс
+    Console.WriteLine($"запрос {i + 1}: счётчик {count}");                        // 1, 2, 3
+}
+Console.WriteLine(await db.KeyTimeToLiveAsync("rl:user"));                        // 00:00:00.9970000</code></pre>
+    </div>
+
+
+    <h2>Границы: один Redis, Sentinel и Redlock</h2>
+    <ul>
+      <li><strong>Один Redis — точка отказа.</strong> Упал сервер — блокировки исчезли (если не было
+        персистентности) или недоступны. Для продакшена — репликация и Sentinel/Cluster (глава 6), но и там есть
+        окно, когда мастер уже упал, а реплика ещё не знает о блокировке.</li>
+      <li><strong>Redlock</strong> — попытка решить это кворумом: N независимых Redis (обычно 5), блокировка
+        берётся на большинстве (N/2+1) с ограничением по времени. Даже он не даёт гарантий при долгих паузах
+        процесса (GC, пауза виртуалки): блокировка истекает, а работа продолжается. Поэтому Redlock годится для
+        «не делать дважды по возможности», но не для денег и не для инвариантов.</li>
+      <li><strong>Когда блокировка не нужна:</strong> если операцию можно сделать идемпотентной
+        (<code>INSERT ... ON CONFLICT</code>, уникальный индекс, outbox — глава 31 .NET-раздела) или взять данные
+        под <code>SELECT ... FOR UPDATE</code> в PostgreSQL (глава 24 SQL-раздела). Тогда корректность держит
+        сама БД, а не договорённость между процессами.</li>
+      <li><strong>Не держите лок дольше TTL.</strong> Работа, которая может идти минуты, требует либо продления
+        TTL, либо fencing-токена, либо переноса в очередь с одним воркером.</li>
+    </ul>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li>Блокировка = <code>SET key token NX PX ttl</code>: <code>NX</code> — «только если нет»,
+          <code>PX</code> — срок жизни, токен — «чей лок».</li>
+        <li>Освобождать только своё: сравнение токена и удаление одним Lua-скриптом; <code>DEL</code> удаляет
+          чужую блокировку (проверено).</li>
+        <li>Lua исполняется атомарно; <code>EVALSHA</code> — по SHA1 из <code>SCRIPT LOAD</code>, при
+          <code>NOSCRIPT</code> скрипт надо загрузить заново.</li>
+        <li>TTL не спасает от двух владельцев: истёк — второй взял лок, пока первый работает (проверено
+          <code>GET → nil</code> и <code>SET → OK</code> через 150 мс). Нужны продление TTL, fencing-токен или
+          идемпотентность.</li>
+        <li>Один Redis — точка отказа; Redlock с кворумом уменьшает риск, но не даёт строгих гарантий; для
+          инвариантов — блокировка в БД или уникальные ограничения.</li>
+        <li>Тот же Lua закрывает rate limiter: <code>INCR</code> + <code>PEXPIRE</code> одной операцией (без
+          скрипта ключ может остаться без TTL — <code>TTL -1</code>).</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="rd06-operations-memory.html">← <span class="sp">Глава 6. Эксплуатация: память, eviction, персистентность и отказоустойчивость</span></a>
+      <a href="redis.html"><span class="sp">Оглавление</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
