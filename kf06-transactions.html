@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 6 · Транзакции и exactly-once</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="kafka.html">← Оглавление</a>
+  <span class="booktitle">Kafka</span>
+  <a href="docker.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Kafka · Часть IV · Гарантии доставки</div>
+    <h1>Глава 6. Транзакции и exactly-once: атомарная запись и коммит оффсетов</h1>
+    <p class="sublead">Почему at-least-once даёт дубли, что именно делает транзакция Kafka, как читать маркеры
+      COMMIT/ABORT в сыром логе и почему lag у EOS-группы никогда не станет нулём</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Откуда берутся дубли</h2>
+    <p>В главе 4 мы коммитили оффсет вручную и получали <strong>at-least-once</strong>: потребитель может
+      обработать запись, упасть до коммита и обработать её снова. Есть и второй источник дублей — продюсер:
+      если брокер записал сообщение, а подтверждение потерялось, клиент повторит отправку.</p>
+    <p>Идемпотентный продюсер (глава 3, <code>EnableIdempotence=true</code>) убирает второй источник: брокер
+      помнит <code>(producerId, epoch, sequence)</code> и отбрасывает повтор. Но остаётся главная проблема —
+      <strong>запись в Kafka и коммит оффсета не атомарны</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// «наивный» EOS: два независимых действия
+producer.Produce("orders-out", result);            // 1) записали результат
+consumer.Commit(record);                           // 2) сдвинули оффсет
+// упали между 1 и 2 → после рестарта запись обработается снова → дубль в orders-out
+// упали после 2, но запись не долетела → потеря результата</code></pre>
+    </div>
+    <p>Транзакция Kafka склеивает эти два действия в одно: либо в журнал попадут и записи, и новый оффсет,
+      либо ничего. Дальше — как это устроено и как проверяется.</p>
+    <h2>Стенд: один брокер в KRaft</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash"># docker run -d                — запустить контейнер в фоне
+# --name kfk --hostname kfk    — имя контейнера и сетевое имя (нужно для INTERNAL-листенера)
+# -p 19092:9094                — порт 9094 в контейнере опубликован как 19092 на хосте
+# -e KAFKA_NODE_ID=1           — идентификатор узла в KRaft-кластере
+# -e KAFKA_PROCESS_ROLES=broker,controller — узел и брокер, и контроллер (для проверки хватает одного)
+# -e KAFKA_LISTENERS=INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+#                              — на каких портах слушать: для брокера, контроллера и клиентов с хоста
+# -e KAFKA_ADVERTISED_LISTENERS=INTERNAL://kfk:9092,EXTERNAL://localhost:19092
+#                              — что брокер сообщает клиенту: внутри сети — kfk:9092, снаружи — localhost:19092
+# -e KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL — листенер для связи между брокерами
+# -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER — листенер контроллера
+# -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=... — протокол для каждого листенера (здесь везде PLAINTEXT)
+# -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@kfk:9093 — состав кворума KRaft: узел 1 по адресу kfk:9093
+# -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1  — для одного брокера репликация служебных топиков = 1
+# -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 — то же для топика __transaction_state
+# -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1     — минимум синхронных реплик для __transaction_state
+docker run -d --name kfk --hostname kfk -p 19092:9094 \
+  -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
+  -e KAFKA_LISTENERS=INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094 \
+  -e KAFKA_ADVERTISED_LISTENERS=INTERNAL://kfk:9092,EXTERNAL://localhost:19092 \
+  -e KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT \
+  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@kfk:9093 \
+  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+  apache/kafka:3.9.1
+
+# kafka-topics.sh — утилита управления топиками
+# --bootstrap-server kfk:9092 — адрес брокера изнутри контейнера (там работает INTERNAL-листенер)
+# --create --topic tx-in --partitions 1 --replication-factor 1 — один топик, одна партиция, одна реплика
+docker exec kfk /opt/kafka/bin/kafka-topics.sh --bootstrap-server kfk:9092 \
+  --create --topic tx-in --partitions 1 --replication-factor 1      # Created topic tx-in.
+docker exec kfk /opt/kafka/bin/kafka-topics.sh --bootstrap-server kfk:9092 \
+  --create --topic tx-out --partitions 1 --replication-factor 1     # Created topic tx-out.</code></pre>
+    </div>
+    <p>Отдельные листенеры — не придирка: клиент с хоста не сможет подключиться к <code>kfk:9092</code>
+      (такого имени в DNS хоста нет), а утилиты внутри контейнера — к <code>localhost:19092</code>. Отсюда
+      два адреса в одном стенде: продюсер в C# ходит на <code>localhost:19092</code>, CLI — на
+      <code>kfk:9092</code>.</p>
+
+    <h2>Настройки продюсера: три обязательных пункта</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using Confluent.Kafka;                              // клиент Kafka для .NET
+
+const string Bootstrap = "localhost:19092";         // EXTERNAL-листенер: приложение запущено на хосте
+
+static IProducer&lt;string, string&gt; MakeProducer(string txId, bool idempotence = true) =&gt;
+    new ProducerBuilder&lt;string, string&gt;(new ProducerConfig
+    {
+        BootstrapServers = Bootstrap,               // адрес брокера
+        TransactionalId = txId,                     // включает транзакционный продюсер
+        EnableIdempotence = idempotence,            // для транзакций обязателен
+        Acks = Acks.All                             // ждём подтверждения всех синхронных реплик
+    }).Build();</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>TransactionalId</code> — не «настройка на всякий случай», а ключ
+      состояния транзакции на брокере: под этим именем в служебном топике <code>__transaction_state</code>
+      хранится, какой продюсер (producerId + epoch) сейчас владеет правом писать. Имя должно быть стабильным
+      между рестартами сервиса — тогда новая инкарнация «фенсит» старую и двух живых писателей не будет
+      (сценарий E). <code>EnableIdempotence=true</code> — фундамент: транзакция добавляет к идемпотентной
+      отправке двухфазный коммит. <code>Acks.All</code> — без подтверждения всех синхронных реплик
+      <code>CommitTransaction</code> не может обещать, что данные переживут падение лидера.</p>
+    <div class="box warn">
+      <span class="t">Без идемпотентности транзакции не включаются</span>
+      <p>Клиент не «тихо отключит» одно ради другого — он упадёт на <code>InitTransactions</code>
+        (проверено, сценарий D):</p>
+      <pre style="margin:8px 0 0"><code>InvalidOperationException: `transactional.id` requires `enable.idempotence=true`</code></pre>
+      <p style="margin-top:8px">Сообщение точное: искать причину в коде не придётся.</p>
+    </div>
+    <h2>Сценарий A: закоммиченная транзакция</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// A) закоммиченная транзакция
+using (var p = MakeProducer("tx-1"))                 // transactional.id = "tx-1"
+{
+    p.InitTransactions(TimeSpan.FromSeconds(10));   // регистрирует transactional.id на брокере
+    p.BeginTransaction();                           // BEGIN: дальше записи идут «внутри транзакции»
+    p.Produce("tx-in", new Message&lt;string, string&gt; { Key = "k1", Value = "committed-1" });
+    p.Produce("tx-in", new Message&lt;string, string&gt; { Key = "k2", Value = "committed-2" });
+    p.CommitTransaction(TimeSpan.FromSeconds(10));  // COMMIT: записи становятся видимыми
+}
+Console.WriteLine($"A) read_committed={Count("tx-in", IsolationLevel.ReadCommitted, "g-rc-a")}, " +
+                  $"read_uncommitted={Count("tx-in", IsolationLevel.ReadUncommitted, "g-ru-a")}");</code></pre>
+    </div>
+    <p><strong>Разбор построчно.</strong></p>
+    <ul>
+      <li><code>MakeProducer("tx-1")</code> — продюсер с <code>TransactionalId=tx-1</code>; до
+        <code>InitTransactions</code> он ещё не имеет права писать в транзакции.</li>
+      <li><code>InitTransactions(10 c)</code> — регистрация у координатора транзакций: брокер выдаёт
+        producerId и epoch и закрывает старые эпохи с тем же id. Таймаут — сколько ждать ответа.</li>
+      <li><code>BeginTransaction()</code> — локальный BEGIN. Записи уходят на брокер сразу и получают
+        оффсеты, но читатели с <code>read_committed</code> их пока не видят.</li>
+      <li><code>Produce(...)</code> — две записи в одну партицию: брокер запоминает их batch как часть
+        транзакции (флаг <code>isTransactional</code> в сыром логе, см. ниже).</li>
+      <li><code>CommitTransaction(10 c)</code> — двухфазный коммит: клиент просит координатора завершить
+        транзакцию, координатор пишет COMMIT-маркер во все затронутые партиции. Только после маркера записи
+        видны <code>read_committed</code>-потребителям.</li>
+    </ul>
+    <p>Как считаются записи — вспомогательная функция, ею пользуются все сценарии:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static int Count(string topic, IsolationLevel level, string group)
+{
+    using var c = new ConsumerBuilder&lt;string, string&gt;(new ConsumerConfig
+    {
+        BootstrapServers = Bootstrap,               // адрес брокера
+        GroupId = group,                            // своя группа на каждый замер, чтобы не мешать другим
+        AutoOffsetReset = AutoOffsetReset.Earliest, // если оффсета нет — читать с начала
+        EnableAutoCommit = false,                   // коммиты не нужны: только считаем
+        IsolationLevel = level                      // ReadCommitted / ReadUncommitted
+    }).Build();
+
+    c.Assign(new TopicPartitionOffset(topic, 0, Offset.Beginning));  // партиция 0 с начала, без ребаланса
+    var n = 0;
+    var deadline = DateTime.UtcNow.AddSeconds(2);   // «тишина» 2 с = данные кончились
+    while (DateTime.UtcNow &lt; deadline)
+    {
+        var r = c.Consume(300);                     // ждём запись максимум 300 мс
+        if (r is null) continue;                    // пока тихо — просто ждём
+        n++;                                        // запись пришла — считаем
+        deadline = DateTime.UtcNow.AddSeconds(2);   // и продлеваем окно тишины
+    }
+    return n;
+}</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>Assign</code> вместо <code>Subscribe</code> — чтобы не ждать ребаланса:
+      партиция одна, распределять нечего. <code>IsolationLevel</code> — то самое единственное отличие двух
+      замеров. Критерий остановки «2 секунды тишины» вместо «до конца партиции»: конец партиции узнать
+      нельзя, а ждать вечно в учебном примере незачем.</p>
+    <h2>Сценарий B: отменённая транзакция</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// B) отменённая транзакция
+using (var p = MakeProducer("tx-1"))                 // тот же transactional.id, новая инкарнация
+{
+    p.InitTransactions(TimeSpan.FromSeconds(10));
+    p.BeginTransaction();
+    p.Produce("tx-in", new Message&lt;string, string&gt; { Key = "k3", Value = "aborted-1" });
+    p.Produce("tx-in", new Message&lt;string, string&gt; { Key = "k4", Value = "aborted-2" });
+    p.Flush(TimeSpan.FromSeconds(5));               // отправить записи (иначе abort их выбросит)
+    p.AbortTransaction(TimeSpan.FromSeconds(10));   // ROLLBACK: записи останутся в логе, но скрыты
+}
+Console.WriteLine($"B) read_committed={Count("tx-in", IsolationLevel.ReadCommitted, "g-rc-b")}, " +
+                  $"read_uncommitted={Count("tx-in", IsolationLevel.ReadUncommitted, "g-ru-b")}");</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>Flush</code> перед <code>AbortTransaction</code> — не формальность:
+      если отменить транзакцию, пока записи ещё в очереди клиента, они вообще не долетят до брокера, и
+      проверять фильтрацию будет не на чем. В первом прогоне без <code>Flush</code> и
+      <code>read_committed</code>, и <code>read_uncommitted</code> показали ровно 2 — отменённых записей в
+      логе просто не было.</p>
+    <p><code>AbortTransaction</code> ничего не удаляет: брокер дописывает в партицию управляющий
+      ABORT-маркер, а записи транзакции остаются в логе до истечения retention. Фильтрация — работа
+      потребителя.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">A) read_committed=2, read_uncommitted=2
+B) read_committed=2, read_uncommitted=4
+C) обработано 2, в tx-out=2
+C) закоммиченный offset группы eos-group: 2
+D) без идемпотентности: InvalidOperationException: `transactional.id` requires `enable.idempotence=true`
+E) старый продюсер: KafkaException: Failed to add partitions to transaction: Local: This instance has been fenced by a newer instance</code></pre>
+    </div>
+    <p>Читаем результат: после A видно 2 записи при любом уровне изоляции; после B
+      <code>read_committed</code> по-прежнему 2 (отменённые скрыты), а <code>read_uncommitted</code> — 4
+      (видит всё, что физически лежит в логе). То же самое из консольной утилиты — с ключом
+      <code>--isolation-level</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># kafka-console-consumer.sh — читает топик и печатает значения в stdout
+# --bootstrap-server kfk:9092 — адрес брокера (изнутри контейнера это INTERNAL-листенер)
+# --topic tx-in --from-beginning — читать партицию с самого начала
+# --isolation-level read_committed — не показывать записи отменённых и незавершённых транзакций
+# --timeout-ms 5000 — выйти, если 5 секунд нет новых данных (иначе утилита ждёт вечно)
+docker exec kfk /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kfk:9092 \
+  --topic tx-in --from-beginning --isolation-level read_committed --timeout-ms 5000
+# committed-1
+# committed-2                                  ← всего 2 строки
+
+# то же, но --isolation-level read_uncommitted — показывать всё, включая отменённое
+docker exec kfk /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kfk:9092 \
+  --topic tx-in --from-beginning --isolation-level read_uncommitted --timeout-ms 5000
+# committed-1
+# committed-2
+# aborted-1
+# aborted-2                                    ← уже 4 строки</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Изоляция — на стороне потребителя</span>
+      <p><code>read_committed</code> — настройка <em>читателя</em> (<code>IsolationLevel</code> в
+        <code>ConsumerConfig</code>, <code>--isolation-level</code> в CLI). Продюсер ничего не «прячет»:
+        записи отменённой транзакции лежат в логе и доступны каждому, кто читает с
+        <code>read_uncommitted</code> — а это значение по умолчанию в Kafka. Поэтому в EOS-системе уровень
+        изоляции задаётся у каждого потребителя, а не «где-то в кластере».</p>
+    </div>
+    <h2>Что на самом деле лежит в партиции</h2>
+    <p>Слова «маркер» и «скрыто» легко принять на веру — посмотрим на байты. Утилита
+      <code>kafka-dump-log.sh</code> читает файл сегмента партиции напрямую:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># kafka-dump-log.sh — разбирает файлы сегментов партиции и печатает batch'и
+# --files …00000000000000000000.log — первый сегмент партиции (начинается с оффсета 0)
+# --print-data-log — дополнительно показать содержимое записей (payload)
+# /tmp/kafka-logs/tx-in-0 — каталог партиции 0 топика tx-in в образе apache/kafka
+docker exec kfk /opt/kafka/bin/kafka-dump-log.sh \
+  --files /tmp/kafka-logs/tx-in-0/00000000000000000000.log --print-data-log</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text"># сокращено: оставлены только ключевые поля batch'ей
+baseOffset: 0 lastOffset: 1 count: 2 baseSequence: 0 lastSequence: 1 producerId: 0 producerEpoch: 16
+  isTransactional: true isControl: false
+| offset: 0 ... key: k1 payload: committed-1
+| offset: 1 ... key: k2 payload: committed-2
+baseOffset: 2 lastOffset: 2 count: 1 baseSequence: -1 lastSequence: -1 producerId: 0 producerEpoch: 16
+  isTransactional: true isControl: true
+| offset: 2 ... endTxnMarker: COMMIT coordinatorEpoch: 2
+baseOffset: 3 lastOffset: 4 count: 2 baseSequence: 0 lastSequence: 1 producerId: 0 producerEpoch: 17
+  isTransactional: true isControl: false
+| offset: 3 ... key: k3 payload: aborted-1
+| offset: 4 ... key: k4 payload: aborted-2
+baseOffset: 5 lastOffset: 5 count: 1 baseSequence: -1 lastSequence: -1 producerId: 0 producerEpoch: 17
+  isTransactional: true isControl: true
+| offset: 5 ... endTxnMarker: ABORT coordinatorEpoch: 2</code></pre>
+    </div>
+    <p><strong>Разбор полей.</strong></p>
+    <ul>
+      <li><code>baseOffset: 0 lastOffset: 1 count: 2</code> — один batch с двумя записями: оффсеты 0 и 1.
+        Оффсет выдаётся записи, а не batch'у.</li>
+      <li><code>producerId: 0 producerEpoch: 16</code> — кто писал. <code>producerId</code> — номер,
+        выданный при первом <code>InitTransactions</code>; <code>producerEpoch</code> растёт на каждом
+        новом <code>InitTransactions</code> (у сценария B уже 17) и защищает от «зомби-продюсера».</li>
+      <li><code>baseSequence: 0 lastSequence: 1</code> — сквозные номера записей идемпотентного продюсера.
+        Именно по ним брокер отбрасывает повторную отправку того же batch'а.</li>
+      <li><code>isTransactional: true</code> — batch принадлежит транзакции; <code>isControl: true</code> —
+        это не данные, а управляющая запись.</li>
+      <li><code>endTxnMarker: COMMIT … coordinatorEpoch: 2</code> — тот самый маркер: он занимает
+        <strong>свой оффсет</strong> (2) и не содержит payload. Маркер ABORT для второй транзакции — оффсет
+        5.</li>
+      <li>Итог по партиции: оффсеты 0–5, следующий свободный — 6. Отсюда
+        <code>LOG-END-OFFSET = 6</code>, хотя полезных записей всего 2 — эту цифру мы увидим в
+        <code>kafka-consumer-groups</code> и разберём ниже.</li>
+    </ul>
+    <p>Отменённые записи (<code>aborted-1</code>, <code>aborted-2</code>) физически лежат в логе рядом с
+      закоммиченными. Потребитель с <code>read_committed</code> их пропускает, <code>read_uncommitted</code> —
+      отдаёт как обычные.</p>
+    <h2>Сценарий C: read-process-write одной транзакцией</h2>
+    <p>Ради этого всё и делается: прочитать событие, записать результат в другой топик и сдвинуть оффсет —
+      атомарно.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// C) read-process-write: чтение, запись в другой топик и коммит оффсета — одной транзакцией
+using (var p = MakeProducer("tx-eos"))              // свой transactional.id для этого обработчика
+using (var c = new ConsumerBuilder&lt;string, string&gt;(new ConsumerConfig
+{
+    BootstrapServers = Bootstrap,
+    GroupId = "eos-group",                          // группа, чей оффсет будет коммититься
+    AutoOffsetReset = AutoOffsetReset.Earliest,     // с начала, если оффсета нет
+    EnableAutoCommit = false,                       // автокоммит запрещён: он ломает атомарность
+    IsolationLevel = IsolationLevel.ReadCommitted    // не читать чужие незавершённые транзакции
+}).Build())
+{
+    p.InitTransactions(TimeSpan.FromSeconds(10));   // один раз на жизнь продюсера
+    c.Assign(new TopicPartitionOffset("tx-in", 0, Offset.Beginning));  // партиция 0 с начала
+    p.BeginTransaction();                           // BEGIN
+    var processed = 0;
+    TopicPartitionOffset? last = null;              // последняя обработанная запись
+    var idleUntil = DateTime.UtcNow.AddSeconds(3);  // окно ожидания данных
+    while (DateTime.UtcNow &lt; idleUntil)
+    {
+        var r = c.Consume(300);                     // читаем с таймаутом
+        if (r is null) continue;                    // данных нет — ждём дальше
+        p.Produce("tx-out", new Message&lt;string, string&gt;   // результат — в другой топик,
+            { Key = r.Message.Key, Value = "out:" + r.Message.Value });  // в этой же транзакции
+        last = r.TopicPartitionOffset;              // запоминаем оффсет записи
+        processed++;                                // счётчик для отчёта
+        idleUntil = DateTime.UtcNow.AddSeconds(3);  // продлеваем окно
+    }
+    // оффсет потребителя добавляется в ТУ ЖЕ транзакцию, что и записи в tx-out
+    p.SendOffsetsToTransaction(
+        new[] { new TopicPartitionOffset(last!.TopicPartition, last.Offset + 1) },  // оффсет последней + 1
+        c.ConsumerGroupMetadata,      // поколение группы: защита от коммита «уже не нашим» членом
+        TimeSpan.FromSeconds(10));
+    p.CommitTransaction(TimeSpan.FromSeconds(10));  // одна точка фиксации на всё
+    Console.WriteLine($"C) обработано {processed}, в tx-out={Count("tx-out", IsolationLevel.ReadCommitted, "g-out-c")}");
+
+    var committed = c.Committed(new[] { new TopicPartition("tx-in", 0) }, TimeSpan.FromSeconds(5));
+    Console.WriteLine($"C) закоммиченный offset группы eos-group: {committed[0].Offset}");
+}</code></pre>
+    </div>
+    <p><strong>Разбор построчно.</strong></p>
+    <ul>
+      <li><code>EnableAutoCommit = false</code> — обязательное условие: автокоммит идёт отдельным запросом к
+        координатору группы, вне транзакции, и вся атомарность рассыпается.</li>
+      <li><code>Produce("tx-out", …)</code> — запись в другую партицию, но в рамках текущей транзакции.
+        Именно поэтому нужен <code>TransactionalId</code>: обе партиции связаны через координатора.</li>
+      <li><code>last = r.TopicPartitionOffset</code> — запоминаем оффсет каждой записи, а не считаем
+        «сколько обработано»: в логе есть отменённые записи и маркеры, поэтому количество записей и
+        оффсет — разные числа.</li>
+      <li><code>last.Offset + 1</code> — коммитится <em>следующий</em> оффсет, т. е. «с какой записи
+        продолжить». Для записи с оффсетом 1 это 2.</li>
+      <li><code>SendOffsetsToTransaction(offsets, ConsumerGroupMetadata, timeout)</code> — не коммит, а
+        <em>добавление оффсета в транзакцию</em>: брокер запишет его только вместе с COMMIT-маркером.</li>
+      <li><code>ConsumerGroupMetadata</code> — поколение (generation) группы и её memberId. Если между
+        чтением и коммитом прошёл ребаланс, брокер отклонит коммит — «угнать» партиции у нового члена не
+        получится.</li>
+      <li><code>CommitTransaction</code> — единственная точка фиксации: до неё не видны ни записи в
+        <code>tx-out</code>, ни новый оффсет; после — видны оба.</li>
+    </ul>
+    <p>Результат: <code>обработано 2, в tx-out=2</code>, закоммиченный оффсет группы — <code>2</code>.
+      Сбой в любой момент до <code>CommitTransaction</code> означает, что ни результата, ни сдвига оффсета
+      не будет; повторная обработка начнётся с прежнего места, и дубля в <code>tx-out</code> не появится.</p>
+    <h2>Почему lag EOS-группы не станет нулём</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash"># kafka-consumer-groups.sh — утилита работы с группами потребителей
+# --describe --group eos-group — показать оффсеты и lag конкретной группы
+# --bootstrap-server kfk:9092 — адрес брокера
+docker exec kfk /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kfk:9092 \
+  --describe --group eos-group
+# GROUP      TOPIC  PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+# eos-group  tx-in  0          2               6               4</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>CURRENT-OFFSET 2</code> — закоммиченный оффсет: следующий раз группа
+      начнёт с записи №2. <code>LOG-END-OFFSET 6</code> — конец журнала: 2 записи + COMMIT-маркер + 2
+      отменённые записи + ABORT-маркер (ровно то, что мы видели в dump-log). <code>LAG = 6 − 2 = 4</code>.</p>
+    <p>При этом группа не отстала: все закоммиченные записи обработаны. Lag считает <em>оффсеты</em>, а не
+      полезные сообщения, поэтому в топиках с отменёнными транзакциями остаток «висит» навсегда. Для
+      read_committed-потребителя реальное отставание — это расстояние до <strong>LSO</strong> (last stable
+      offset — оффсет, до которого все транзакции завершены), а не до конца журнала.</p>
+    <div class="box warn">
+      <span class="t">Алерт «lag &gt; 0» на EOS-топике будет ложно срабатывать</span>
+      <p>Порог для lag имеет смысл только с поправкой на отменённые транзакции и контрольные записи:
+        сравнивайте с LSO, а не с <code>LOG-END-OFFSET</code>, либо задавайте допуск. Иначе дежурный
+        получает вечный «лаг 4» при полностью обработанном топике.</p>
+    </div>
+
+    <h2>Состояние транзакций у координатора</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash"># kafka-transactions.sh — утилита координатора транзакций
+# --bootstrap-server kfk:9092 — адрес брокера
+# list — перечислить известные transactional.id и их состояние
+docker exec kfk /opt/kafka/bin/kafka-transactions.sh --bootstrap-server kfk:9092 list
+# TransactionalId  Coordinator  ProducerId  TransactionState
+# tx-1             1            0           CompleteAbort
+# tx-fence         1            1000        Empty
+# tx-eos           1            1           CompleteCommit</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>Coordinator 1</code> — номер брокера-координатора (в стенде он
+      один). Состояния: <code>Empty</code> — открытой транзакции нет; <code>CompleteCommit</code> — последняя
+      транзакция закоммичена; <code>CompleteAbort</code> — отменена. <code>tx-1</code> в
+      <code>CompleteAbort</code>, потому что сценарий B был последним, кто им пользовался, а
+      <code>tx-eos</code> — <code>CompleteCommit</code> после сценария C.</p>
+    <p>Обратите внимание на <code>ProducerId 1000</code> у <code>tx-fence</code>: это уже второе поколение
+      продюсера с тем же именем — как раз результат вытеснения из следующего сценария.</p>
+
+    <h2>Сценарий E: fencing — второй продюсер вытесняет первый</h2>
+    <p>Самая частая авария в проде — «зомби»: старый под завис на долгом GC, оркестратор поднял новый, а
+      старый очнулся и продолжил писать. Kafka закрывает это на уровне протокола.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// E) fencing: второй продюсер с тем же transactional.id вытесняет первый
+try
+{
+    using var p1 = MakeProducer("tx-fence");        // первая инкарнация
+    p1.InitTransactions(TimeSpan.FromSeconds(10));  // получает producerId + epoch
+
+    using var p2 = MakeProducer("tx-fence");        // тот же transactional.id
+    p2.InitTransactions(TimeSpan.FromSeconds(10));  // брокер увеличивает epoch — p1 больше не владелец
+
+    p1.BeginTransaction();                          // p1 пытается работать дальше
+    p1.Produce("tx-in", new Message&lt;string, string&gt; { Key = "k5", Value = "zombie" });
+    p1.CommitTransaction(TimeSpan.FromSeconds(10)); // здесь и выясняется, кто настоящий
+    Console.WriteLine("E) старый продюсер смог закоммитить (неожидано)");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"E) старый продюсер: {ex.GetType().Name}: {ex.Message}");
+}</code></pre>
+    </div>
+    <p><strong>Результат:</strong></p>
+    <div class="codewrap">
+      <pre><code class="language-text">E) старый продюсер: KafkaException: Failed to add partitions to transaction: Local: This instance has been fenced by a newer instance</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>InitTransactions</code> второго продюсера увеличил epoch; первая
+      инкарнация об этом не знает и получает отказ на первой же попытке что-то сделать в транзакции.
+      Записи «зомби» в лог не попадут — даже если он успел их отправить. Отсюда практическое правило:
+      <strong><code>TransactionalId</code> должен быть стабильным и уникальным на обработчик</strong> (например,
+      <code>orders-enricher</code>), а не случайным при каждом запуске. Случайный id означает, что после
+      рестарта старый и новый продюсеры живут одновременно и оба считаются легальными.</p>
+    <h2>Где exactly-once заканчивается</h2>
+    <p>Транзакция Kafka покрывает <strong>только Kafka</strong>: записи в партиции и оффсеты потребителя.
+      Всё, что обработчик сделал «наружу», в транзакцию не входит.</p>
+    <ul>
+      <li><strong>Внешние эффекты не откатываются.</strong> Если внутри транзакции вы вызвали платёжный API и
+        затем сделали <code>AbortTransaction</code>, платёж останется. Для БД — идемпотентный приёмник
+        (<code>INSERT … ON CONFLICT</code>, уникальный ключ события) или outbox-таблица, которую читает
+        отдельный продюсер.</li>
+      <li><strong>Все потребители должны читать с <code>read_committed</code>.</strong> Один потребитель с
+        уровнем по умолчанию (<code>read_uncommitted</code>) увидит отменённые записи, и «ровно один раз»
+        превратится в «иногда лишние».</li>
+      <li><strong>Открытая транзакция задерживает читателей.</strong> <code>read_committed</code>-потребитель
+        не увидит записи за LSO, пока транзакция не завершена. Долгая транзакция = рост задержки у всех
+        ниже по потоку.</li>
+      <li><strong>Таймауты.</strong> <code>transaction.timeout.ms</code> (по умолчанию 60 с) —
+        сколько координатор ждёт завершения, после чего прерывает транзакцию. Обработка дольше этого
+        порога (или дольше <code>max.poll.interval.ms</code>) — и <code>CommitTransaction</code> упадёт;
+        размер порции надо подбирать под время обработки.</li>
+      <li><strong>Один продюсер = одна транзакция за раз.</strong> Транзакции на одном
+        <code>IProducer</code> не параллелятся: для параллельной обработки — несколько продюсеров с разными
+        <code>TransactionalId</code>.</li>
+      <li><strong>Эксплуатация.</strong> В проде <code>__transaction_state</code> должен иметь
+        replication factor 3 и <code>min.insync.replicas=2</code>: потеря координатора иначе означает
+        «зависшие» транзакции. В стенде выше стоит 1 — только потому что брокер один.</li>
+    </ul>
+    <table>
+      <thead><tr><th>Гарантия</th><th>Как получается</th><th>Цена</th></tr></thead>
+      <tbody>
+        <tr><td>at-most-once</td><td>коммит оффсета <em>до</em> обработки (или автокоммит)</td>
+          <td>при сбое событие теряется</td></tr>
+        <tr><td>at-least-once</td><td>обработка, затем коммит; продюсер с ретраями</td>
+          <td>дубли при сбое между обработкой и коммитом</td></tr>
+        <tr><td>exactly-once внутри Kafka</td><td><code>TransactionalId</code> +
+          <code>SendOffsetsToTransaction</code> + <code>read_committed</code></td>
+          <td>round-trip к координатору, задержка до LSO, дисциплина у потребителей</td></tr>
+        <tr><td>exactly-once наружу</td><td>идемпотентность на стороне приёмника или outbox</td>
+          <td>своя логика дедупликации</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li>Транзакция склеивает <strong>запись в партиции и коммит оффсета</strong>: до
+          <code>CommitTransaction</code> не видно ни того, ни другого.</li>
+        <li>Три обязательных настройки: <code>TransactionalId</code>, <code>EnableIdempotence=true</code>,
+          <code>Acks.All</code>. Без идемпотентности — <code>InvalidOperationException: `transactional.id`
+          requires `enable.idempotence=true`</code>.</li>
+        <li><code>AbortTransaction</code> не удаляет данные: в партиции остаются записи и ABORT-маркер
+          (<code>endTxnMarker: ABORT</code>). <code>read_committed</code> = 2 записи,
+          <code>read_uncommitted</code> = 4 — проверено.</li>
+        <li>Маркер COMMIT/ABORT занимает собственный оффсет, поэтому <code>LOG-END-OFFSET 6</code> при двух
+          полезных записях, а lag EOS-группы навсегда равен 4. Сравнивайте с LSO, а не с концом журнала.</li>
+        <li>Коммитить оффсет — только через <code>SendOffsetsToTransaction(last.Offset + 1,
+          ConsumerGroupMetadata)</code>, при <code>EnableAutoCommit=false</code>.</li>
+        <li>Одинаковый <code>TransactionalId</code> у двух живых продюсеров — второй вытесняет первого:
+          <code>This instance has been fenced by a newer instance</code>. Имя должно быть стабильным между
+          рестартами.</li>
+        <li>Внешние эффекты (БД, HTTP) транзакция не откатывает: нужна идемпотентность или outbox.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="kf05-operations-retention.html">← <span class="sp">Глава 5. Эксплуатация: retention, compaction, lag и мониторинг</span></a>
+      <a href="kafka.html"><span class="sp">Оглавление</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
+
+
+
+
