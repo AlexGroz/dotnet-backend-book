@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 9 · Адаптер: как подружить чужой SDK с вашим кодом</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="pt08-observer.html">← Наблюдатель</a>
+  <span class="booktitle">Паттерны в .NET</span>
+  <a href="patterns.html">Оглавление →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">Паттерны · Часть III. Структурные паттерны</div>
+    <h1>Глава 9. Адаптер: как подружить чужой SDK с вашим кодом</h1>
+    <p class="sublead">У вас есть свой аккуратный интерфейс, а у подрядчика — SDK из 2011 года: синхронный,
+      суммы строками, ошибки через <code>out</code>. Менять SDK нельзя, менять весь свой код — не хочется.
+      Адаптер — это <strong>один класс-переводчик</strong> между двумя мирами. Разберём его построчно и
+      проверим на запуске.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Разминка: идея на пятнадцати строках</h2>
+    <p>Представим, что мы уже написали свой код так, как удобно нам:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record PaymentRequest(decimal Amount, string Currency);
+
+public interface IPaymentGateway
+{
+    Task&lt;PaymentResult&gt; PayAsync(PaymentRequest request, CancellationToken ct);
+}</code></pre>
+    </div>
+    <p>А платёжный SDK подрядчика выглядит так:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class LegacyPaymentSdk
+{
+    // сумма — строкой, результат — int, ошибка — через out
+    public int Charge(string amount, string currency, out string? error);
+}</code></pre>
+    </div>
+    <p>Два интерфейса несовместимы: разные типы аргументов, разная модель ошибок, разная асинхронность.
+      Адаптер — класс, который реализует <code>IPaymentGateway</code> и внутри вызывает
+      <code>Charge</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class LegacyPaymentAdapter : IPaymentGateway
+{
+    private readonly LegacyPaymentSdk _sdk;
+    public LegacyPaymentAdapter(LegacyPaymentSdk sdk) =&gt; _sdk = sdk;
+
+    public Task&lt;PaymentResult&gt; PayAsync(PaymentRequest request, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var amount = request.Amount.ToString("0.00", CultureInfo.InvariantCulture);
+        var id = _sdk.Charge(amount, request.Currency, out var error);
+        return Task.FromResult(error is null
+            ? new PaymentResult(true, $"TX-{id}", null)
+            : new PaymentResult(false, null, error));
+    }
+}</code></pre>
+    </div>
+    <p>Всё остальное приложение продолжает работать с <code>IPaymentGateway</code> и не знает, что внутри —
+      legacy-SDK. Это и есть адаптер: <strong>обёртка, которая переводит один интерфейс в другой</strong>, не
+      меняя ни тот, ни другой.</p>
+    <div class="box note">
+      <span class="t">Адаптер — это про несовместимость, а не про «добавить поведение»</span>
+      <p>Декоратор (глава 5) оборачивает объект <em>того же</em> интерфейса, чтобы добавить кэш или лог.
+        Адаптер оборачивает объект <em>другого</em> интерфейса, чтобы вообще иметь возможность его вызвать.
+        Если вы оборачиваете то же самое — это декоратор, а не адаптер.</p>
+    </div>
+    <h2>Полный пример: платёжный SDK и наш контракт</h2>
+    <p>Чтобы глава не была «на словах», берём рабочую программу (.NET 8, консоль). Чужой SDK — тот, который
+      нельзя менять: он <code>sealed</code>, синхронный, сумма приходит строкой, ошибка — через
+      <code>out</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class LegacyPaymentSdk
+{
+    private int _seq = 1000;
+    public int Charge(string amount, string currency, out string? error)
+    {
+        error = null;
+        if (decimal.Parse(amount, CultureInfo.InvariantCulture) &lt;= 0) { error = "invalid_amount"; return 0; }
+        if (currency == "XXX") { error = "unsupported_currency"; return 0; }
+        return ++_seq;                                  // номер транзакции
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><code>private int _seq = 1000</code> — счётчик «транзакций», чтобы номера были разными. В настоящем
+        SDK тут был бы HTTP-вызов.</li>
+      <li><code>Charge(string amount, string currency, out string? error)</code> — три особенности legacy:
+        сумма строкой (никаких <code>decimal</code>), ошибка через <code>out</code>, возвращаемое значение —
+        <code>int</code> (0 при ошибке).</li>
+      <li><code>error = null;</code> — <code>out</code>-параметр обязан быть присвоен до любого
+        <code>return</code>, иначе код не скомпилируется (CS0177). Поэтому присваиваем в первой строке.</li>
+      <li><code>decimal.Parse(amount, CultureInfo.InvariantCulture)</code> — парсим строку обратно в число.
+        <code>CultureInfo.InvariantCulture</code> важен: если полагаться на текущую культуру, в русской локали
+        «1499.00» может быть прочитано неверно (<code>,</code> вместо <code>.</code>).</li>
+      <li><code>return ++_seq;</code> — префиксный инкремент: сначала увеличить, потом вернуть. Первый успешный
+        вызов вернёт 1001.</li>
+    </ul>
+    <p>Наш контракт — то, как хотим работать мы. Заметьте: здесь нет ни одного типа из SDK.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record PaymentRequest(decimal Amount, string Currency);
+public sealed record PaymentResult(bool Success, string? TransactionId, string? ErrorCode);
+
+public interface IPaymentGateway
+{
+    Task&lt;PaymentResult&gt; PayAsync(PaymentRequest request, CancellationToken ct);
+}</code></pre>
+    </div>
+    <ul>
+      <li><code>PaymentRequest</code> — сумма как <code>decimal</code> (деньги в <code>double</code> — плохая
+        идея из-за двоичного представления), валюта отдельным полем.</li>
+      <li><code>PaymentResult(bool Success, string? TransactionId, string? ErrorCode)</code> — результат
+        <em>значением</em>, а не исключением: «недостаточно средств» — это нормальный бизнес-ответ, а не
+        сбой программы.</li>
+      <li><code>Task&lt;PaymentResult&gt; PayAsync(..., CancellationToken ct)</code> — асинхронная подпись с
+        токеном отмены: даже если SDK синхронный, наш контракт имеет право быть асинхронным.</li>
+    </ul>
+    <div class="box tip">
+      <span class="t">Правило: интерфейс пишем первым</span>
+      <p>Сначала описываем, <em>как хотим</em> вызывать платёж, и только потом смотрим, что нам даёт
+        подрядчик. Если делать наоборот — «как в SDK, только переименовать» — адаптер превращается в
+        бессмысленную прослойку, через которую наружу протекают чужие типы и чужие ошибки.</p>
+    </div>
+    <h2>Адаптер через композицию: разбор построчно</h2>
+    <p>Самый распространённый вариант — <strong>объектный адаптер</strong>: наш класс <em>содержит</em>
+      экземпляр SDK и делегирует ему работу.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class LegacyPaymentAdapter : IPaymentGateway
+{
+    private readonly LegacyPaymentSdk _sdk;
+    public LegacyPaymentAdapter(LegacyPaymentSdk sdk) =&gt; _sdk = sdk;
+
+    public Task&lt;PaymentResult&gt; PayAsync(PaymentRequest request, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var amount = request.Amount.ToString("0.00", CultureInfo.InvariantCulture);
+        var id = _sdk.Charge(amount, request.Currency, out var error);
+        return Task.FromResult(error is null
+            ? new PaymentResult(true, $"TX-{id}", null)
+            : new PaymentResult(false, null, error));
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><code>: IPaymentGateway</code> — адаптер реализует <strong>наш</strong> интерфейс. Это единственное,
+        что видит остальное приложение.</li>
+      <li><code>private readonly LegacyPaymentSdk _sdk</code> — внутри лежит <strong>чужой</strong> объект.
+        <code>readonly</code> — ссылка не меняется после конструктора: адаптер не должен незаметно
+        «переключаться» на другой SDK.</li>
+      <li><code>public LegacyPaymentAdapter(LegacyPaymentSdk sdk) =&gt; _sdk = sdk;</code> — SDK приходит
+        снаружи (constructor injection), а не создаётся через <code>new</code> внутри. Так адаптер можно
+        протестировать с подставным SDK и зарегистрировать в DI.</li>
+      <li><code>ct.ThrowIfCancellationRequested()</code> — проверка отмены <em>до</em> вызова SDK. Если токен
+        уже отменён, бросается <code>OperationCanceledException</code>, и чужой код не вызывается вообще.</li>
+      <li><code>request.Amount.ToString("0.00", CultureInfo.InvariantCulture)</code> — перевод
+        <code>decimal</code> → <code>string</code> в том формате, который ждёт SDK: ровно два знака после
+        точки, точка как разделитель, независимо от культуры машины. Это и есть «перевод интерфейса» в
+        буквальном смысле.</li>
+      <li><code>_sdk.Charge(amount, request.Currency, out var error)</code> — единственный настоящий вызов
+        чужого кода. <code>out var error</code> объявляет переменную прямо в вызове.</li>
+      <li><code>Task.FromResult(...)</code> — оборачиваем синхронный результат в уже завершённый
+        <code>Task</code>. Никакого потока не создаётся, состояние-машина не нужна: результат готов сразу.</li>
+      <li><code>error is null ? ... : ...</code> — <strong>перевод модели ошибок</strong>: <code>null</code> в
+        <code>out</code> означает успех, строка — код ошибки. Наружу отдаём <code>PaymentResult</code> с тем
+        же кодом, но уже в нашем типе.</li>
+      <li><code>$"TX-{id}"</code> — приводим номер транзакции к нашему формату. Приложение не должно знать,
+        что «на самом деле» это <code>int</code> из SDK.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Почему метод не помечен <code>async</code></span>
+      <p><code>PayAsync</code> возвращает готовый <code>Task</code>, поэтому <code>async</code> и
+        <code>await</code> внутри не нужны. Побочный эффект: <code>ThrowIfCancellationRequested</code>
+        бросает исключение <strong>синхронно</strong> — в момент вызова метода, а не при
+        <code>await</code>. Для вызывающего кода разницы нет, если вызов стоит внутри
+        <code>try</code>, — но знать об этом полезно: исключение «прилетает» раньше, чем появился
+        <code>Task</code>.</p>
+    </div>
+    <h2>Запускаем: успех, ошибка, отмена</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var gateway = new LegacyPaymentAdapter(new LegacyPaymentSdk());
+
+var ok = await gateway.PayAsync(new PaymentRequest(1499m, "EUR"), CancellationToken.None);
+Console.WriteLine($"[1] success={ok.Success} txn={ok.TransactionId}");
+
+var bad = await gateway.PayAsync(new PaymentRequest(10m, "XXX"), CancellationToken.None);
+Console.WriteLine($"[2] success={bad.Success} code={bad.ErrorCode}");
+
+using var cts = new CancellationTokenSource();
+cts.Cancel();
+try
+{
+    await gateway.PayAsync(new PaymentRequest(10m, "EUR"), cts.Token);
+    Console.WriteLine("[3] отмена не сработала");
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("[3] OperationCanceledException: SDK не вызывался");
+}</code></pre>
+    </div>
+    <p>Реальный вывод программы:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">[1] success=True txn=TX-1001
+[2] success=False code=unsupported_currency
+[3] OperationCanceledException: SDK не вызывался</code></pre>
+    </div>
+    <ul>
+      <li><strong>[1]</strong> — <code>1499m</code> ушло в SDK строкой <code>"1499.00"</code>, SDK вернул
+        <code>1001</code> (первый инкремент счётчика), адаптер превратил это в <code>TX-1001</code>.</li>
+      <li><strong>[2]</strong> — валюта <code>XXX</code> не поддерживается: SDK вернул <code>0</code> и
+        заполнил <code>error</code>. Наружу пришёл <code>PaymentResult</code> с <code>Success=false</code> и
+        кодом. Исключения нет — это бизнес-ответ, а не сбой программы.</li>
+      <li><strong>[3]</strong> — токен отменён заранее, поэтому <code>ThrowIfCancellationRequested</code>
+        сработал до <code>_sdk.Charge</code>: SDK не вызывался, транзакция не создавалась. Именно так и
+        должно быть — отмена должна предотвращать побочный эффект, а не «отменять» его задним числом.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Отмена после старта — уже не отмена</span>
+      <p>У <code>Charge</code> нет параметра отмены. Если токен отменят <em>во время</em> синхронного вызова,
+        адаптер об этом не узнает, и транзакция всё равно пройдёт. Честный вариант для такого SDK —
+        <strong>идемпотентность на стороне приёмника</strong> (свой <code>Idempotency-Key</code>), чтобы
+        повторный вызов после таймаута не списал деньги дважды. Адаптер не может дать гарантию, которой нет
+        у SDK, и не должен делать вид, что даёт.</p>
+    </div>
+    <div class="box tip">
+      <span class="t">Коды ошибок SDK наружу не пропускаем</span>
+      <p>Сейчас в <code>PaymentResult.ErrorCode</code> уходит строка SDK как есть. Это удобно для отладки, но
+        опасно как контракт: подрядчик переименует <code>unsupported_currency</code> — и ваши
+        <code>switch</code>-и перестанут ловить этот случай. В реальном коде коды маппят в собственный
+        <code>enum</code>, а незнакомый код превращают в <code>Unknown</code>, чтобы новая версия SDK не
+        ломала обработку:</p>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public enum PaymentFailure { None, InsufficientFunds, CardDeclined, UnsupportedCurrency, Unknown }
+
+public static PaymentFailure Map(string? code) =&gt; code switch
+{
+    null =&gt; PaymentFailure.None,
+    "insufficient_funds" =&gt; PaymentFailure.InsufficientFunds,
+    "card_declined" =&gt; PaymentFailure.CardDeclined,
+    "unsupported_currency" =&gt; PaymentFailure.UnsupportedCurrency,
+    _ =&gt; PaymentFailure.Unknown          // важно: SDK может добавить новый код
+};</code></pre>
+      </div>
+      <p><code>_ =&gt; ...</code> — обязательная «ловушка по умолчанию»: без неё компилятор выдаёт
+        предупреждение о неполном сопоставлении, а новый код от подрядчика привёл бы к исключению в
+        рантайме.</p>
+    </div>
+    <h2>Второй способ: наследование вместо композиции</h2>
+    <p>Есть и «классовый адаптер»: наш класс <em>наследует</em> чужой и реализует наш интерфейс. Проверим на
+      том же наборе типов — сначала попытка адаптировать <code>LegacyRefundSdk</code>, который объявлен
+      <code>sealed</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class LegacyRefundSdk                        // sealed — наследовать нельзя
+{
+    public string MakeRefund(decimal amount) =&gt; "R-77";
+}
+
+public sealed class LegacyRefundAdapter : LegacyRefundSdk, IRefundService   // так нельзя
+{
+    public string Refund(decimal amount) =&gt; MakeRefund(amount);
+}</code></pre>
+    </div>
+    <p>Компилятор не пропускает это — реальное сообщение сборки:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">/tmp/ad/Program.cs(54,43): error CS0509: 'LegacyRefundAdapter': cannot derive from sealed type 'LegacyRefundSdk'</code></pre>
+    </div>
+    <p><strong>Вывод:</strong> класс-адаптер возможен, только если чужой класс <em>не</em> <code>sealed</code>.
+      Многие SDK специально закрывают классы — и тогда остаётся единственный путь: композиция. Так и сделали
+      для возвратов:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class LegacyRefundAdapter : IRefundService   // тот же приём, другой SDK
+{
+    private readonly LegacyRefundSdk _sdk;
+    public LegacyRefundAdapter(LegacyRefundSdk sdk) =&gt; _sdk = sdk;
+    public string Refund(decimal amount) =&gt; _sdk.MakeRefund(amount);
+}</code></pre>
+    </div>
+    <p>А для открытого класса <code>LegacyReportSdk</code> наследование работает. Проверяем оба варианта в
+      одной программе:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class LegacyReportSdk                               // не sealed — можно наследовать
+{
+    public virtual string BuildReport(int rows) =&gt; $"report({rows} rows)";
+}
+
+public sealed class LegacyReportAdapter : LegacyReportSdk, IReportService
+{
+    public string GetReport(int rows) =&gt; BuildReport(rows);   // переименовали вызов
+}</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">[4] композиция: refund=R-77
+[5] наследование: report(42 rows)</code></pre>
+    </div>
+    <ul>
+      <li><strong>[4]</strong> — <code>Refund(500m)</code> вызвал <code>_sdk.MakeRefund(500m)</code>, вернулось
+        <code>R-77</code>. Снаружи виден только <code>IRefundService</code>.</li>
+      <li><strong>[5]</strong> — <code>GetReport(42)</code> вызвал унаследованный <code>BuildReport(42)</code>.
+        Здесь адаптер даже не хранит поле: он <em>сам</em> является SDK.</li>
+    </ul>
+    <table>
+      <thead><tr><th>Критерий</th><th>Композиция (объектный адаптер)</th><th>Наследование (классовый)</th></tr></thead>
+      <tbody>
+        <tr><td>что содержит</td><td>поле с объектом SDK</td><td>является наследником SDK</td></tr>
+        <tr><td>требование к SDK</td><td>любой класс, даже <code>sealed</code></td>
+          <td>класс не <code>sealed</code>, нужные члены не <code>private</code></td></tr>
+        <tr><td>сколько адаптировать</td><td>по адаптеру на каждый класс, но без ограничений</td>
+          <td>только одну иерархию: второе наследование в C# запрещено</td></tr>
+        <tr><td>утечка чужих типов</td><td>нет</td><td>есть: объект приводится к типу SDK</td></tr>
+        <tr><td>тестирование</td><td>подставной SDK через конструктор</td>
+          <td>нужен реальный наследник, mock сложнее</td></tr>
+        <tr><td>что выбирать в C#</td><td><strong>по умолчанию</strong></td><td>редко, когда SDK требует
+          именно наследника (например, абстрактный базовый класс с <code>abstract</code>-методом)</td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t">Почему композиция лучше и здесь</span>
+      <p>Классовый адаптер связывает вас с иерархией чужого класса навсегда: обновление SDK, меняющее базовый
+        класс, ломает адаптер. Композиция зависит только от публичных методов, которые вы вызываете. Плюс
+        объект-адаптер нельзя случайно привести к типу SDK и начать вызывать чужой API в обход перевода —
+        то есть адаптер действительно остаётся единственной точкой контакта.</p>
+    </div>
+    <h2>Адаптер и асинхронность: из <code>IEnumerable</code> в <code>IAsyncEnumerable</code></h2>
+    <p>Адаптеры нужны не только между «своим» и «чужим» API. В .NET есть целый класс типовых
+      несовместимостей — например, старый код отдаёт <code>IEnumerable&lt;T&gt;</code>, а новый endpoint хочет
+      <code>IAsyncEnumerable&lt;T&gt;</code>, чтобы отдавать ответ потоком. Переходником служит маленький
+      адаптер-итератор:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public static class AsyncEnumerableAdapter
+{
+    public static async IAsyncEnumerable&lt;string&gt; ToAsync(IEnumerable&lt;string&gt; source)
+    {
+        foreach (var item in source)                     // синхронный источник
+        {
+            await Task.Delay(50);                        // эмуляция асинхронной загрузки
+            yield return item;                           // отдаём по одному
+        }
+    }
+}</code></pre>
+    </div>
+    <ul>
+      <li><code>async IAsyncEnumerable&lt;string&gt;</code> — <strong>асинхронная</strong> последовательность:
+        каждый следующий элемент может потребовать ожидания.</li>
+      <li><code>foreach (var item in source)</code> — читаем синхронный источник как обычно. Адаптер не
+        «ускоряет» его — он лишь меняет форму интерфейса.</li>
+      <li><code>await Task.Delay(50)</code> — здесь эмуляция ввода-вывода (в реальном коде было бы
+        <code>await reader.ReadAsync(ct)</code>). Поток в это время свободен.</li>
+      <li><code>yield return item</code> — элемент отдаётся <strong>сразу</strong>, без накопления в списке:
+        вызывающая сторона получает первый результат, не дожидаясь последнего.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var sw = Stopwatch.StartNew();
+await foreach (var item in AsyncEnumerableAdapter.ToAsync(new[] { "a", "b", "c" }))
+    Console.WriteLine($"[6] {item} на {sw.ElapsedMilliseconds} мс");</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">[6] a на 55 мс
+[6] b на 107 мс
+[6] c на 157 мс</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>await foreach</code> — потребление асинхронной последовательности;
+      между элементами поток не занят. Тайминги показывают главное: элементы приходят <em>по одному</em>,
+      с шагом ≈50 мс (55 → 107 → 157), а не все сразу в конце. Если бы адаптер сначала собрал
+      <code>List&lt;string&gt;</code> и только потом вернул его, первый элемент появился бы лишь на ~150 мс — для
+      потоковой отдачи больших ответов это неприемлемо.</p>
+    <div class="box warn">
+      <span class="t">Токен отмены в async-итератор нужно добавить явно</span>
+      <p>Асинхронный итератор без <code>CancellationToken</code> нельзя отменить: клиент оборвал соединение, а
+        адаптер продолжает читать источник. Правильная подпись — с параметром и атрибутом
+        <code>[EnumeratorCancellation]</code>. Если атрибут забыть, компилятор предупредит (реальный текст
+        предупреждения):</p>
+      <div class="codewrap">
+        <pre><code class="language-text">warning CS8425: Async-iterator 'Probe.Gen(CancellationToken)' has one or more parameters of type
+'CancellationToken' but none of them is decorated with the 'EnumeratorCancellation' attribute,
+so the cancellation token parameter from the generated 'IAsyncEnumerable&lt;&gt;.GetAsyncEnumerator'
+will be unconsumed</code></pre>
+      </div>
+      <div class="codewrap">
+        <pre><code class="language-csharp">public static async IAsyncEnumerable&lt;string&gt; ToAsync(
+    IEnumerable&lt;string&gt; source,
+    [EnumeratorCancellation] CancellationToken ct)       // без атрибута токен не дойдёт
+{
+    foreach (var item in source)
+    {
+        ct.ThrowIfCancellationRequested();               // проверяем на каждом шаге
+        await Task.Delay(50, ct);
+        yield return item;
+    }
+}</code></pre>
+      </div>
+      <p>«unconsumed» в тексте предупреждения означает ровно то, что написано: токен, переданный через
+        <code>WithCancellation(...)</code>, не попадёт в ваш параметр — итератор его просто не увидит.</p>
+    </div>
+    <p>Тот же приём используют, когда синхронный источник надо «завернуть» в адаптер <em>наоборот</em> —
+      <code>IAsyncEnumerable</code> в <code>IEnumerable</code>. Так делать почти всегда не стоит: получить
+      асинхронные данные синхронно можно только блокировкой потока (<code>.ToBlockingEnumerable()</code> в
+      .NET 8 или ручной <code>.GetAwaiter().GetResult()</code>), а это прямой путь к исчерпанию пула потоков
+      под нагрузкой.</p>
+    <h2>Регистрация в DI: одна строка на весь адаптер</h2>
+    <p>Самое приятное в адаптере — остальное приложение вообще не меняется: достаточно сказать контейнеру,
+      какой класс стоит за интерфейсом.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var services = new ServiceCollection();
+services.AddSingleton&lt;LegacyPaymentSdk&gt;();
+services.AddSingleton&lt;IPaymentGateway, LegacyPaymentAdapter&gt;();
+using var provider = services.BuildServiceProvider();
+Console.WriteLine($"[7] DI: {provider.GetRequiredService&lt;IPaymentGateway&gt;().GetType().Name}");</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">[7] DI: LegacyPaymentAdapter</code></pre>
+    </div>
+    <ul>
+      <li><code>AddSingleton&lt;LegacyPaymentSdk&gt;()</code> — регистрируем сам SDK: он может держать соединения
+        и внутренние пулы, создавать его на каждый запрос нельзя.</li>
+      <li><code>AddSingleton&lt;IPaymentGateway, LegacyPaymentAdapter&gt;()</code> — «когда просят
+        <code>IPaymentGateway</code>, отдай <code>LegacyPaymentAdapter</code>». Контейнер увидит, что
+        конструктору нужен <code>LegacyPaymentSdk</code>, и подставит зарегистрированный экземпляр.</li>
+      <li><code>BuildServiceProvider()</code> — собирает контейнер; <code>using</code> нужен, чтобы при выходе
+        освободились <code>IDisposable</code>-сервисы.</li>
+      <li><code>GetRequiredService&lt;IPaymentGateway&gt;()</code> — если регистрации нет, бросает исключение.
+        <code>GetService</code> в той же ситуации вернул бы <code>null</code>, и ошибка всплыла бы позже и в
+        другом месте.</li>
+      <li>Вывод <code>LegacyPaymentAdapter</code> доказывает, что за интерфейсом действительно стоит наш
+        адаптер — приложение про SDK ничего не знает.</li>
+    </ul>
+
+    <h2>Адаптеры, которые вы используете каждый день</h2>
+    <p>Паттерн не экзотика: он встроен в BCL и в стандартные библиотеки.</p>
+    <table>
+      <thead><tr><th>Что</th><th>Кого адаптирует</th><th>Наш интерфейс</th></tr></thead>
+      <tbody>
+        <tr><td><code>StreamReader</code></td><td>байтовый <code>Stream</code> + кодировка</td>
+          <td><code>TextReader</code>: <code>ReadLine()</code> вместо чтения байтов вручную</td></tr>
+        <tr><td><code>DbDataAdapter</code></td><td><code>DbCommand</code>/<code>DbConnection</code></td>
+          <td><code>DataSet</code>/<code>DataTable</code> — <code>Fill</code> и <code>Update</code></td></tr>
+        <tr><td>провайдер логирования<br>(<code>ILoggerProvider</code>)</td><td>сторонняя библиотека логов</td>
+          <td><code>ILogger</code> из <code>Microsoft.Extensions.Logging</code></td></tr>
+        <tr><td>наш <code>AsyncEnumerableAdapter</code></td><td>синхронный <code>IEnumerable&lt;T&gt;</code></td>
+          <td><code>IAsyncEnumerable&lt;T&gt;</code> для потокового ответа</td></tr>
+      </tbody>
+    </table>
+    <p>Общее у всех — <strong>одно направление перевода</strong>: снаружи виден только «наш» интерфейс, чужие
+      типы не протекают. Как только <code>StreamReader</code> начал бы возвращать <code>byte[]</code> из
+      <code>ReadLine</code>, он перестал бы быть адаптером.</p>
+    <h2>Чем адаптер не является</h2>
+    <table>
+      <thead><tr><th>Паттерн</th><th>Что оборачивает</th><th>Зачем</th><th>Интерфейс меняется?</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Адаптер</strong></td><td>объект с <em>другим</em> интерфейсом (чужой SDK)</td>
+          <td>перевести вызовы и типы, сделать чужое пригодным</td><td>да, полностью</td></tr>
+        <tr><td>Декоратор (гл. 5)</td><td>объект с <em>тем же</em> интерфейсом</td>
+          <td>добавить поведение: кэш, лог, метрики, ретраи</td><td>нет</td></tr>
+        <tr><td>Фасад</td><td>несколько подсистем сразу</td><td>упростить вход: один метод вместо пяти</td>
+          <td>да, новый упрощённый</td></tr>
+        <tr><td>Стратегия (гл. 3)</td><td>ничего не оборачивает</td>
+          <td>выбрать алгоритм в рантайме через общий интерфейс</td><td>нет, интерфейс общий и заранее
+          известен</td></tr>
+      </tbody>
+    </table>
+    <p>Практический тест: спросите, <em>чей</em> интерфейс снаружи. Если он существовал до вас, а внутри
+      чужой код с другим API — это адаптер. Если интерфейс тот же, что у обёрнутого объекта, — декоратор.</p>
+
+    <h2>Ловушки</h2>
+    <ul>
+      <li><strong>Чужие типы протекают наружу.</strong> Если метод адаптера возвращает <code>int</code> из
+        SDK или пишет в лог <code>LegacyPaymentSdkException</code>, весь смысл теряется: при замене SDK
+        придётся править вызывающий код. Признак хорошего адаптера — SDK встречается только в одном
+        файле.</li>
+      <li><strong><code>Task.Run</code> вокруг синхронного SDK не делает его асинхронным.</strong>
+        <code>Task.Run(() =&gt; _sdk.Charge(...))</code> освобождает вызывающий поток, но занимает поток пула на
+        всё время блокирующего вызова. При сотнях одновременных оплат пул закончится, и начнётся
+        «thread starvation» — асинхронная подпись при этом создаёт ложное ощущение, что всё хорошо.</li>
+      <li><strong>Бизнес-логика внутри адаптера.</strong> Ретраи, валидация, округления «по-нашему» — это уже
+        декоратор или сервис. Адаптер должен оставаться предсказуемым переводчиком: один вызов на входе —
+        один вызов SDK внутри.</li>
+      <li><strong><code>new</code> внутри адаптера.</strong> <code>new LegacyPaymentSdk()</code> в конструкторе
+        прячет зависимость и мешает тестам. SDK приходит параметром конструктора (как в примере).</li>
+      <li><strong>Один адаптер на несколько SDK.</strong> Класс, который умеет и оплату, и возвраты, и отчёты,
+        быстро превращается во второй монолит. По адаптеру на каждый чужой API — дешевле.</li>
+      <li><strong>Адаптер там, где можно поменять сам код.</strong> Если у вас есть доступ к исходникам
+        «чужого» класса — просто реализуйте нужный интерфейс там. Адаптер оправдан, когда менять нельзя
+        (сторонний пакет, чужой сервис, legacy-модуль).</li>
+    </ul>
+
+    <h2>Чек-лист перед тем, как писать адаптер</h2>
+    <ol>
+      <li>Наш интерфейс описывает <em>наши</em> типы и <em>нашу</em> модель ошибок? (Ни одного типа SDK в
+        подписи.)</li>
+      <li>Чужой класс <code>sealed</code>? Тогда только композиция — и это нормально.</li>
+      <li>SDK приходит через конструктор и регистрируется в DI как синглтон (он держит соединения)?</li>
+      <li>Перевод суммы/валюты/дат делается с <code>CultureInfo.InvariantCulture</code>?</li>
+      <li>Коды ошибок SDK маппятся в наш <code>enum</code>, неизвестный код → <code>Unknown</code>?</li>
+      <li>Отмена проверяется до вызова SDK, а для «отмены после старта» есть идемпотентность?</li>
+      <li>В адаптере нет ретраев, кэша и бизнес-правил?</li>
+      <li>Есть тест, который подставляет фейковый SDK и проверяет маппинг успеха и ошибки?</li>
+    </ol>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li>Адаптер переводит <strong>один интерфейс в другой</strong>; декоратор добавляет поведение к тому же
+          интерфейсу.</li>
+        <li>Объектный адаптер (композиция) — выбор по умолчанию: работает с <code>sealed</code>-классами и не
+          выпускает чужие типы наружу.</li>
+        <li>Классовый адаптер (наследование) требует не-<code>sealed</code> класса: попытка унаследовать закрытый
+          класс даёт <code>error CS0509</code>.</li>
+        <li>Перевод затрагивает всё: типы аргументов (<code>decimal</code> → <code>"1499.00"</code>), формат
+          (<code>InvariantCulture</code>), модель ошибок (<code>out string?</code> → <code>PaymentResult</code>)
+          и асинхронность (<code>Task.FromResult</code> вместо блокировки).</li>
+        <li>Асинхронный адаптер <code>IEnumerable&lt;T&gt;</code> → <code>IAsyncEnumerable&lt;T&gt;</code> отдаёт
+          элементы по одному (в замере 55, 107, 157 мс вместо одного «залпа» на ~150 мс) и требует
+          <code>[EnumeratorCancellation]</code> для отмены — иначе <code>warning CS8425</code>.</li>
+        <li>Гарантий, которых нет у SDK (отмена посреди вызова, идемпотентность), адаптер не добавляет; он лишь
+          честно ограничивает ожидания.</li>
+        <li>Регистрация — одна строка: <code>AddSingleton&lt;IPaymentGateway, LegacyPaymentAdapter&gt;()</code>;
+          остальной код о существовании SDK не знает.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="pt08-observer.html">← <span class="sp">Глава 8. Наблюдатель: события, подписки и доменные события</span></a>
+      <a href="patterns.html"><span class="sp">Оглавление</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
