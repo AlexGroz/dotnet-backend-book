@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 6 · Кластер и quorum-очереди</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="rabbitmq.html">← Оглавление</a>
+  <span class="booktitle">RabbitMQ</span>
+  <a href="kafka.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">RabbitMQ · Часть IV · Кластер и отказоустойчивость</div>
+    <h1>Глава 6. Кластер из трёх узлов: quorum-очереди, отказ лидера и отсутствие потерь</h1>
+    <p class="sublead">Что реально реплицируется в кластере, как убить узел-лидер и не потерять ни одного
+      сообщения, зачем нужен x-delivery-limit и что происходит, когда кворум потерян</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что даёт кластер, а что нет</h2>
+    <p>Кластер RabbitMQ — это несколько узлов с общими метаданными (пользователи, vhost'ы, обменники,
+      привязки, очереди) и общей маршрутизацией: подключившись к любому узлу, клиент может опубликовать
+      сообщение в очередь, которая «живёт» на другом узле.</p>
+    <p>А вот <strong>сообщения</strong> по умолчанию не реплицируются. У классической очереди данные лежат
+      на одном узле; если он недоступен, очередь недоступна, а при потере диска — потеряны и сообщения.
+      Именно для этого появились <strong>quorum-очереди</strong>: очередь — это Raft-группа из нескольких
+      реплик, записи подтверждаются большинством, лидер выбирается автоматически.</p>
+    <table>
+      <thead><tr><th>Что</th><th>Кластер без репликации</th><th>Quorum-очередь</th></tr></thead>
+      <tbody>
+        <tr><td>Метаданные (обменники, привязки, очереди)</td><td>на всех узлах</td><td>на всех узлах</td></tr>
+        <tr><td>Сообщения</td><td>на одном узле</td><td>на большинстве реплик (Raft)</td></tr>
+        <tr><td>Падение узла с очередью</td><td>очередь недоступна</td><td>лидер переизбирается, очередь работает</td></tr>
+        <tr><td>Потеря диска узла</td><td>сообщения потеряны</td><td>данные есть на других репликах</td></tr>
+        <tr><td>Скорость публикации</td><td>быстрее</td><td>медленнее: запись идёт в большинство</td></tr>
+      </tbody>
+    </table>
+    <p>Классические <em>mirrored</em>-очереди (HA policies) в 4.x удалены — quorum-очереди стали штатным
+      способом репликации. Дальше соберём кластер и проверим всё руками.</p>
+    <h2>Стенд: три узла в одной сети</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash"># docker network create mqnet — своя сеть: узлы находят друг друга по именам r1, r2, r3
+docker network create mqnet
+
+# docker run -d                    — запустить контейнер в фоне
+# --name r1 --hostname r1          — имя контейнера и сетевое имя узла (hostname = имя для Erlang!)
+# --network mqnet                  — та же сеть, что у остальных узлов
+# -p 5672:5672                     — AMQP-порт наружу (нужен клиенту с хоста)
+# -p 15672:15672                   — веб-интерфейс управления
+# -e RABBITMQ_ERLANG_COOKIE=secretcookie — общая «кука» Erlang: без неё узлы не доверяют друг другу
+# rabbitmq:3.13-management         — образ с плагином management (rabbitmqctl и rabbitmqadmin внутри)
+docker run -d --name r1 --hostname r1 --network mqnet -p 5672:5672 -p 15672:15672 \
+  -e RABBITMQ_ERLANG_COOKIE=secretcookie rabbitmq:3.13-management
+# r2 и r3 — то же самое, но со своими портами хоста, чтобы можно было подключиться к каждому
+docker run -d --name r2 --hostname r2 --network mqnet -p 5673:5672 \
+  -e RABBITMQ_ERLANG_COOKIE=secretcookie rabbitmq:3.13-management
+docker run -d --name r3 --hostname r3 --network mqnet -p 5674:5672 \
+  -e RABBITMQ_ERLANG_COOKIE=secretcookie rabbitmq:3.13-management
+
+# rabbitmqctl stop_app       — остановить приложение RabbitMQ, оставив узел запущенным
+# rabbitmqctl join_cluster rabbit@r1 — присоединиться к кластеру с узлом-«эталоном» rabbit@r1
+# rabbitmqctl start_app      — снова запустить приложение уже в составе кластера
+docker exec r2 rabbitmqctl stop_app
+docker exec r2 rabbitmqctl join_cluster rabbit@r1     # Clustering node rabbit@r2 with rabbit@r1
+docker exec r2 rabbitmqctl start_app
+docker exec r3 rabbitmqctl stop_app
+docker exec r3 rabbitmqctl join_cluster rabbit@r1     # Clustering node rabbit@r3 with rabbit@r1
+docker exec r3 rabbitmqctl start_app
+
+# rabbitmqctl cluster_status — состояние кластера: кто в running, кто в stopped, версии
+docker exec r1 rabbitmqctl cluster_status
+# Running Nodes
+# rabbit@r1
+# rabbit@r2
+# rabbit@r3</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>--hostname</code> обязан совпадать с именем, под которым узел известен
+      другим: RabbitMQ строит имя узла как <code>rabbit@&lt;hostname&gt;</code>, и в <code>join_cluster</code>
+      мы указываем именно его. <code>RABBITMQ_ERLANG_COOKIE</code> — общий секрет Erlang-кластера: с разными
+      куками узлы не увидят друг друга (симптом — <em>not a node</em> или бесконечные попытки
+      подключения). <code>join_cluster</code> делается на остановленном приложении, иначе узел держит
+      собственные метаданные и присоединение отклоняется.</p>
+    <p>Кластер помнит состав и после перезапуска: <code>docker start r2</code> вернёт узел в кластер без
+      повторного <code>join_cluster</code>.</p>
+    <h2>Quorum-очередь из .NET: объявление и публикация с подтверждениями</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using RabbitMQ.Client;
+
+var factory = new ConnectionFactory
+{
+    HostName = "localhost",          // узел r1 опубликован на хосте
+    Port = 5672,                     // AMQP-порт
+    UserName = "guest",              // учётка по умолчанию (guest пускают только с localhost)
+    Password = "guest",
+    ClientProvidedName = "cluster-demo"  // имя видно в rabbitmqctl list_connections
+};
+
+await using var connection = await factory.CreateConnectionAsync();   // одно TCP-соединение
+await using var channel = await connection.CreateChannelAsync(
+    new CreateChannelOptions(publisherConfirmationsEnabled: true,      // включить publisher confirms
+                             publisherConfirmationTrackingEnabled: true)); // BasicPublishAsync ждёт confirm
+
+await channel.QueueDeclareAsync(queue: "q.orders", durable: true, exclusive: false,
+    autoDelete: false,
+    arguments: new Dictionary&lt;string, object?&gt;
+    {
+        ["x-queue-type"] = "quorum"  // тип очереди: Raft-репликация на узлы кластера
+    });
+
+var sw = Stopwatch.StartNew();
+for (var i = 0; i &lt; 500; i++)
+{
+    var body = Encoding.UTF8.GetBytes($"order-{i}");
+    await channel.BasicPublishAsync(exchange: "", routingKey: "q.orders",   // "" — default exchange
+        mandatory: false, body: body);          // с tracking=true ждём подтверждения на каждое
+}
+sw.Stop();
+// 500 сообщений подтверждено за 943 мс</code></pre>
+    </div>
+    <p><strong>Разбор построчно.</strong></p>
+    <ul>
+      <li><code>CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true)</code>
+        — включает режим подтверждений и «ожидание»: <code>BasicPublishAsync</code> завершается, когда
+        брокер подтвердил запись. Без этого публикация — «выстрелил и забыл».</li>
+      <li><code>QueueDeclareAsync(..., durable: true, arguments: {"x-queue-type": "quorum"})</code> — тип
+        задаётся <em>при объявлении</em> и потом не меняется: переобъявить существующую классическую очередь
+        как quorum нельзя, будет <code>PRECONDITION_FAILED</code>. <code>durable: true</code> для quorum
+        обязательна.</li>
+      <li><code>exchange: ""</code> — default exchange: маршрутизация по имени очереди, удобно для примеров.</li>
+      <li><code>mandatory: false</code> — не требуем возврата, если маршрут не найден (в этой главе
+        маршрут всегда есть).</li>
+      <li>500 подтверждённых сообщений за 943 мс — цена репликации: каждое сообщение должно быть записано в
+        большинство реплик, и клиент ждёт этого подтверждения.</li>
+    </ul>
+    <p>Куда именно легли данные и кто лидер:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># rabbitmq-queues quorum_status q.orders — состояние Raft-группы очереди по узлам
+docker exec r1 rabbitmq-queues quorum_status q.orders
+# Node Name   Raft State  Membership  Last Log Index  Last Written  Last Applied  Commit Index  Term
+# rabbit@r1   leader      voter       504             504           504           504           1
+# rabbit@r2   follower    voter       504             504           504           504           1
+# rabbit@r3   follower    voter       504             504           504           504           1</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> Один лидер и два followers — классический Raft. <code>Last Log Index 504</code>
+      — 500 сообщений плюс служебные записи журнала Raft. <code>Commit Index</code> совпадает с
+      <code>Last Log Index</code>: все записи применены на большинстве. <code>Term 1</code> — поколение
+      лидера; оно увеличится, как только лидер сменится.</p>
+    <h2>Убиваем лидера</h2>
+    <p>Лидер <code>q.orders</code> — узел <code>r1</code>. Убиваем его без предупреждения:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># docker kill r1 — жёстко остановить контейнер (аналог падения узла, без graceful shutdown)
+docker kill r1
+
+# ждём выборов и смотрим состояние очереди уже с другого узла
+sleep 12
+docker exec r2 rabbitmq-queues quorum_status q.orders
+# rabbit@r1  {nodedown,rabbit@r1}   — узел потерян
+# rabbit@r2  follower   505  Term 3
+# rabbit@r3  leader     505  Term 3   ← лидером стал r3, поколение выросло с 1 до 3</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> Пока узел <code>r1</code> был лидером, <code>r2</code> и <code>r3</code> были
+      followers. После падения оставшиеся два узла — это большинство из трёх (кворум 2), поэтому они выбрали
+      нового лидера: <code>Term</code> вырос, <code>Last Log Index</code> стал 505 (Raft дописал служебную
+      запись о смене лидера). Если бы упали <em>два</em> узла из трёх, большинства не осталось бы и очередь
+      стала бы недоступной — об этом ниже.</p>
+    <p>Публикация во время отсутствия лидера — обычная, только подключаемся к живому узлу:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// тот же клиент, но HostName/Port указывают на живой узел r2 (порт 5673 на хосте)
+var factory = new ConnectionFactory
+{
+    HostName = "localhost",
+    Port = int.TryParse(Environment.GetEnvironmentVariable("MQ_PORT"), out var port) ? port : 5672,
+    UserName = "guest",
+    Password = "guest"
+};
+// ... дальше без изменений: BasicPublishAsync в q.orders
+// 200 сообщений подтверждено за 435 мс</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-bash"># публикуем 200 сообщений, пока узел r1 лежит (порт r2 — 5673)
+MQ_PORT=5673 dotnet run -c Release -- publish 200
+# 200 сообщений подтверждено за 435 мс   ← брокер принял их без «убитого» лидера
+
+# смотрим очередь на живом узле
+docker exec r3 rabbitmqctl list_queues name type messages messages_ready messages_unacknowledged
+# q.orders  quorum  700  700  0</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> Клиенту не нужно знать, кто лидер: подключение к любому узлу кластера
+      маршрутизирует запрос к лидеру очереди. Подтверждения приходят только после записи в большинство
+      (<code>r2</code> + <code>r3</code>), поэтому 200 сообщений уже переживут потерю любого из оставшихся
+      узлов. Обратите внимание на цифры: <code>messages 700</code> — это 500 «до» плюс 200 «во время
+      аварии».</p>
+    <div class="box warn">
+      <span class="t">Статистика очередей обновляется не мгновенно</span>
+      <p>Сразу после публикации <code>rabbitmqctl list_queues</code> может показать старое число
+        (в прогоне — <code>500</code> вместо <code>700</code>), а через несколько секунд — правильное.
+        <code>list_queues</code> читает статистику, которую узел собирает асинхронно, и не делает запрос к
+        очереди. Для проверок «здесь и сейчас» надёжнее <code>quorum_status</code> (журнал Raft) или
+        <code>rabbitmqadmin get</code>.</p>
+    </div>
+    <h2>Возвращаем узел и считаем потери</h2>
+    <div class="codewrap">
+      <pre><code class="language-bash"># docker start r1 — вернуть узел в кластер (состав кластера он помнит)
+docker start r1
+sleep 25
+
+# проверяем, что вернувшийся узел догнал журнал: индексы должны совпасть
+docker exec r2 rabbitmq-queues quorum_status q.orders
+# rabbit@r1  follower   707   Term 3   ← был {nodedown}, стал follower
+# rabbit@r2  follower   707   Term 3
+# rabbit@r3  leader     707   Term 3</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>r1</code> вернулся не лидером: лидерство осталось у <code>r3</code>,
+      а вернувшийся узел сначала догоняет журнал (Raft-лог) и только потом становится полноценным voter'ом.
+      Индексы <code>707</code> на всех трёх узлах — данные реплицированы полностью: 700 сообщений и 7
+      служебных записей.</p>
+    <p>Теперь вычитываем очередь целиком и смотрим, сколько дошло:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await using var connection = await factory.CreateConnectionAsync();
+await using var channel = await connection.CreateChannelAsync();
+
+// prefetch 50: не больше 50 неподтверждённых сообщений на канал (глава 3)
+await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 50, global: false);
+
+var consumer = new AsyncEventingBasicConsumer(channel);
+var consumed = 0;
+consumer.ReceivedAsync += async (_, ea) =&gt;
+{
+    consumed++;                                        // обработали сообщение
+    await channel.BasicAckAsync(ea.DeliveryTag, multiple: false);   // подтвердили брокеру
+};
+// autoAck: false — подтверждаем вручную, иначе сообщение считается доставленным до обработки
+await channel.BasicConsumeAsync("q.orders", autoAck: false, consumer: consumer);
+// обработано 700</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-bash"># после вычитки очередь пуста
+docker exec r3 rabbitmqctl list_queues name type messages
+# q.orders  quorum  0</code></pre>
+    </div>
+    <p><strong>Итог аварии:</strong> 500 сообщений до убийства лидера, 200 — во время его отсутствия, 700
+      обработано после возврата узла. Потерь нет, и ни одно сообщение не потребовалось публиковать повторно.
+      Это и есть смысл quorum-очереди: подтверждение приходит после записи в большинство, а не в один узел.</p>
+    <table>
+      <thead><tr><th>Шаг</th><th>Состояние</th><th>Сообщений в очереди</th></tr></thead>
+      <tbody>
+        <tr><td>публикация 500 с подтверждениями</td><td>leader r1, Term 1</td><td>500</td></tr>
+        <tr><td><code>docker kill r1</code></td><td>leader r3, Term 3, r1 nodedown</td><td>500</td></tr>
+        <tr><td>публикация 200 через r2</td><td>кворум 2 из 3</td><td>700</td></tr>
+        <tr><td><code>docker start r1</code></td><td>все три follower/voter, индексы 707</td><td>700</td></tr>
+        <tr><td>вычитка</td><td>leader r3</td><td>0, обработано 700</td></tr>
+      </tbody>
+    </table>
+    <h2>x-delivery-limit: «ядовитое» сообщение само уходит в DLQ</h2>
+    <p>В главе 4 повторную обработку делали через TTL и DLX. У quorum-очередей есть встроенный счётчик
+      доставок: сообщение, которое раз за разом возвращают в очередь, после N попыток уезжает в
+      dead-letter — без самодельных счётчиков в заголовках.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">await channel.QueueDeclareAsync("q.poison", durable: true, exclusive: false, autoDelete: false,
+    arguments: new Dictionary&lt;string, object?&gt;
+    {
+        ["x-queue-type"] = "quorum",                 // реплицируемая очередь
+        ["x-delivery-limit"] = 3,                    // максимум 3 «неудачные» доставки
+        ["x-dead-letter-exchange"] = "",             // DLX: default exchange ("" — по умолчанию)
+        ["x-dead-letter-routing-key"] = "q.dead"     // ключ маршрутизации = имя очереди мёртвых писем
+    });
+await channel.QueueDeclareAsync("q.dead", durable: true, exclusive: false, autoDelete: false,
+    arguments: new Dictionary&lt;string, object?&gt; { ["x-queue-type"] = "quorum" });
+
+await channel.BasicPublishAsync("", "q.poison", mandatory: false,
+    body: Encoding.UTF8.GetBytes("bad-order"));      // одно «ядовитое» сообщение
+
+var consumer = new AsyncEventingBasicConsumer(channel);
+consumer.ReceivedAsync += async (_, ea) =&gt;
+{
+    Console.WriteLine($"redelivered={ea.Redelivered}");     // признак повторной доставки
+    await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: true); // «не смог» — вернуть
+};
+await channel.BasicConsumeAsync("q.poison", autoAck: false, consumer: consumer);</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> <code>x-delivery-limit=3</code> считает не любые доставки, а доставки, после
+      которых сообщение вернулось в очередь (<code>basic.nack</code> с <code>requeue: true</code> или
+      отключение потребителя). Как только счётчик достигает лимита, брокер делает то же, что и при
+      <code>reject</code>: публикует сообщение в DLX с ключом
+      <code>x-dead-letter-routing-key</code>. <code>ea.Redelivered</code> — флаг из AMQP-конверта
+      (<code>redelivered</code>), по нему в обработчике видно, что это повтор.</p>
+    <p>Что получилось в прогоне:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">получено #1, redelivered=False
+получено #2, redelivered=True
+получено #3, redelivered=True
+получено #4, redelivered=True
+в q.dead сообщений: 1</code></pre>
+    </div>
+    <p>Четыре доставки при лимите 3: три «неудачных» возврата исчерпывают лимит, а четвёртая — это уже
+      последняя попытка, после которой сообщение уходит в <code>q.dead</code>. Проверяем очередь мёртвых писем
+      и заголовки:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># rabbitmqctl list_queues name type messages — сколько сообщений в каждой очереди
+docker exec r1 rabbitmqctl list_queues name type messages
+# q.dead    quorum  1
+# q.poison  quorum  0
+# q.orders  quorum  0
+
+# rabbitmqadmin get queue=q.dead count=1 — забрать сообщение из очереди и показать его свойства
+# --format=raw_json — вывести JSON (иначе таблица без заголовков)
+docker exec r1 rabbitmqadmin get queue=q.dead count=1 --format=raw_json</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-text">headers: {
+  "x-death": [ { "count": 1, "exchange": "", "queue": "q.poison",
+                 "reason": "delivery_limit", "routing-keys": ["q.poison"], "time": 1795272494 } ],
+  "x-delivery-count": 1,
+  "x-first-death-exchange": "", "x-first-death-queue": "q.poison",
+  "x-first-death-reason": "delivery_limit",
+  "x-last-death-exchange": "",  "x-last-death-queue": "q.poison",
+  "x-last-death-reason": "delivery_limit"
+}</code></pre>
+    </div>
+    <p><strong>Разбор заголовков.</strong> <code>x-death</code> — массив записей о «смертях» сообщения:
+      очередь, обменник, <code>reason</code> и время. <code>reason: delivery_limit</code> — сработал лимит
+      доставок (бывает ещё <code>rejected</code>, <code>expired</code>, <code>maxlen</code>). Пара
+      <code>x-first-death-*</code> / <code>x-last-death-*</code> хранит первую и последнюю причину — удобно,
+      когда сообщение прошло несколько DLQ. <code>x-delivery-count</code> — счётчик доставок quorum-очереди.
+      На этих заголовках строится разбор «почему сообщение оказалось в DLQ» без похода в логи приложения.</p>
+    <div class="box warn">
+      <span class="t">DLQ — не свалка</span>
+      <p>Сообщение в <code>q.dead</code> — это сигнал, что обработчик не справился. Нужен владелец очереди,
+        алерт на её рост и процедура разбора (переопубликовать после исправления, либо закрыть как
+        невалидное). Иначе «мёртвые» сообщения просто копятся, а проблема остаётся незамеченной.</p>
+    </div>
+    <h2>Что будет, когда кворума нет</h2>
+    <p>Кворум — это большинство: для трёх узлов нужно два. Проверяем, что будет, если «пропали» оба
+      оставшихся (<code>docker pause</code> имитирует зависший или потерявший сеть узел):</p>
+    <div class="codewrap">
+      <pre><code class="language-bash"># docker pause r2 r3 — «заморозить» узлы: процесс жив, но не отвечает
+docker pause r2 r3
+sleep 6
+
+# list_queues с оставшегося узла: q.orders пропала из списка — очередь недоступна
+docker exec r1 rabbitmqctl list_queues name type state
+# q.dead    quorum  running
+# q.poison  quorum  running
+
+# quorum_status: r1 не может стать лидером, остальные — timeout
+docker exec r1 timeout 15 rabbitmq-queues quorum_status q.orders
+# rabbit@r1  pre_vote  voter  1223 …
+# rabbit@r2  timeout
+# rabbit@r3  timeout
+
+# возвращаем узлы — очередь снова доступна
+docker unpause r2 r3
+sleep 6
+docker exec r1 rabbitmqctl list_queues name type state
+# q.dead    quorum  running
+# q.poison  quorum  running
+# q.orders  quorum  running</code></pre>
+    </div>
+    <p><strong>Разбор.</strong> Пока живы два узла из трёх, очередь работает (выборы проходят). Когда остался
+      один, Raft не может набрать большинство: узел <code>r1</code> уходит в <code>pre_vote</code> (пытается
+      начать выборы), остальные помечены <code>timeout</code>, а сама очередь исчезает из
+      <code>list_queues</code> — она не <code>running</code>. Публикация в неё в этот момент не
+      подтверждается. Как только большинство вернулось, очередь снова <code>running</code>, и всё, что было
+      записано до потери кворума, на месте.</p>
+    <div class="box warn">
+      <span class="t">Два узла — это не «кластер с запасом»</span>
+      <p>При двух узлах кворум равен двум: падение любого узла останавливает очередь. Поэтому минимальный
+        практический размер кластера — <strong>три</strong> узла, а лучше пять, размещённые в разных зонах
+        доступности. При <code>docker pause</code> на двух узлах очередь становится недоступной, даже если
+        один узел полностью здоров.</p>
+    </div>
+    <h2>Как это применять: короткие правила</h2>
+    <ul>
+      <li><strong>Очереди — quorum по умолчанию.</strong> Классические очереди оставьте там, где потеря
+        сообщений при падении узла допустима (логи, метрики, временные данные).</li>
+      <li><strong>Три реплики — минимум.</strong> Число реплик задаётся не отдельной настройкой, а составом
+        группы (<code>x-quorum-initial-group-size</code> при объявлении, по умолчанию — все узлы кластера).</li>
+      <li><strong>Публикуйте с подтверждениями</strong> (<code>publisherConfirmationTrackingEnabled</code>)
+        и <code>persistent</code>-сообщениями. Без подтверждений quorum-очередь не спасает: клиент не знает,
+        дошло ли сообщение до большинства.</li>
+      <li><strong>Потребляйте с <code>autoAck: false</code></strong> и подтверждайте после обработки — иначе
+        сбой обработчика теряет сообщение, хотя оно было реплицировано.</li>
+      <li><strong>Стройте DLQ на <code>x-delivery-limit</code></strong>, а не на счётчиках в заголовках:
+        лимит ведёт брокер, и он же формирует <code>x-death</code>.</li>
+      <li><strong>Следите за кворумом:</strong> алерт на отсутствие лидера дольше N секунд, на узлы в
+        <code>pre_vote</code>/<code>timeout</code> и на рост <code>partitions</code> в
+        <code>cluster_status</code>.</li>
+      <li><strong>Сетевые разделения опасны:</strong> узел, потерявший связь с большинством, останавливает
+        свои quorum-очереди — это защита от split-brain, а не ошибка. Лечится возвратом сети, а не
+        перезапуском «наугад».</li>
+    </ul>
+    <table>
+      <thead><tr><th>Симптом</th><th>Что означает</th><th>Что делать</th></tr></thead>
+      <tbody>
+        <tr><td>очередь исчезла из <code>list_queues</code></td><td>нет кворума или все реплики недоступны</td>
+          <td>поднять большинство узлов, проверить сеть</td></tr>
+        <tr><td><code>Raft State: pre_vote</code></td><td>узел не может начать выборы</td>
+          <td>проверить связь с остальными, не хватает голосов</td></tr>
+        <tr><td><code>{nodedown,rabbit@…}</code></td><td>реплика не отвечает</td><td>вернуть узел, дождаться
+          синхронизации журнала</td></tr>
+        <tr><td>рост <code>partitions</code> в <code>cluster_status</code></td><td>сеть разделилась</td>
+          <td>восстановить связь; не перезапускать узлы по одному «вслепую»</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box gold">
+      <span class="t">★ Что запомнить</span>
+      <ul>
+        <li>Кластер реплицирует <strong>метаданные</strong>; сообщения реплицирует
+          <strong>quorum-очередь</strong> (<code>x-queue-type=quorum</code>), а не «кластер вообще».</li>
+        <li>Тип очереди задаётся при объявлении и не меняется; <code>durable</code> для quorum обязательна.</li>
+        <li>Лидер очереди — один; после <code>docker kill</code> лидера выборы подняли новый
+          (<code>Term 3</code>), и очередь продолжила принимать сообщения (200 подтверждено за 435 мс).</li>
+        <li>Вернувшийся узел догоняет журнал и становится follower'ом: индексы сравнялись (707), после
+          вычитки обработано 700 из 700 — потерь нет.</li>
+        <li>Публикация «в большинство» — это подтверждения: без
+          <code>publisherConfirmationTrackingEnabled</code> гарантий нет.</li>
+        <li><code>x-delivery-limit=3</code> + DLX: 4 доставки, затем сообщение в <code>q.dead</code> с
+          <code>x-death.reason=delivery_limit</code>.</li>
+        <li>Кворум = большинство: один узел из трёх — очередь недоступна
+          (<code>pre_vote</code>/<code>timeout</code>), два из трёх — работает.</li>
+      </ul>
+    </div>
+
+    <div class="pager">
+      <a href="mq05-operations-monitoring.html">← <span class="sp">Глава 5. Эксплуатация: мониторинг, память и кластер</span></a>
+      <a href="rabbitmq.html"><span class="sp">Оглавление</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
+
+
+
+
