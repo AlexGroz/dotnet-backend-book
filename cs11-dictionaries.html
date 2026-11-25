@@ -445,41 +445,117 @@ False</code></pre>
 
     <h2>LINQ → словарь: <code>ToDictionary</code> и <code>ToLookup</code></h2>
     <p>Самый частый способ получить словарь — свернуть последовательность. Здесь спрятана ловушка:
-      <code>ToDictionary</code> требует <strong>уникальных</strong> ключей и падает на дублях.</p>
+      <code>ToDictionary</code> требует <strong>уникальных</strong> ключей и падает на дублях. Данные во всём
+      разделе одни и те же — три «заказа» с двумя полями: <code>Id</code> — номер заказа (по нему и группируем)
+      и <code>Name</code> — метка <code>"a"</code>/<code>"b"</code>/<code>"c"</code>, по которой в выводе видно,
+      <em>какой именно</em> элемент взят. Полноценной модели заказа здесь нет: только два поля, которых хватает
+      для примеров.</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var orders = new[] { (Id: 1, Name: "a"), (Id: 2, Name: "b"), (Id: 1, Name: "c") };
+      <pre><code class="language-csharp">var orders = new[]
+{
+    (Id: 1, Name: "a"),     // первый заказ
+    (Id: 2, Name: "b"),     // второй
+    (Id: 1, Name: "c"),     // третий — Id снова 1: вот и дубль
+};
 
-var byKey = orders.ToDictionary(o =&gt; o.Id);          // ✘ Id = 1 встречается дважды
+var byKey = orders.ToDictionary(o =&gt; o.Id);   // ✘ Id = 1 встречается дважды
 Console.WriteLine(byKey.Count);</code></pre>
       <p class="cap">Вывод: то же исключение, что у <code>Add</code></p>
       <pre><code class="language-text">Unhandled exception. System.ArgumentException: An item with the same key has already
 been added. Key: 1</code></pre>
     </div>
-    <p>Три способа свернуть в словарь, когда дубли — не повод падать (1–3), и четвёртый — когда словарь
-      вообще не нужен (4):</p>
+    <p>Что означает эта запись: у <code>ToDictionary</code> есть две формы — <code>ToDictionary(keySelector)</code>
+      и <code>ToDictionary(keySelector, elementSelector)</code>. Первая (здесь) говорит только, <em>что считать
+      ключом</em> (<code>o =&gt; o.Id</code>), а значением становится сам элемент, то есть весь кортеж
+      <code>(Id, Name)</code>. Вторая форма (<code>o =&gt; o.Id, o =&gt; o.Name</code>) дополнительно выбирает
+      значение. В обеих <strong>ключ должен быть уникальным</strong>, а вход — это отдельные заказы,
+      где <code>Id = 1</code> приходит дважды. Вторая попытка вставить занятый ключ делает то же, что
+      <code>Add</code>: <code>ArgumentException</code>.</p>
+
+    <h3><code>GroupBy</code>: сначала группы, потом словарь</h3>
+    <p>Чтобы дубль не ронял программу, его надо <em>схлопнуть</em>: несколько элементов с одинаковым
+      <code>Id</code> превратить в один. Это и делает <code>GroupBy(o =&gt; o.Id)</code>. Возвращает он не
+      словарь, а последовательность <strong>групп</strong>; каждая группа — это
+      <code>IGrouping&lt;int, (int Id, string Name)&gt;</code>, то есть <em>ключ</em> <code>g.Key</code> плюс все
+      элементы с этим ключом (сама группа — <code>IEnumerable</code>, по ней можно ходить <code>foreach</code> и
+      применять <code>Select</code>). На наших трёх заказах групп получается две — по числу разных
+      <code>Id</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">foreach (var g in orders.GroupBy(o =&gt; o.Id))
+    Console.WriteLine($"Key = {g.Key}: {string.Join(", ", g.Select(o =&gt; o.Name))}");</code></pre>
+      <p class="cap">Вывод: ключ группы — это <code>Id</code>, внутри — все элементы с этим <code>Id</code></p>
+      <pre><code class="language-text">Key = 1: a, c
+Key = 2: b</code></pre>
+    </div>
+    <p><strong>Сортировки здесь нет</strong>, хотя ключи и вышли по порядку 1, 2. <code>GroupBy</code> ничего не
+      упорядочивает: группы идут в порядке <em>первого появления</em> ключа в исходных данных, а элементы внутри
+      группы — в исходном порядке (так написано в документации <code>Enumerable.GroupBy</code> и так ведёт себя
+      LINQ to Objects). Проверка: если переставить данные и начать с <code>(2, "b")</code>, первым в выводе будет
+      <code>Key = 2</code>. Нужен порядок именно по ключу — <code>OrderBy(o =&gt; o.Id)</code> до
+      <code>GroupBy</code> или <code>SortedDictionary</code> (о нём — выше).</p>
+
+    <h3>Почему на дублях больше нет ошибки</h3>
+    <p>Ключевое отличие: в <code>ToDictionary</code> теперь уходит не список заказов, а <strong>список
+      групп</strong>. Групп ровно столько, сколько разных <code>Id</code>, — две, и ключи у них 1 и 2, без
+      повторов. Требование уникальности выполнено: дубль «израсходован» на шаге <code>GroupBy</code> — три
+      элемента стали двумя группами. Поэтому <code>g =&gt; g.Key</code> в роли селектора ключа безопасен именно
+      после <code>GroupBy</code> и только потому, что группы уже уникальны по своему ключу.</p>
+    <p>Ошибка вернётся, если селектор ключа снова сделает ключи одинаковыми:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// группы уникальны по g.Key, но не по длине Name первого элемента: у групп 1 и 2 это 1 и 1
+var bad = orders.GroupBy(o =&gt; o.Id)
+                .ToDictionary(g =&gt; g.First().Name.Length, g =&gt; g.Key);</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">Unhandled exception. System.ArgumentException: An item with the same key has already
+been added. Key: 1</code></pre>
+    </div>
+
+    <p>Четыре способа, когда дубли — не повод падать (1–3), и один, когда словарь вообще не нужен (4).
+      <code>orders</code> — те же три элемента: <code>(1, "a")</code>, <code>(2, "b")</code>,
+      <code>(1, "c")</code>.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">// 1. дубли — ошибка данных: пусть падает как можно раньше (ToDictionary без прикрас)
-var byId = orders.ToDictionary(o =&gt; o.Id, o =&gt; o.Name);
+var byId = orders.ToDictionary(o =&gt; o.Id, o =&gt; o.Name);   // ✘ упадёт: Id = 1 дважды
 
 // 2. дубли допустимы, но на ключ нужно ОДНО значение — правило выбираем сами
-var last = orders.GroupBy(o =&gt; o.Id).ToDictionary(g =&gt; g.Key, g =&gt; g.Last().Name);
-Console.WriteLine(last[1]);                          // c — «последний победил»
+var last = orders.GroupBy(o =&gt; o.Id)              // группы: Key = 1 → (a, c), Key = 2 → (b)
+                .ToDictionary(g =&gt; g.Key,         // ключ словаря = g.Key, то есть Id: 1 и 2
+                              g =&gt; g.Last().Name); // значение = Name последнего в группе
+Console.WriteLine(last[1]);                        // c — «последний победил»
+Console.WriteLine(last[2]);                        // b — в группе один элемент
 
 // 3. на ключ приходится несколько значений — GroupBy + ToDictionary
 var grouped = orders.GroupBy(o =&gt; o.Id)
-                    .ToDictionary(g =&gt; g.Key, g =&gt; g.Select(o =&gt; o.Name).ToList());
-Console.WriteLine(string.Join(",", grouped[1]));     // a,c
+                    .ToDictionary(g =&gt; g.Key,                // ключ — снова Id
+                                  g =&gt; g.Select(o =&gt; o.Name) // значения — ВСЕ Name группы...
+                                        .ToList());          // ...свёрнутые в List&lt;string&gt;
+Console.WriteLine(string.Join(",", grouped[1]));             // a,c — оба заказа с Id = 1
+Console.WriteLine(string.Join(",", grouped[2]));             // b
 
 // 4. читать «по ключу → много значений» — сразу ILookup, без промежуточного словаря
 ILookup&lt;int, string&gt; lookup = orders.ToLookup(o =&gt; o.Id, o =&gt; o.Name);
-Console.WriteLine(string.Join(",", lookup[1]));      // a,c
-Console.WriteLine(lookup.Count);                     // 2 — число ключей, а не элементов
-Console.WriteLine(lookup[99].Count());               // 0 — пустая последовательность, не null</code></pre>
+Console.WriteLine(string.Join(",", lookup[1]));              // a,c — то же, что grouped[1]
+Console.WriteLine(lookup.Count);                             // 2 — число ключей, а не элементов
+Console.WriteLine(lookup[99].Count());                       // 0 — пустая последовательность, не null</code></pre>
     </div>
+    <p><strong>Что такое <code>a</code>, <code>b</code> и <code>c</code>.</strong> Это <code>Name</code> из
+      данных в начале раздела — обычные строки-метки, ничего не вычисляется: заказы <code>(1, "a")</code>,
+      <code>(2, "b")</code>, <code>(1, "c")</code>. Отсюда весь вывод: <code>a,c</code> — имена двух заказов с
+      <code>Id = 1</code> в исходном порядке (сначала <code>a</code>, потом <code>c</code>); <code>c</code> в
+      примере 2 — потому что <code>Last()</code> взял последний из них (<code>First()</code> дал бы
+      <code>a</code>); <code>b</code> — единственный заказ с <code>Id = 2</code>.</p>
+    <p>Ещё две детали к примерам 2 и 3. <code>g.Last()</code> безопасен: <code>GroupBy</code> не создаёт пустых
+      групп, в каждой есть хотя бы один элемент, поэтому <code>LastOrDefault</code> не нужен. А сам выбор
+      <code>First</code>/<code>Last</code> — это <strong>наше правило</strong>, а не поведение LINQ: словарь не
+      решает, кто «победил»; если правило другое (например, «самый дорогой заказ»), оно и пишется в селекторе
+      значения.</p>
     <p>Разница, которую стоит проговорить: <code>Dictionary</code> — «один ключ = одно значение»,
       <code>ILookup&lt;TKey, TElement&gt;</code> — «один ключ = много значений», причём
       <strong>отсутствующий ключ возвращает пустую последовательность</strong>, а не исключение и не
-      <code>null</code>. Перепутать их — типичная причина <code>ArgumentException</code> в отчётах.</p>
+      <code>null</code>. В примерах выше это видно по типам: <code>last</code> — <code>Dictionary&lt;int,
+      string&gt;</code>, <code>grouped</code> — <code>Dictionary&lt;int, List&lt;string&gt;&gt;</code>, а
+      <code>lookup</code> — <code>ILookup&lt;int, string&gt;</code>, который отвечает на тот же вопрос, но без
+      промежуточного словаря. Перепутать их — типичная причина <code>ArgumentException</code> в отчётах.</p>
 
 
     <h2>Словарь и несколько потоков</h2>
