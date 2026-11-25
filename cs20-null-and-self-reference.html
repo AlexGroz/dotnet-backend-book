@@ -35,6 +35,9 @@ Console.WriteLine(name?.Length);           // ✔ null: вызова не был
     <p><strong>Nullable reference types</strong> (<code>string?</code>, <code>Customer?</code>) — это подсказка
       <em>компилятору</em>: «здесь может быть null». На работу в рантайме она не влияет, но заставляет обработать
       случай.</p>
+    <p><strong>Не путать с <code>NaN</code>.</strong> <code>NaN</code> — это не «пустое» значение, а результат
+      операции с <code>double</code> (<code>0.0 / 0.0</code>), и сравнивается он наоборот: <code>NaN == NaN</code>
+      даёт <code>false</code>. Подробно — глава 10, раздел «Что такое <code>NaN</code>».</p>
 
     <h2>Оператор <code>?.</code>: вызвать, только если не null</h2>
     <p>Читается буквально: «<strong>если слева не null — вызови/прочитай; иначе верни null</strong>».</p>

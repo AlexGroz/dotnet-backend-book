@@ -165,28 +165,77 @@ Console.WriteLine("a".CompareTo(null));                          // 1 — string
     <h2>Стабильность: <code>List.Sort</code> и <code>OrderBy</code> — разные сортировки</h2>
     <p>Сортировка <strong>стабильна</strong>, если равные элементы сохраняют исходный порядок. Это не
       абстракция: именно на этом держится «сортировка по двум ключам в два прохода» и предсказуемость
-      результатов в отчётах. Возьмём 20 элементов с тремя значениями ключа и отсортируем их двумя способами:</p>
+      результатов в отчётах. Возьмём 20 элементов с тремя значениями ключа и отсортируем их двумя способами.
+      «Три значения» — это остатки от деления на 3: <code>i % 3</code> для <code>i</code> от 0 до 19 даёт только
+      0, 1 и 2 (семь элементов с ключом 0, семь с ключом 1 и шесть с ключом 2).</p>
     <div class="codewrap">
-      <pre><code class="language-csharp">var pairs = Enumerable.Range(0, 20).Select(i =&gt; (Key: i % 3, Id: i)).ToList();
+      <pre><code class="language-csharp">// Enumerable — статический класс из System.Linq с методами-расширениями для любого IEnumerable&lt;T&gt;
+// Range(0, 20) — «20 чисел подряд, начиная с 0»: 0,1,2,…,19; это ленивая последовательность, а не список
+var pairs = Enumerable.Range(0, 20)                  // первый аргумент — старт, второй — сколько чисел
+    .Select(i =&gt; (Key: i % 3, Id: i))                // каждый i превращается в кортеж из двух элементов
+                                                     // Key = i % 3 (0,1,2), Id = i (0…19)
+    .ToList();                                       // материализуем в List&lt;(int Key, int Id)&gt;
 
-var bySort = pairs.ToList();
-bySort.Sort((x, y) =&gt; x.Key.CompareTo(y.Key));      // List&lt;T&gt;.Sort — НЕстабильная
+// List&lt;T&gt;.Sort сортирует НА МЕСТЕ, поэтому сортируем копию: исходный порядок нужен ниже
+var bySort = pairs.ToList();                         // ToList() у List&lt;T&gt; создаёт НОВЫЙ список (копию)
+bySort.Sort((x, y) =&gt; x.Key.CompareTo(y.Key));      // компаратор-лямбда: сравниваем только Key
 
-var byLinq = pairs.OrderBy(x =&gt; x.Key).ToList();    // LINQ — стабильная
+var byLinq = pairs.OrderBy(x =&gt; x.Key).ToList();    // OrderBy не меняет pairs, а возвращает новую последовательность
 
-Console.WriteLine(string.Join(",", bySort.Select(p =&gt; p.Id)));
+Console.WriteLine(string.Join(",", bySort.Select(p =&gt; p.Id)));   // печатаем только Id — так виден порядок
 Console.WriteLine(string.Join(",", byLinq.Select(p =&gt; p.Id)));</code></pre>
       <p class="cap">Вывод (net8.0): внутри каждой группы одинаковых ключей — разный порядок</p>
       <pre><code class="language-text">0,15,12,18,6,9,3,4,7,10,13,1,16,19,8,11,2,14,17,5
 0,3,6,9,12,15,18,1,4,7,10,13,16,19,2,5,8,11,14,17</code></pre>
     </div>
+    <p><strong>Что здесь что.</strong> <code>Enumerable</code> — не коллекция, а набор методов для работы с
+      любым <code>IEnumerable&lt;T&gt;</code> (подробно — глава 15); <code>Range</code> создаёт последовательность
+      чисел, <code>Select</code> превращает каждое число в кортеж, <code>ToList</code> материализует результат в
+      список. В кортеже <code>(Key: i % 3, Id: i)</code> <code>Key</code> и <code>Id</code> — просто
+      <em>имена элементов</em> (глава 6), а не ключи словаря: <code>Key</code> — номер группы, <code>Id</code> —
+      исходный индекс, по нему и видно порядок.</p>
+    <p><strong>Зачем <code>pairs.ToList()</code>, если <code>pairs</code> уже список.</strong> Именно затем,
+      чтобы получить <em>копию</em>: <code>List&lt;T&gt;.Sort</code> сортирует на месте и переставил бы элементы в
+      самом <code>pairs</code>, а исходный порядок нужен для второго замера. <code>ToList()</code> у
+      <code>List&lt;T&gt;</code> всегда создаёт новый список: <code>ReferenceEquals(pairs, pairs.ToList())</code>
+      даёт <code>False</code>. Если копию убрать, сравнивать будет нечего:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var noCopy = pairs;                                  // ✘ не копия: второе имя того же списка
+noCopy.Sort((x, y) =&gt; x.Key.CompareTo(y.Key));       // отсортировали ИСХОДНЫЕ данные
+
+Console.WriteLine(string.Join(",", noCopy.Select(p =&gt; p.Id)));
+Console.WriteLine(string.Join(",", noCopy.OrderBy(x =&gt; x.Key).Select(p =&gt; p.Id)));</code></pre>
+      <p class="cap">Вывод: обе строки одинаковые — исходный порядок уже потерян</p>
+      <pre><code class="language-text">0,15,12,18,6,9,3,4,7,10,13,1,16,19,8,11,2,14,17,5
+0,15,12,18,6,9,3,4,7,10,13,1,16,19,8,11,2,14,17,5</code></pre>
+    </div>
     <p><code>OrderBy</code> сохранил исходный порядок внутри групп (<code>0,3,6…</code>), а
       <code>List.Sort</code> — нет: он использует интроспективную сортировку (introsort), которой стабильность не
-      нужна. Отсюда практические правила:</p>
+      нужна.</p>
+    <p><strong>Два ключа в одном выражении.</strong> В коде выше поля <code>Date</code> нет — там кортежи
+      <code>(Key, Id)</code>. Вот тот же приём на типе с датой, чтобы было видно, откуда берутся
+      <code>x.Date</code> и <code>x.Id</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed record Invoice(int Id, DateTime Date, decimal Total);   // Id и Date — поля записи
+
+var invoices = new[]
+{
+    new Invoice(1, new DateTime(2024, 5, 1), 100m),
+    new Invoice(2, new DateTime(2024, 4, 1), 200m),
+    new Invoice(3, new DateTime(2024, 5, 1), 300m),   // та же дата, что у первого
+};
+
+Console.WriteLine(string.Join(",", invoices.OrderBy(x =&gt; x.Date).ThenBy(x =&gt; x.Id).Select(x =&gt; x.Id)));</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">2,1,3</code></pre>
+    </div>
+    <p>Сначала по дате (апрель — заказ 2), внутри одинаковой даты — по <code>Id</code>: <code>2</code>, затем
+      <code>1</code> и <code>3</code>.</p>
+    <p>Отсюда практические правила:</p>
     <ul>
       <li><strong>Два ключа — два ключа в одном выражении</strong>: <code>OrderBy(x =&gt; x.Date).ThenBy(x =&gt;
-        x.Id)</code>. Это надёжнее, чем «сначала отсортировал по Id, потом по дате» — второй способ работает
-        только при стабильной сортировке.</li>
+        x.Id)</code> — как в примере с <code>Invoice</code> выше. Это надёжнее, чем «сначала отсортировал по Id,
+        потом по дате» — второй способ работает только при стабильной сортировке.</li>
       <li><strong>Нужна стабильность при сортировке списка</strong> — сортируйте через
         <code>OrderBy</code> или добавляйте в ключ «тай-брейкер» (уникальный <code>Id</code>).</li>
       <li><strong>Одинаковые ключи в <code>SortedSet</code>/<code>SortedDictionary</code></strong> — это не
@@ -209,8 +258,19 @@ Console.WriteLine(string.Join(",", words.OrderBy(x =&gt; x, StringComparer.Ordin
 ёж,ель,жизнь
 ель,жизнь,ёж</code></pre>
     </div>
-    <p>В русской культуре «ё» стоит рядом с «е», а в ordinal-порядке — после «ж» (у неё просто больший код
-      символа). Отсюда правило, которое экономит нервы в CI:</p>
+    <p>В русской культуре «ё» стоит рядом с «е», а в ordinal-порядке — после «ж»: у неё просто больший код
+      символа (1077 у «е», 1105 у «ё», 1078 у «ж»).</p>
+    <p><strong>Почему тогда «ёж» раньше «ель», если в алфавите сначала «е», потом «ё»?</strong> Потому что
+      сортировка текста — не алфавит. Сравнение по культуре идёт <em>по уровням весов</em>: сначала сравниваются
+      основные веса всех букв строки, и только если строки на этом уровне совпали — второстепенные, куда попадает
+      диакритика вроде двух точек. В правилах ru-RU «ё» отличается от «е» именно на второстепенном уровне, а
+      своего основного веса у неё нет. В паре «ёж» / «ель» решает вторая буква: «ж» (1078) меньше «л» (1083),
+      поэтому «ёж» идёт первым — до сравнения точек дело не доходит. Если же слова на основном уровне совпадают,
+      различие видно: <code>string.Compare("ёж", "еж")</code> при ru-RU даёт <code>1</code>, и
+      <code>string.Compare("ё", "е")</code> — тоже <code>1</code>. Отсортированный набор
+      <code>{"е", "ё", "ж", "ёж", "ель"}</code> выглядит так: <code>е, ё, ёж, ель, ж</code> (проверено на
+      net8.0).</p>
+    <p>Отсюда практическое правило — какой компаратор где:</p>
     <ul>
       <li><strong>Идентификаторы, ключи, имена файлов, протоколы, сортировка в тестах</strong> —
         <code>StringComparer.Ordinal</code>: детерминированно и одинаково на любой машине.</li>
@@ -221,9 +281,57 @@ Console.WriteLine(string.Join(",", words.OrderBy(x =&gt; x, StringComparer.Ordin
     </ul>
 
     <h2><code>null</code> и <code>NaN</code>: у порядка есть крайние случаи</h2>
-    <p><code>null</code> встроенные компараторы считают самым маленьким, а вот <code>NaN</code> ведёт себя так,
-      что это стоит запомнить: для порядка он «меньше любого числа» и «равен сам себе», хотя обычное
-      <code>==</code> говорит иначе.</p>
+
+    <h3>Что такое <code>NaN</code> и чем он отличается от <code>null</code></h3>
+    <p><code>NaN</code> (Not a Number) — это <strong>конкретное значение</strong> типов <code>double</code> и
+      <code>float</code>, которым IEEE 754 помечает результат операции, не имеющей числового ответа. Не «пусто» и
+      не отсутствие значения: значение существует, у него есть биты, и любая арифметика с ним даёт снова
+      <code>NaN</code>.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(0.0 / 0.0);                                         // NaN — ноль делить на ноль
+Console.WriteLine(double.IsNaN(0.0 / 0.0));                           // True — правильная проверка
+Console.WriteLine(Math.Sqrt(-1));                                     // NaN — корень из отрицательного
+Console.WriteLine(double.PositiveInfinity - double.PositiveInfinity);  // NaN — бесконечность минус она же
+Console.WriteLine(double.NaN + 1);                                    // NaN — «заразно»</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">NaN
+True
+NaN
+NaN
+NaN</code></pre>
+    </div>
+    <p><code>null</code> — из другого мира: это <em>отсутствие ссылки</em> (глава 20), а <code>NaN</code> —
+      значение, которое лежит в переменной <code>double</code> и участвует в вычислениях. Разница видна в
+      сравнениях:</p>
+    <table>
+      <thead><tr><th></th><th><code>null</code></th><th><code>NaN</code></th></tr></thead>
+      <tbody>
+        <tr><td>Что означает</td><td>Ссылки (или значения <code>T?</code>) нет — глава 20</td>
+          <td>Значение <code>double</code>/<code>float</code>: «результат — не число»</td></tr>
+        <tr><td>Где встречается</td><td>Ссылочные типы, <code>Nullable&lt;T&gt;</code></td>
+          <td>Только <code>double</code>, <code>float</code> (и <code>Half</code>); у <code>decimal</code>
+            <code>NaN</code> нет</td></tr>
+        <tr><td>Равенство самому себе</td><td><code>null == null</code> → <code>True</code></td>
+          <td><code>NaN == NaN</code> → <code>False</code>; компилятор предупреждает CS1718</td></tr>
+        <tr><td>Как проверить</td><td><code>x is null</code> или <code>x == null</code></td>
+          <td><code>double.IsNaN(x)</code>: сравнение с <code>double.NaN</code> через <code>==</code> не даёт
+            <code>true</code> никогда</td></tr>
+        <tr><td>В арифметике</td><td>Не участвует: у ссылочного типа <code>null + 1</code> не компилируется; у
+          <code>int?</code> результат <code>null</code></td>
+          <td>Любая операция даёт <code>NaN</code></td></tr>
+      </tbody>
+    </table>
+    <p>Отсюда главное правило: <strong><code>x == double.NaN</code> не бывает истинным</strong> — ни для обычных
+      чисел, ни для самого <code>NaN</code>. Проверять надо <code>double.IsNaN(x)</code> (для <code>float</code> —
+      <code>float.IsNaN</code>). При этом <code>Equals</code> считает <code>NaN</code> равным себе: это редкий
+      случай, когда <code>==</code> и <code>Equals</code> расходятся (глава 3) — ниже это видно в выводе.</p>
+    <p>У <code>decimal</code> никакого <code>NaN</code> нет вовсе: <code>decimal zero = 0m; zero / zero</code>
+      бросает <code>DivideByZeroException</code> («Attempted to divide by zero»). Это ещё одна причина держать
+      деньги в <code>decimal</code>: «не число» в нём просто не может появиться, а ошибка видна сразу, а не
+      расползается по расчётам.</p>
+    <p>Теперь про порядок. <code>null</code> встроенные компараторы считают самым маленьким, а <code>NaN</code>
+      ведёт себя так, что это стоит запомнить: для порядка он «меньше любого числа» и «равен сам себе», хотя
+      обычное <code>==</code> говорит иначе.</p>
     <div class="codewrap">
       <pre><code class="language-csharp">Console.WriteLine(double.NaN.CompareTo(1.0));       // -1  — NaN «меньше»
 Console.WriteLine(1.0.CompareTo(double.NaN));       // 1
