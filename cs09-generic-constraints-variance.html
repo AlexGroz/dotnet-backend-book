@@ -58,7 +58,8 @@
         <tr><td><code>where T : new()</code></td><td>Есть открытый конструктор без параметров</td>
           <td><code>new T()</code></td></tr>
         <tr><td><code>where T : Base</code></td><td>Базовый класс</td><td>Все члены <code>Base</code></td></tr>
-        <tr><td><code>where T : IFoo</code></td><td>Интерфейс</td><td>Члены <code>IFoo</code></td></tr>
+        <tr><td><code>where T : IFoo</code></td><td>Интерфейс — любой, в том числе объявленный вами
+          (<code>IEntity</code>)</td><td>Члены <code>IFoo</code></td></tr>
         <tr><td><code>where T : struct, Enum</code></td><td>Перечисление</td>
           <td><code>Enum.IsDefined(value)</code>, <code>Enum.GetValues&lt;T&gt;()</code></td></tr>
         <tr><td><code>where T : Delegate</code></td><td>Любой делегат</td>
@@ -73,7 +74,7 @@
 
     <h2>Правила записи: порядок и взаимоисключения</h2>
     <p>У списка ограничений есть жёсткий порядок: сначала «первичное» (<code>class</code>, <code>struct</code>,
-      <code>unmanaged</code>, <code>notnull</code>), затем базовый класс или интерфейсы, и только в конце
+      <code>unmanaged</code>, <code>notnull</code>), затем базовый класс, затем интерфейсы, и только в конце
       <code>new()</code>. Нарушения ловятся компилятором:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">public class A&lt;T&gt; where T : class, struct { }   // ✘ взаимоисключающие
@@ -84,7 +85,47 @@ cannot be combined or duplicated, and must be specified first in the constraints
 error CS0401: The new() constraint must be the last constraint specified</code></pre>
     </div>
     <p>Правильно так: <code>where T : class, IEntity, new()</code> — первичное, интерфейсы, <code>new()</code>.
-      А ещё ограничение может быть <em>самоссылочным</em>, и это не опечатка:</p>
+      Два правила порядка, и оба проверены компилятором: базовый класс обязан идти
+      <em>перед</em> интерфейсами, а вместе с ним <code>class</code> указывать нельзя — он уже не нужен.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public abstract class Entity { }                  // базовый класс
+public class A&lt;T&gt; where T : IEntity, Entity { }   // ✘ класс после интерфейса
+public class C&lt;T&gt; where T : class, Entity { }     // ✘ class вместе с базовым классом</code></pre>
+      <p class="cap">Что скажет компилятор (каждая строка проверена отдельно)</p>
+      <pre><code class="language-text">error CS0406: The class type constraint 'Entity' must come before any other constraints
+error CS0450: 'Entity': cannot specify both a constraint class and the 'class' or 'struct' constraint</code></pre>
+    </div>
+    <p>Если базовый класс нужен, верная запись такая: <code>where T : Entity, IEntity, new()</code> — класс,
+      интерфейсы, <code>new()</code>.</p>
+    <p><strong>Что такое <code>IEntity</code>.</strong> Это не слово языка и не тип из BCL, а самый обычный
+      интерфейс, который объявляете вы сами; в примере — «у сущности есть <code>Id</code>». Отдельная строка в
+      таблице выше ему не нужна: он попадает в <code>where T : IFoo</code>. Целиком это выглядит так:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public interface IEntity { int Id { get; } }        // наш интерфейс, не из BCL
+
+public sealed class Order : IEntity
+{
+    public int Id { get; init; }
+}
+
+public static class Factory
+{
+    public static T Create&lt;T&gt;() where T : class, IEntity, new() =&gt; new T();
+}
+
+Console.WriteLine(Factory.Create&lt;Order&gt;().Id);       // 0</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">0</code></pre>
+    </div>
+    <p>Ограничение работает как фильтр: класс без <code>IEntity</code> не подставится, и это ошибка компиляции, а
+      не сюрприз в рантайме:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public sealed class Plain { }        // класс есть, IEntity нет
+Factory.Create&lt;Plain&gt;();             // ✘</code></pre>
+      <p class="cap">Вывод компилятора (CS0311)</p>
+      <pre><code class="language-text">error CS0311: The type 'Plain' cannot be used as type parameter 'T' in the generic type or method 'Factory.Create&lt;T&gt;()'. There is no implicit reference conversion from 'Plain' to 'IEntity'.</code></pre>
+    </div>
+    <p>А ещё ограничение может быть <em>самоссылочным</em>, и это не опечатка:</p>
     <div class="codewrap">
       <pre><code class="language-csharp">public static T Max&lt;T&gt;(T a, T b) where T : IComparable&lt;T&gt;   // «T сравним сам с собой»
     =&gt; a.CompareTo(b) &gt;= 0 ? a : b;</code></pre>
