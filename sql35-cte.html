@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 35 · CTE: WITH, рекурсия и материализация</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql36-interview.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть IX · Практика</div>
+    <h1>Глава 35. CTE: WITH, рекурсия и материализация</h1>
+    <p class="sublead">Именованные подзапросы, которые читаются сверху вниз: деревья и иерархии через рекурсию,
+      события в outbox одним запросом и главное изменение PostgreSQL 12 — CTE больше не «оптимизационный забор».
+      Все выводы и планы — с живой базы PostgreSQL 16.15.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Зачем нужен <code>WITH</code></h2>
+    <p>CTE (common table expression, «общее табличное выражение») — это подзапрос, которому дали имя и на который
+      можно ссылаться как на таблицу:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH paid AS (                       -- имя и тело CTE
+    SELECT * FROM orders WHERE status = 'paid'
+), totals AS (                       -- второй CTE видит первый
+    SELECT customer_id, sum(amount) AS total FROM paid GROUP BY customer_id
+)
+SELECT t.customer_id, c.name, t.total
+FROM totals t JOIN customers c ON c.id = t.customer_id
+ORDER BY t.total DESC;</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text"> customer_id | name  |  total
+-------------+-------+---------
+           2 | Борис | 3100.00
+           4 | Глеб  | 3000.00
+           1 | Аня   | 2850.00
+           5 | Дина  | 2500.00
+           3 | Вера  | 1700.00
+(5 rows)</code></pre>
+    </div>
+    <p>Польза здесь не в скорости, а в структуре: запрос читается как список шагов, и каждый шаг можно
+      проверить отдельно — выделить тело CTE и выполнить. То же самое можно записать вложенными подзапросами,
+      но на третьем уровне вложенности читать их уже невозможно. Именно поэтому CTE — стандартный способ писать
+      «топ-N в группе» (глава 34): оконную функцию нельзя поставить в <code>WHERE</code>, зато её результат
+      можно обернуть.</p>
+    <table>
+      <thead><tr><th>Форма</th><th>Когда</th><th>Минус</th></tr></thead>
+      <tbody>
+        <tr><td>CTE (<code>WITH</code>)</td><td>запрос из нескольких шагов; шаг используется больше одного
+          раза; рекурсия</td><td>в версиях до 12 — «забор» для оптимизаций, см. ниже</td></tr>
+        <tr><td>Подзапрос в <code>FROM</code></td><td>один-два уровня, имя не нужно</td><td>при росте вложенности
+          теряется читаемость</td></tr>
+        <tr><td>Временная таблица</td><td>результат нужен нескольким <em>запросам</em> или его надо
+          проиндексировать</td><td>DDL, очистка, лишние права; в одной транзакции — <code>ON COMMIT
+          DROP</code></td></tr>
+        <tr><td>Представление (<code>VIEW</code>)</td><td>шаг нужен многим запросам и надолго</td><td>это объект
+          схемы: миграции, права, зависимости</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Материализация: что изменилось в PostgreSQL 12</h2>
+    <p>До версии 12 CTE работал как <em>optimization fence</em>: PostgreSQL вычислял его целиком в отдельную
+      временную структуру и только потом применял внешние условия. Если снаружи стоял фильтр по 60 строкам из
+      300 000 — сначала считались все 300 000. С 12-й версии нерекурсивный CTE, который используется <strong>один
+      раз</strong>, просто подставляется в запрос (inlining), и условия проталкиваются внутрь. Проверка на
+      таблице <code>big_orders</code> (300 000 строк):</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- 1. обычный CTE: используется один раз → инлайнится
+WITH big AS (SELECT * FROM big_orders)
+SELECT count(*) FROM big WHERE customer_id = 42;
+
+-- 2. тот же CTE, но материализация включена принудительно
+WITH big AS MATERIALIZED (SELECT * FROM big_orders)
+SELECT count(*) FROM big WHERE customer_id = 42;</code></pre>
+      <p class="cap">Планы: в первом случае условие уехало в индекс, во втором — считается вся таблица</p>
+      <pre><code class="language-text">-- 1. inlined
+ Aggregate (actual time=0.073..0.080 rows=1 loops=1)
+   -&gt;  Index Only Scan using big_orders_customer_id_created_at_idx on big_orders
+         Index Cond: (customer_id = 42)
+         Heap Fetches: 0
+ Execution Time: 0.185 ms
+
+-- 2. MATERIALIZED
+ Aggregate (actual time=92.306..92.307 rows=1 loops=1)
+   CTE big
+     -&gt;  Seq Scan on big_orders (actual time=0.011..20.075 rows=300000 loops=1)
+   -&gt;  CTE Scan on big (actual time=0.031..92.232 rows=60 loops=1)
+         Filter: (customer_id = 42)
+         Rows Removed by Filter: 299940
+ Execution Time: 95.220 ms</code></pre>
+    </div>
+    <p>Разница — 500 раз: 0,185 мс против 95 мс. <code>NOT MATERIALIZED</code> возвращает поведение
+      «инлайнить» (0,097 мс). А <code>MATERIALIZED</code> нужен ровно в одном случае: когда вы <em>хотите</em>
+      посчитать дорогой шаг один раз и не дать планировщику продублировать вычисление.</p>
+    <div class="box note">
+      <span class="t">Когда CTE материализуется сам</span>
+      <ul>
+        <li>на него ссылаются <strong>дважды и больше</strong> — тогда вычисление одно, а результат читается
+          дважды;</li>
+        <li>внутри есть <strong>изменение данных</strong> (<code>INSERT</code>/<code>UPDATE</code>/<code>DELETE
+          ... RETURNING</code>) — такие CTE материализуются всегда;</li>
+        <li>указано <code>MATERIALIZED</code>;</li>
+        <li>CTE рекурсивный.</li>
+      </ul>
+      <p>Во всех остальных случаях PostgreSQL 12+ инлайнит.</p>
+    </div>
+
+    <h3>CTE, использованный дважды: считается один раз</h3>
+    <p>Если на CTE ссылаются две части запроса, PostgreSQL материализует его сам — и это уже экономия, а не
+      «забор»:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH s AS (SELECT customer_id, sum(amount) AS t FROM big_orders GROUP BY customer_id)
+SELECT (SELECT count(*) FROM s) AS groups, (SELECT max(t) FROM s) AS best;</code></pre>
+      <p class="cap">План: <code>HashAggregate</code> выполнен один раз, <code>CTE Scan</code> — дважды</p>
+      <pre><code class="language-text"> Result (actual time=115.003..115.119 rows=1 loops=1)
+   CTE s
+     -&gt;  Finalize HashAggregate (actual time=111.086..112.784 rows=5000 loops=1)
+           Group Key: big_orders.customer_id
+   InitPlan 2 (returns $2)
+     -&gt;  Aggregate (actual time=114.150..114.150 rows=1 loops=1)
+           -&gt;  CTE Scan on s (actual time=111.089..113.936 rows=5000 loops=1)
+   InitPlan 3 (returns $3)
+     -&gt;  Aggregate (actual time=0.847..0.847 rows=1 loops=1)
+           -&gt;  CTE Scan on s s_1 (actual time=0.000..0.359 rows=5000 loops=1)
+ Execution Time: 116.169 ms</code></pre>
+    </div>
+    <p>Тот же результат двумя независимыми подзапросами — агрегат считается дважды:
+      <code>InitPlan 1</code> 58 мс и <code>InitPlan 2</code> 82 мс, итого 141 мс против 116. Выигрыш здесь
+      скромный (агрегат по 300 000 строк дешёвый), но правило важное: <strong>чем дороже шаг, тем выгоднее
+      вынести его в CTE, на который ссылаются несколько раз</strong>. Обратная сторона — материализованный CTE
+      нельзя «дофильтровать» снаружи: все строки уже посчитаны.</p>
+    <p>А вот агрегат внутри CTE, использованного один раз, инлайнится — и внешнее условие проталкивается внутрь
+      агрегата:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH totals AS (
+    SELECT customer_id, sum(amount) AS t FROM big_orders GROUP BY customer_id
+)
+SELECT * FROM totals WHERE customer_id = 42;</code></pre>
+      <p class="cap">План: <code>Index Cond</code> — фильтр ушёл внутрь, агрегируются только 60 строк</p>
+      <pre><code class="language-text"> GroupAggregate (actual time=0.398..0.399 rows=1 loops=1)
+   -&gt;  Bitmap Heap Scan on big_orders (actual time=0.056..0.379 rows=60 loops=1)
+         Recheck Cond: (customer_id = 42)
+         -&gt;  Bitmap Index Scan on big_orders_customer_id_created_at_idx
+               Index Cond: (customer_id = 42)
+ Execution Time: 0.456 ms</code></pre>
+    </div>
+    <p>Это неочевидный, но важный факт для тех, кто привык к версиям до 12: «агрегат в CTE всё равно посчитает
+      всю таблицу» — уже неправда. Смотреть надо на план, а не на форму записи; если инлайнинг нежелателен,
+      <code>MATERIALIZED</code> его запретит.</p>
+
+    <h2>Рекурсивный CTE: иерархии и деревья</h2>
+    <p>Вторая большая задача, ради которой CTE незаменим, — обход иерархии: категории, подчинённость
+      сотрудников, дерево комментариев, граф связей. Устроен рекурсивный CTE всегда одинаково: <strong>якорь</strong>
+      (стартовые строки) <code>UNION ALL</code> <strong>рекурсивная часть</strong>, которая ссылается на сам CTE.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH RECURSIVE tree AS (
+    SELECT id, name, parent_id, 1 AS depth, name::text AS path   -- якорь: корни
+    FROM categories WHERE parent_id IS NULL
+  UNION ALL
+    SELECT c.id, c.name, c.parent_id, t.depth + 1,               -- шаг: дети найденных
+           t.path || ' &gt; ' || c.name
+    FROM categories c JOIN tree t ON c.parent_id = t.id
+)
+SELECT id, name, depth, path FROM tree ORDER BY path;</code></pre>
+      <p class="cap">Вывод: всё дерево с глубиной и путём от корня</p>
+      <pre><code class="language-text"> id |    name     | depth |                     path
+----+-------------+-------+-----------------------------------------------
+  1 | Электроника |     1 | Электроника
+  2 | Ноутбуки    |     2 | Электроника &gt; Ноутбуки
+  4 | Аксессуары  |     3 | Электроника &gt; Ноутбуки &gt; Аксессуары
+  6 | Зарядки     |     4 | Электроника &gt; Ноутбуки &gt; Аксессуары &gt; Зарядки
+  5 | Чехлы       |     4 | Электроника &gt; Ноутбуки &gt; Аксессуары &gt; Чехлы
+  3 | Телефоны    |     2 | Электроника &gt; Телефоны
+  7 | Смартфоны   |     3 | Электроника &gt; Телефоны &gt; Смартфоны
+(7 rows)</code></pre>
+    </div>
+    <p>Если нужен не весь лес, а поддерево, якорь просто меняется на нужный узел:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH RECURSIVE sub AS (
+    SELECT id, name, parent_id, 0 AS depth FROM categories WHERE id = 2
+  UNION ALL
+    SELECT c.id, c.name, c.parent_id, s.depth + 1
+    FROM categories c JOIN sub s ON c.parent_id = s.id)
+SELECT * FROM sub ORDER BY depth, id;</code></pre>
+      <p class="cap">Вывод: сама категория и все её потомки</p>
+      <pre><code class="language-text"> id |    name    | parent_id | depth
+----+------------+-----------+-------
+  2 | Ноутбуки   |         1 |     0
+  4 | Аксессуары |         2 |     1
+  5 | Чехлы      |         4 |     2
+  6 | Зарядки    |         4 |     2
+(4 rows)</code></pre>
+    </div>
+    <p>В плане рекурсия видна как <code>Recursive Union</code> и <code>WorkTable Scan</code> — второй узел
+      читает строки, добавленные на предыдущем шаге (в примере <code>loops=3</code>, по числу итераций):</p>
+    <div class="codewrap">
+      <pre><code class="language-text"> CTE Scan on sub (actual time=0.020..0.112 rows=4 loops=1)
+   CTE sub
+     -&gt;  Recursive Union (actual time=0.018..0.109 rows=4 loops=1)
+           -&gt;  Index Scan using categories_pkey on categories (rows=1)   -- якорь
+                 Index Cond: (id = 2)
+           -&gt;  Hash Join (actual time=0.023..0.023 rows=1 loops=3)       -- шаг
+                 Hash Cond: (c.parent_id = s.id)
+                 -&gt;  WorkTable Scan on sub s (rows=1 loops=3)             -- строки прошлого шага</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Цикл в данных: рекурсия не остановится сама</span>
+      <p>Если в иерархии есть кольцо (узел оказался потомком самого себя), запрос будет выполняться, пока не
+        кончится память или терпение. Демонстрация: три узла A → C → B → A.</p>
+      <pre><code class="language-sql">WITH RECURSIVE t AS (
+    SELECT id, name, parent_id, 1 AS step FROM cat_cycle WHERE id = 1
+  UNION ALL
+    SELECT c.id, c.name, c.parent_id, t.step + 1
+    FROM cat_cycle c JOIN t ON c.id = t.parent_id)
+SELECT * FROM t LIMIT 7;</code></pre>
+      <p class="cap">Вывод: одни и те же три строки по кругу (остановил только <code>LIMIT</code>)</p>
+      <pre><code class="language-text"> id | name | parent_id | step
+----+------+-----------+------
+  1 | A    |         3 |    1
+  3 | C    |         2 |    2
+  2 | B    |         1 |    3
+  1 | A    |         3 |    4
+  3 | C    |         2 |    5
+  2 | B    |         1 |    6
+  1 | A    |         3 |    7
+(7 rows)</code></pre>
+    </div>
+    <p>Лечится тремя способами, и все три стоит знать:</p>
+    <ol>
+      <li><strong><code>UNION</code> вместо <code>UNION ALL</code></strong> — повторяющиеся строки отбрасываются,
+        и цикл обрывается на третьем шаге (проверено: вывод — ровно 3 строки: 1, 2, 3). Минус — дедупликация
+        стоит денег на больших выборках.</li>
+      <li><strong><code>CYCLE</code></strong> (стандарт SQL:2011, в PostgreSQL — с 14-й версии): рекурсия
+        останавливается, а строка, замкнувшая круг, помечается флагом и получает путь.</li>
+      <li><strong>Ограничение глубины в самом запросе</strong>: <code>WHERE step &lt; 100</code> в рекурсивной
+        части. Грубо, но предсказуемо.</li>
+    </ol>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH RECURSIVE t AS (
+    SELECT id, name, parent_id FROM cat_cycle WHERE id = 1
+  UNION ALL
+    SELECT c.id, c.name, c.parent_id FROM cat_cycle c JOIN t ON c.id = t.parent_id)
+CYCLE id SET is_cycle USING path
+SELECT id, name, path, is_cycle FROM t;</code></pre>
+      <p class="cap">Вывод: рекурсия остановилась сама, последняя строка помечена как цикл</p>
+      <pre><code class="language-text"> id | name |       path        | is_cycle
+----+------+-------------------+----------
+  1 | A    | {(1)}             | f
+  3 | C    | {(1),(3)}         | f
+  2 | B    | {(1),(3),(2)}     | f
+  1 | A    | {(1),(3),(2),(1)} | t
+(4 rows)</code></pre>
+    </div>
+    <p>В отличие от MySQL и SQL Server, у PostgreSQL <strong>нет</strong> настройки «глубина рекурсии по
+      умолчанию»: <code>WITH RECURSIVE</code> без условий остановки будет идти, пока хватает ресурсов. В MySQL 8
+      предел задаёт <code>cte_max_recursion_depth</code> (по умолчанию 1000), в SQL Server —
+      <code>OPTION (MAXRECURSION n)</code> (по умолчанию 100). Это различие — хороший ответ на вопрос «чем
+      отличается рекурсивный CTE в PostgreSQL и MSSQL».</p>
+
+    <h2>CTE с изменением данных: outbox одним запросом</h2>
+    <p>В PostgreSQL <code>WITH</code> может содержать <code>INSERT</code>, <code>UPDATE</code> или
+      <code>DELETE</code> с <code>RETURNING</code>, и это даёт очень полезную конструкцию: изменить строку и тут
+      же положить событие в outbox — атомарно, в рамках одного оператора (подробно про сам паттерн — глава 31):</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH changed AS (
+    UPDATE cart SET status = 'paid' WHERE id = 1 RETURNING id, status
+)
+INSERT INTO outbox (payload)
+SELECT jsonb_build_object('cart', id, 'status', status) FROM changed
+RETURNING id, payload;</code></pre>
+      <p class="cap">Вывод: строка обновлена и событие вставлено одним запросом</p>
+      <pre><code class="language-text"> id |            payload
+----+-------------------------------
+  1 | {"cart": 1, "status": "paid"}
+(1 row)
+
+INSERT 0 1</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Две особенности DML-CTE, о которых легко забыть</span>
+      <ul>
+        <li><strong>Он выполняется всегда.</strong> Даже если к CTE никто не обращается, изменение произойдёт —
+          проверено: <code>UPDATE</code> внутри невыбранного CTE перевёл заказ в <code>paid</code>, а внешний
+          <code>SELECT</code> просто посчитал строки. В отличие от обычного CTE, «лениво» такие вещи не
+          работают.</li>
+        <li><strong>Одну и ту же строку нельзя менять дважды в одном запросе.</strong> Два CTE с
+          <code>UPDATE ... WHERE id = 3</code> не дают ошибки, но второй молча обновит 0 строк: в прогоне первый
+          CTE вернул 1 строку, второй — 0, а в таблице осталось значение первого (<code>x</code>). Документация
+          предупреждает, что «какая из правок победит» не гарантировано, поэтому такую схему нельзя использовать
+          в коде вовсе.</li>
+      </ul>
+    </div>
+
+    <h2>CTE в MySQL 8, SQL Server и Oracle</h2>
+    <table>
+      <thead><tr><th>Что</th><th>PostgreSQL</th><th>MySQL 8</th><th>SQL Server</th><th>Oracle</th></tr></thead>
+      <tbody>
+        <tr><td><code>WITH x AS (...)</code></td><td>есть</td><td>есть (8.0+)</td><td>есть</td><td>есть</td></tr>
+        <tr><td>Слово <code>RECURSIVE</code></td><td>не обязательно</td><td>обязательно</td><td>не пишется</td>
+          <td>не пишется</td></tr>
+        <tr><td>Предел рекурсии</td><td>нет; нужен свой счётчик или <code>CYCLE</code></td>
+          <td><code>cte_max_recursion_depth</code> = 1000</td><td><code>MAXRECURSION</code> = 100</td>
+          <td>ошибка <code>ORA-32044</code> при зацикливании</td></tr>
+        <tr><td><code>MATERIALIZED</code> / <code>NOT MATERIALIZED</code></td><td>есть (12+)</td><td>нет</td>
+          <td>нет</td><td>нет (только хинт <code>/*+ materialize */</code>)</td></tr>
+        <tr><td>Изменение данных внутри CTE</td><td>есть, с <code>RETURNING</code></td><td>есть, без
+          <code>RETURNING</code></td><td>есть, с <code>OUTPUT</code></td><td>нет</td></tr>
+        <tr><td>Мелочь, на которой спотыкаются</td><td>—</td><td><code>WITH</code> без <code>RECURSIVE</code>
+          для рекурсии — ошибка</td><td>точка с запятой перед <code>WITH</code> обязательна
+          (<code>;WITH</code>)</td><td>свои правила обёртки <code>WITH</code> в
+          <code>INSERT</code></td></tr>
+      </tbody>
+    </table>
+    <p>Практический вывод для вакансии, где перечислены PostgreSQL, MySQL и MS SQL: <em>структуру</em> запроса
+      (CTE + оконные функции) можно переносить между ними почти без правок, а вот <em>оптимизационные
+      подсказки</em> и способ фильтрации по окну придётся менять — и это нормальный ответ на интервью.</p>
+
+    <div class="box gold">
+      <span class="t">★ Чек-лист: CTE, подзапрос или временная таблица</span>
+      <ol>
+        <li><strong>Шаг используется больше одного раза?</strong> — берите CTE: посчитается один раз.</li>
+        <li><strong>Снаружи нужен фильтр по дорогому шагу?</strong> — проверьте план: в PG 12+ CTE инлайнится, и
+          условие проталкивается внутрь. Увидели <code>CTE Scan</code> с большим <code>rows</code> — уберите
+          <code>MATERIALIZED</code>.</li>
+        <li><strong>Это иерархия?</strong> — рекурсивный CTE, и обязательно защита от цикла (<code>CYCLE</code>
+          или счётчик глубины).</li>
+        <li><strong>Результат нужен нескольким запросам или индексу?</strong> — временная таблица
+          (<code>CREATE TEMP TABLE ... ON COMMIT DROP</code>).</li>
+        <li><strong>Нужно «топ-N в группе»?</strong> — <code>ROW_NUMBER()</code> в CTE и фильтр снаружи (глава
+          34).</li>
+      </ol>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что спросят и как отвечать</span>
+      <ol>
+        <li><strong>«Чем CTE отличается от подзапроса?»</strong> — читаемостью и переиспользованием; до PG 12
+          CTE всегда материализовался и был «забором» для оптимизаций, сейчас нерекурсивный CTE с одним
+          использованием инлайнится, и это видно по плану.</li>
+        <li><strong>«Что такое рекурсивный CTE и где предел?»</strong> — якорь + рекурсивная часть через
+          <code>UNION ALL</code>; в PostgreSQL своего предела нет (нужен <code>CYCLE</code> или счётчик), в
+          MySQL — 1000, в SQL Server — 100 по умолчанию.</li>
+        <li><strong>«Почему запрос с CTE стал медленнее после переписывания?»</strong> — скорее всего, CTE
+          материализовался (используется дважды или указан <code>MATERIALIZED</code>), и внешний фильтр
+          применяется после расчёта всех строк.</li>
+        <li><strong>«Можно ли в CTE делать <code>UPDATE</code>?»</strong> — в PostgreSQL да, с
+          <code>RETURNING</code>; это основа transactional outbox. Дважды одну строку менять нельзя.</li>
+      </ol>
+    </div>
+
+    <div class="pager">
+      <a href="sql34-window-functions.html">← <span class="sp">Глава 34. Оконные функции: OVER, RANK, LAG и рамки</span></a>
+      <a href="sql36-interview.html"><span class="sp">Глава 36. Как отвечать на интервью по SQL</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
+
+

@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 34 · Оконные функции</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/sql.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="sql.html">← Оглавление</a>
+  <span class="booktitle">SQL и PostgreSQL</span>
+  <a href="sql35-cte.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">SQL · Часть IX · Практика</div>
+    <h1>Глава 34. Оконные функции: OVER, RANK, LAG и рамки</h1>
+    <p class="sublead">Как посчитать по группе и при этом <em>не схлопывать</em> строки: нумерация, ранги,
+      предыдущее значение, накопительный итог и топ-N в группе. Все выводы в главе получены на живой базе
+      PostgreSQL 16.15.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Задача, которую не решает <code>GROUP BY</code></h2>
+    <p>В отчёте нужны одновременно строка заказа и сумма по клиенту: «этот заказ на 900 и всего у клиента
+      2850». <code>GROUP BY</code> так не умеет — он <em>схлопывает</em> строки, и детали исчезают:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT customer_id, sum(amount) AS total
+FROM orders WHERE status = 'paid'
+GROUP BY customer_id ORDER BY customer_id;</code></pre>
+      <p class="cap">Вывод: одна строка на клиента, заказы потеряны</p>
+      <pre><code class="language-text"> customer_id |  total
+-------------+---------
+           1 | 2850.00
+           2 | 3100.00
+           3 | 1700.00
+           4 | 3000.00
+           5 | 2500.00
+(5 rows)</code></pre>
+    </div>
+    <p>Оконная функция считает ту же сумму, но <strong>возвращает её в каждую строку</strong>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT id, customer_id, amount,
+       sum(amount) OVER (PARTITION BY customer_id) AS customer_total
+FROM orders WHERE status = 'paid'
+ORDER BY customer_id, id;</code></pre>
+      <p class="cap">Вывод: строк 11 — столько же, сколько было, плюс колонка с итогом по клиенту</p>
+      <pre><code class="language-text"> id  | customer_id | amount  | customer_total
+-----+-------------+---------+----------------
+ 101 |           1 | 1500.00 |        2850.00
+ 102 |           1 |  900.00 |        2850.00
+ 108 |           1 |  450.00 |        2850.00
+ 103 |           2 | 2000.00 |        3100.00
+ 112 |           2 | 1100.00 |        3100.00
+ 104 |           3 |  700.00 |        1700.00
+ 105 |           3 |  700.00 |        1700.00
+ 114 |           3 |  300.00 |        1700.00
+ 107 |           4 | 3000.00 |        3000.00
+ 110 |           5 |  700.00 |        2500.00
+ 111 |           5 | 1800.00 |        2500.00
+(11 rows)</code></pre>
+    </div>
+    <p>Формулировка, которую стоит запомнить: <strong>оконная функция — это агрегат, который считается по
+      набору строк («окну»), но результат попадает в каждую строку этого окна</strong>. Отсюда второе название —
+      аналитические функции.</p>
+
+    <h2>Синтаксис: три части <code>OVER</code></h2>
+    <div class="codewrap">
+      <pre><code class="language-sql">функция(...) OVER (
+    PARTITION BY customer_id      -- 1. по каким группам считать (не обязательно)
+    ORDER BY created_at           -- 2. порядок внутри группы (нужен рангам и LAG)
+    ROWS BETWEEN ... AND ...      -- 3. какие строки окна попадают в расчёт (рамка)
+)</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Часть</th><th>Что делает</th><th>Если не указать</th></tr></thead>
+      <tbody>
+        <tr><td><code>PARTITION BY</code></td><td>делит строки на независимые группы; счёт внутри каждой
+          свой</td><td>всё множество строк — одно окно</td></tr>
+        <tr><td><code>ORDER BY</code></td><td>задаёт порядок внутри окна: без него нет смысла у
+          <code>RANK</code>, <code>LAG</code>, накопительного итога</td><td>порядок не определён; для агрегатов
+          окно = вся группа</td></tr>
+        <tr><td>рамка</td><td>какие строки относительно текущей входят в расчёт</td><td>с
+          <code>ORDER BY</code> — «от начала до текущей включительно»; без него — вся группа</td></tr>
+      </tbody>
+    </table>
+    <p>Важно, <em>когда</em> считаются окна. Логический порядок выполнения запроса: <code>FROM</code> →
+      <code>WHERE</code> → <code>GROUP BY</code> → <code>HAVING</code> → <strong>оконные функции</strong> →
+      <code>SELECT</code> → <code>DISTINCT</code> → <code>ORDER BY</code> → <code>LIMIT</code>. Из этого следуют
+      два практических вывода: окно видит результат <code>GROUP BY</code>/<code>HAVING</code>, но ничего не знает
+      про <code>LIMIT</code>; и фильтровать по окну в <code>WHERE</code> нельзя — проверено:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT id FROM orders WHERE row_number() OVER (ORDER BY id) &lt;= 3;</code></pre>
+      <p class="cap">Вывод</p>
+      <pre><code class="language-text">ERROR:  window functions are not allowed in WHERE
+LINE 1: SELECT id FROM orders WHERE row_number() OVER (ORDER BY id) ...
+                                    ^</code></pre>
+    </div>
+    <p>Причина ровно та, что описана выше: <code>WHERE</code> выполняется до окон. В <code>SELECT</code> и в
+      <code>ORDER BY</code> — можно (там окна уже посчитаны). А чтобы отобрать строки по номеру, нужен
+      подзапрос или CTE — об этом глава 35.</p>
+
+    <h2><code>ROW_NUMBER</code>, <code>RANK</code>, <code>DENSE_RANK</code></h2>
+    <p>В данных специально есть три заказа на 700 — «ничья», на которой три функции расходятся:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT id, amount,
+       row_number() OVER (ORDER BY amount DESC) AS rn,   -- просто номер строки
+       rank()       OVER (ORDER BY amount DESC) AS rnk,  -- место в соревновании
+       dense_rank() OVER (ORDER BY amount DESC) AS drnk  -- место без пропусков
+FROM orders WHERE status = 'paid'
+ORDER BY amount DESC, id;</code></pre>
+      <p class="cap">Вывод: после трёх «семисоток» <code>rank</code> прыгает через 2 номера, <code>dense_rank</code>
+        — нет</p>
+      <pre><code class="language-text"> id  | amount  | rn | rnk | drnk
+-----+---------+----+-----+------
+ 107 | 3000.00 |  1 |   1 |    1
+ 103 | 2000.00 |  2 |   2 |    2
+ 111 | 1800.00 |  3 |   3 |    3
+ 101 | 1500.00 |  4 |   4 |    4
+ 112 | 1100.00 |  5 |   5 |    5
+ 102 |  900.00 |  6 |   6 |    6
+ 104 |  700.00 |  9 |   7 |    7
+ 105 |  700.00 |  7 |   7 |    7
+ 110 |  700.00 |  8 |   7 |    7
+ 108 |  450.00 | 10 |  10 |    8
+ 114 |  300.00 | 11 |  11 |    9
+(11 rows)</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Функция</th><th>Ничьи (700, 700, 700)</th><th>Когда нужна</th></tr></thead>
+      <tbody>
+        <tr><td><code>row_number()</code></td><td>7, 8, 9 — произвольно</td><td>нужна ровно одна строка из
+          группы: дедупликация, «последний заказ», строгий топ-N</td></tr>
+        <tr><td><code>rank()</code></td><td>7, 7, 7; следующий получает 10</td><td>места в рейтинге, где пропуск
+          номеров — норма (как в спорте)</td></tr>
+        <tr><td><code>dense_rank()</code></td><td>7, 7, 7; следующий получает 8</td><td>«сколько разных значений
+          больше моего» — плотные уровни</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn">
+      <span class="t">Ловушка: <code>row_number()</code> без тай-брейкера недетерминирован</span>
+      <p>Посмотрите на колонку <code>rn</code>: у трёх строк с суммой 700 номера идут 9, 7, 8 — порядок среди
+        «ровесников» произвольный. Это не случайность одного запуска: при повторном прогоне того же отчёта (после
+        добавления одной строки и смены плана) <code>104</code> получил 8, а <code>110</code> — 9. Спецификация
+        SQL не определяет порядок равных строк, и PostgreSQL не обещает сохранить его между планами.</p>
+      <p>Лечится добавлением уникального поля в <code>ORDER BY</code> — тогда результат воспроизводим:</p>
+      <pre><code class="language-sql">row_number() OVER (ORDER BY amount DESC, id)   -- id делает порядок полным</code></pre>
+      <p>Проверка: для тех же трёх строк номера всегда 104 → 1, 105 → 2, 110 → 3. То же правило важно и в
+        пагинации: «страница 2» без полного <code>ORDER BY</code> может показать те же строки, что и
+        «страница 1».</p>
+    </div>
+
+    <h2><code>LAG</code> и <code>LEAD</code>: соседние строки без self-join</h2>
+    <p>Раньше «предыдущее значение» доставали соединением таблицы с собой по «id минус один». Оконные функции
+      делают это одним проходом: <code>lag</code> смотрит на строку выше, <code>lead</code> — на строку ниже.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT customer_id, created_at, amount,
+       lag(amount) OVER w  AS prev_amount,                  -- сумма предыдущего заказа
+       amount - lag(amount) OVER w AS delta,                -- изменение к предыдущему
+       lead(created_at) OVER w - created_at AS days_to_next -- сколько дней до следующего
+FROM orders WHERE status = 'paid'
+WINDOW w AS (PARTITION BY customer_id ORDER BY created_at)  -- одно окно на три функции
+ORDER BY customer_id, created_at;</code></pre>
+      <p class="cap">Вывод: у первой строки каждой группы предыдущего нет — там <code>NULL</code></p>
+      <pre><code class="language-text"> customer_id | created_at | amount  | prev_amount |  delta  | days_to_next
+-------------+------------+---------+-------------+---------+--------------
+           1 | 2026-01-05 | 1500.00 |             |         |           14
+           1 | 2026-01-19 |  900.00 |     1500.00 | -600.00 |           44
+           1 | 2026-03-04 |  450.00 |      900.00 | -450.00 |
+           2 | 2026-01-20 | 2000.00 |             |         |           80
+           2 | 2026-04-10 | 1100.00 |     2000.00 | -900.00 |
+           3 | 2026-02-02 |  700.00 |             |         |            3
+           3 | 2026-02-05 |  300.00 |      700.00 | -400.00 |            6
+           3 | 2026-02-11 |  700.00 |      300.00 |  400.00 |
+           4 | 2026-03-01 | 3000.00 |             |         |
+           5 | 2026-03-20 |  700.00 |             |         |           13
+           5 | 2026-04-02 | 1800.00 |      700.00 | 1100.00 |
+(11 rows)</code></pre>
+    </div>
+    <p><code>days_to_next</code> — просто разность дат (<code>date - date</code> даёт целое число дней). Если
+      <code>NULL</code> в первой строке неудобен, у <code>lag</code>/<code>lead</code> есть третий аргумент —
+      значение по умолчанию: <code>lag(amount, 1, 0)</code> вернёт <code>0</code> вместо <code>NULL</code>
+      (проверено: у первого заказа клиента 3 вышло <code>0</code>, у остальных — предыдущая сумма).</p>
+
+    <h2>Рамка: <code>ROWS</code> против <code>RANGE</code></h2>
+    <p>Рамка отвечает на вопрос «какие строки окна участвуют в расчёте для <em>текущей</em> строки». Если
+      написать <code>ORDER BY amount</code> и не написать рамку, PostgreSQL подставит
+      <code>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code> — и это <strong>не то же самое</strong>, что
+      <code>ROWS</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT id, amount,
+       sum(amount) OVER (ORDER BY amount) AS default_frame,
+       sum(amount) OVER (ORDER BY amount ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rows_frame
+FROM orders WHERE status = 'paid'
+ORDER BY amount, id;</code></pre>
+      <p class="cap">Вывод: на трёх «семисотках» рамка по умолчанию даёт одно и то же число, а <code>ROWS</code> —
+        разные</p>
+      <pre><code class="language-text"> id  | amount  | default_frame | rows_frame
+-----+---------+---------------+------------
+ 114 |  300.00 |        300.00 |     300.00
+ 108 |  450.00 |        750.00 |     750.00
+ 104 |  700.00 |       2850.00 |    2150.00
+ 105 |  700.00 |       2850.00 |    1450.00
+ 110 |  700.00 |       2850.00 |    2850.00
+ 102 |  900.00 |       3750.00 |    3750.00
+ 112 | 1100.00 |       4850.00 |    4850.00
+ 101 | 1500.00 |       6350.00 |    6350.00
+ 111 | 1800.00 |       8150.00 |    8150.00
+ 103 | 2000.00 |      10150.00 |   10150.00
+ 107 | 3000.00 |      13150.00 |   13150.00
+(11 rows)</code></pre>
+    </div>
+    <p>Разбор: <code>RANGE</code> работает с <em>значениями</em> ключа сортировки, поэтому «текущая строка» для
+      него — это все строки с суммой 700 сразу: каждая из трёх видит накопленные 2850. <code>ROWS</code> считает
+      <em>физические</em> строки: первая «семисотка» видит 750 + 700 + 700 = 2150, вторая — 1450, третья — 2850.
+      Именно поэтому для накопительного итога рамку пишут явно.</p>
+    <table>
+      <thead><tr><th>Рамка</th><th>Смысл</th><th>Типичное применение</th></tr></thead>
+      <tbody>
+        <tr><td><code>ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code></td><td>все строки от начала
+          раздела до текущей включительно</td><td>накопительный итог, «бегущее» сальдо</td></tr>
+        <tr><td><code>ROWS BETWEEN 2 PRECEDING AND CURRENT ROW</code></td><td>текущая и две предыдущие</td>
+          <td>скользящее среднее по последним N записям</td></tr>
+        <tr><td><code>RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW</code></td><td>все строки, чей
+          ключ попадает в интервал</td><td>«за последние 7 дней», «за час» — по времени, а не по числу
+          строк</td></tr>
+        <tr><td>без рамки</td><td>с <code>ORDER BY</code> — <code>RANGE ... CURRENT ROW</code>; без него — вся
+          группа</td><td>агрегат по всей группе (как <code>PARTITION BY</code> без
+          <code>ORDER BY</code>)</td></tr>
+      </tbody>
+    </table>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT customer_id, created_at, amount,
+       sum(amount) OVER (PARTITION BY customer_id ORDER BY created_at
+                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running,
+       sum(amount) OVER (PARTITION BY customer_id ORDER BY created_at
+                         RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW) AS last_7d
+FROM orders WHERE status = 'paid' AND customer_id = 3
+ORDER BY created_at;</code></pre>
+      <p class="cap">Вывод: <code>running</code> растёт, <code>last_7d</code> — сумма за 7 календарных дней</p>
+      <pre><code class="language-text"> customer_id | created_at | amount | running | last_7d
+-------------+------------+--------+---------+---------
+           3 | 2026-02-02 | 700.00 |  700.00 |  700.00
+           3 | 2026-02-05 | 300.00 | 1000.00 | 1000.00
+           3 | 2026-02-11 | 700.00 | 1700.00 | 1000.00
+(3 rows)</code></pre>
+    </div>
+    <p>Третья строка — самое интересное: 11 февраля в окно попадают 5 и 11 февраля (300 + 700 = 1000), а заказ
+      от 2 февраля уже выпал, хотя физически он «две строки назад». <code>ROWS 2 PRECEDING</code> здесь дал бы
+      1700 — и это была бы ошибка отчёта.</p>
+    <div class="box warn">
+      <span class="t">Три ловушки рамки</span>
+      <ul>
+        <li><strong><code>ROWS</code> без <code>ORDER BY</code> выполняется, но результат случайный.</strong>
+          Запрос <code>sum(amount) OVER (ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)</code> не падает — PostgreSQL
+          просто берёт строки в том порядке, в каком их отдал план (в прогоне — по <code>id</code>: 1500, 2400,
+          4400…). Формально это «сумма текущей и двух предыдущих в произвольном порядке» — то есть бессмыслица,
+          которую легко принять за работающий отчёт.</li>
+        <li><strong><code>RANGE</code> с интервалом требует ровно одного ключа сортировки.</strong> На двух
+          колонках — ошибка (проверено):</li>
+      </ul>
+      <pre><code class="language-text">ERROR:  RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column</code></pre>
+      <ul>
+        <li><strong>Тип ключа должен поддерживать арифметику.</strong> Тот же <code>RANGE</code> по
+          <code>text</code> — тоже ошибка:</li>
+      </ul>
+      <pre><code class="language-text">ERROR:  RANGE with offset PRECEDING/FOLLOWING is not supported for column type text</code></pre>
+      <p>Выход для «7 дней по двум разрезам»: считать по дате (<code>date</code>/<code>timestamp</code>) и
+        добавлять вторую колонку в <code>PARTITION BY</code>, а не в <code>ORDER BY</code>.</p>
+    </div>
+
+    <h2>Топ-N в группе — самый частый вопрос на интервью</h2>
+    <p>«Покажи два самых крупных заказа каждого клиента» — учебниковая задача, и решается она ровно тем, что мы
+      только что прошли: нумерация внутри группы + фильтр по номеру в <em>обёртке</em>.</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH ranked AS (
+  SELECT customer_id, id, amount,
+         row_number() OVER (PARTITION BY customer_id ORDER BY amount DESC, id) AS rn
+  FROM orders WHERE status = 'paid'
+)
+SELECT customer_id, id, amount, rn
+FROM ranked WHERE rn &lt;= 2
+ORDER BY customer_id, rn;</code></pre>
+      <p class="cap">Вывод: по два заказа на клиента, у кого заказов меньше — столько, сколько есть</p>
+      <pre><code class="language-text"> customer_id | id  | amount  | rn
+-------------+-----+---------+----
+           1 | 101 | 1500.00 |  1
+           1 | 102 |  900.00 |  2
+           2 | 103 | 2000.00 |  1
+           2 | 112 | 1100.00 |  2
+           3 | 104 |  700.00 |  1
+           3 | 105 |  700.00 |  2
+           4 | 107 | 3000.00 |  1
+           5 | 111 | 1800.00 |  1
+           5 | 110 |  700.00 |  2
+(9 rows)</code></pre>
+    </div>
+    <p>Обратите внимание на клиента 3: у него три заказа по 700, 700 и 300 — в топ попали две «семисотки», и
+      выбор между 104 и 105 сделан тай-брейкером <code>id</code>. Если нужно «все, кто делит второе место», берут
+      <code>rank()</code> вместо <code>row_number()</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH ranked AS (
+  SELECT id, amount, rank() OVER (ORDER BY amount DESC) AS r
+  FROM orders WHERE status = 'paid'
+)
+SELECT id, amount, r FROM ranked WHERE r &lt;= 2 ORDER BY r, id;</code></pre>
+      <p class="cap">Вывод: порог по рангу, а не по числу строк</p>
+      <pre><code class="language-text"> id  | amount  | r
+-----+---------+---
+ 107 | 3000.00 | 1
+ 103 | 2000.00 | 2
+(2 rows)</code></pre>
+    </div>
+    <p>И приятная деталь планировщика: если фильтр в обёртке — <code>rn = 1</code>, PostgreSQL добавляет к
+      <code>WindowAgg</code> условие <code>Run Condition</code> и прекращает считать окно внутри группы после
+      первой строки. На 3000 строках это дало 2 мс вместо полного прохода. То есть «топ-1 по группам» на больших
+      таблицах не так страшен, как выглядит.</p>
+
+    <h2>Дедупликация: <code>ROW_NUMBER</code> против <code>DISTINCT ON</code></h2>
+    <p>«Последний заказ каждого клиента» — та же схема, только нумеруем в обратном порядке и берём
+      <code>rn = 1</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">WITH numbered AS (
+  SELECT id, customer_id, created_at, amount,
+         row_number() OVER (PARTITION BY customer_id ORDER BY created_at DESC, id DESC) AS rn
+  FROM orders
+)
+SELECT customer_id, id, created_at, amount FROM numbered WHERE rn = 1 ORDER BY customer_id;</code></pre>
+      <p class="cap">Вывод (у клиента 5 последний заказ — черновик с пустой суммой)</p>
+      <pre><code class="language-text"> customer_id | id  | created_at | amount
+-------------+-----+------------+---------
+           1 | 108 | 2026-03-04 |  450.00
+           2 | 112 | 2026-04-10 | 1100.00
+           3 | 105 | 2026-02-11 |  700.00
+           4 | 107 | 2026-03-01 | 3000.00
+           5 | 113 | 2026-04-15 |
+(5 rows)</code></pre>
+    </div>
+    <p>В PostgreSQL есть короткая альтернатива — <code>DISTINCT ON</code>. Результат тот же, запись короче, но
+      работает она только там, где <code>ORDER BY</code> начинается с колонок из <code>DISTINCT ON</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT DISTINCT ON (customer_id) customer_id, id, created_at, amount
+FROM orders
+ORDER BY customer_id, created_at DESC, id DESC;</code></pre>
+      <p class="cap">План: сортировка + <code>Unique</code>, который оставляет первую строку каждой группы</p>
+      <pre><code class="language-text"> Unique (actual time=0.021..0.024 rows=5 loops=1)
+   ->  Sort (actual time=0.021..0.022 rows=14 loops=1)
+         Sort Key: customer_id, created_at DESC, id DESC
+         Sort Method: quicksort  Memory: 25kB
+         ->  Seq Scan on orders (actual time=0.003..0.004 rows=14 loops=1)
+ Execution Time: 0.041 ms</code></pre>
+    </div>
+    <table>
+      <thead><tr><th></th><th><code>ROW_NUMBER</code> в подзапросе</th><th><code>DISTINCT ON</code></th></tr></thead>
+      <tbody>
+        <tr><td>Переносимость</td><td>стандарт SQL, работает везде</td><td>только PostgreSQL</td></tr>
+        <tr><td>Где фильтровать</td><td>снаружи: <code>WHERE rn = 1</code></td><td>условия — в
+          <code>WHERE</code></td></tr>
+        <tr><td>Требования</td><td>аккуратный <code>ORDER BY</code> внутри окна</td><td><code>ORDER BY</code>
+          обязан начинаться с колонок <code>DISTINCT ON</code></td></tr>
+        <tr><td>Читаемость</td><td>многословно, зато видно «номер строки»</td><td>короче, но легко забыть
+          тай-брейкер</td></tr>
+      </tbody>
+    </table>
+    <p>Про тай-брейкер: в примере стоит <code>id DESC</code> не для красоты. Если у клиента два заказа в один
+      день, без него «последний» будет выбран произвольно — та же проблема, что с <code>row_number()</code>.</p>
+
+    <h2>Имя окна и «мелочи», которые экономят время</h2>
+    <p>Если несколько функций считаются по одному окну, его можно назвать через <code>WINDOW</code> — короче и
+      меньше шансов, что одно окно случайно отличается от другого:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">SELECT id, customer_id, created_at,
+       row_number() OVER w AS rn,
+       sum(amount)  OVER w AS running
+FROM orders WHERE status = 'paid'
+WINDOW w AS (PARTITION BY customer_id ORDER BY created_at
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ORDER BY customer_id, created_at;</code></pre>
+      <p class="cap">Вывод (первые строки; всего 11) — <code>rn</code> и <code>running</code> считаются по одному
+        окну</p>
+      <pre><code class="language-text"> id  | customer_id | created_at | rn | running
+-----+-------------+------------+----+---------
+ 101 |           1 | 2026-01-05 |  1 | 1500.00
+ 102 |           1 | 2026-01-19 |  2 | 2400.00
+ 108 |           1 | 2026-03-04 |  3 | 2850.00
+ 103 |           2 | 2026-01-20 |  1 | 2000.00
+ 112 |           2 | 2026-04-10 |  2 | 3100.00
+ …</code></pre>
+    </div>
+    <p>Ещё два приёма, которые пригождаются в API:</p>
+    <div class="codewrap">
+      <pre><code class="language-sql">-- сколько всего строк в выдаче, не делая отдельный count(*)
+SELECT customer_id, id, count(*) OVER () AS total_rows
+FROM orders WHERE status = 'paid' ORDER BY customer_id, id LIMIT 4;
+
+-- сколько заказов в каждом статусе внутри группы — без FILTER пришлось бы писать CASE
+SELECT customer_id,
+       count(*) FILTER (WHERE status = 'paid')    AS paid,
+       count(*) FILTER (WHERE status &lt;&gt; 'paid')   AS not_paid
+FROM orders GROUP BY customer_id ORDER BY customer_id;</code></pre>
+      <p class="cap">Вывод: <code>total_rows</code> одинаков в каждой строке и равен 11 — он посчитан до
+        <code>LIMIT</code>, зато без второго запроса</p>
+      <pre><code class="language-text"> customer_id | id  | total_rows
+-------------+-----+------------
+           1 | 101 |         11
+           1 | 102 |         11
+           1 | 108 |         11
+           2 | 103 |         11
+(4 rows)</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Подвох <code>count(*) OVER ()</code></span>
+      <p>Он читает <strong>все</strong> строки результата, даже если вы отдаёте 20. На маленькой таблице это
+        бесплатно, на отчёте в миллион строк — полный проход плюс сортировка. Для пагинации в API честнее
+        отдельный <code>count(*)</code> (или keyset-пагинация — о ней в главе про REST-контракт), а окно
+        оставить для «сколько строк было до <code>LIMIT</code>» на умеренных выборках.</p>
+    </div>
+
+    <h2>Производительность: что именно стоит окно</h2>
+    <p>Замеры на таблице <code>big_orders</code> (300 000 строк, 5000 клиентов, индекс
+      <code>(customer_id, created_at)</code>, <code>work_mem = 4MB</code>). Время — один прогон, поэтому важны не
+      абсолютные миллисекунды, а соотношения:</p>
+    <table>
+      <thead><tr><th>Задача</th><th>Как</th><th>План</th><th>Время</th></tr></thead>
+      <tbody>
+        <tr><td>Сумма по клиенту в каждой строке</td><td>окно <code>sum() OVER (PARTITION BY
+          customer_id)</code></td><td><code>WindowAgg</code> + <code>Index Scan</code></td><td>316 мс</td></tr>
+        <tr><td>То же</td><td><code>GROUP BY</code> + <code>JOIN</code></td><td><code>Hash Join</code> +
+          параллельный <code>Seq Scan</code></td><td>202 мс</td></tr>
+        <tr><td>Нумерация по индексированному полю</td><td><code>row_number() ... ORDER BY
+          created_at</code></td><td><code>WindowAgg</code> + <code>Index Scan</code>, сортировки нет</td>
+          <td>231 мс</td></tr>
+        <tr><td>Нумерация по неиндексированному полю</td><td><code>row_number() ... ORDER BY amount</code></td>
+          <td><code>Incremental Sort</code> (5000 групп)</td><td>332 мс</td></tr>
+        <tr><td>Последний заказ клиента</td><td>коррелированный подзапрос с <code>max()</code></td>
+          <td><code>SubPlan</code>, 300 000 обращений к индексу</td><td>1197 мс</td></tr>
+        <tr><td>То же</td><td><code>DISTINCT ON</code></td><td><code>Unique</code> +
+          <code>Incremental Sort</code></td><td>139 мс</td></tr>
+        <tr><td>То же</td><td><code>row_number()</code> в подзапросе</td><td><code>WindowAgg</code> с
+          <code>Run Condition</code></td><td>134 мс</td></tr>
+      </tbody>
+    </table>
+    <p>Три вывода, которые полезнее запомнить, чем цифры:</p>
+    <ul>
+      <li><strong>Окно требует упорядоченного входа.</strong> Планировщик либо берёт индекс, дающий нужный
+        порядок (<code>WindowAgg</code> поверх <code>Index Scan</code>), либо сортирует. Именно поэтому «окно
+        против <code>GROUP BY</code> + <code>JOIN</code>» — не всегда в пользу окна: агрегату порядок не нужен,
+        и он спокойно идёт параллельно.</li>
+      <li><strong>Частичный порядок дешевле полного.</strong> <code>Incremental Sort</code> в плане означает:
+        данные уже отсортированы по <code>customer_id</code> (префикс индекса), остаётся досортировать внутри
+        каждой из 5000 групп — по 26 кБ памяти на группу. А полная сортировка 300 000 строк в те же 4 МБ не
+        влезла: <code>Sort Method: external merge  Disk: 6488kB</code>, 282 мс и запись во временные файлы
+        (<code>temp written=815</code>). Это тот же <code>work_mem</code>, что разбирался в главе 20.</li>
+      <li><strong>Коррелированный подзапрос — это N обращений к индексу.</strong> 300 000 раз по 0,003 мс в
+        сумме дают секунду с лишним. Оконная функция превращает это в один проход: 134 мс, в девять раз
+        быстрее.</li>
+    </ul>
+    <p>Практические правила: держите индекс <code>(ключ раздела, ключ сортировки)</code>; фильтруйте строки в
+      <code>WHERE</code> до окна (окно по 300 000 строкам, из которых нужны 100, — это оплаченная впустую
+      сортировка); не считайте окно «на всякий случай» в общем списке, если его колонка не отдаётся в ответе.</p>
+
+    <h2>То же самое в MySQL и MS SQL Server</h2>
+    <p>Синтаксис <code>OVER</code> стандартизован, поэтому 90 % запросов переносятся без правок. Отличия — в
+      деталях, и именно о них спрашивают, когда в вакансии перечислены три СУБД:</p>
+    <table>
+      <thead><tr><th>Возможность</th><th>PostgreSQL</th><th>MySQL 8</th><th>MS SQL Server</th></tr></thead>
+      <tbody>
+        <tr><td><code>OVER (PARTITION BY ... ORDER BY ...)</code>, <code>ROW_NUMBER</code>, <code>RANK</code>,
+          <code>LAG</code></td><td>есть</td><td>есть (8.0+)</td><td>есть</td></tr>
+        <tr><td>Рамки <code>ROWS</code></td><td>есть</td><td>есть</td><td>есть (с 2012)</td></tr>
+        <tr><td>Рамки <code>RANGE</code> с интервалом</td><td>есть</td><td>ограниченно</td><td>есть
+          (числа/даты)</td></tr>
+        <tr><td><code>GROUPS</code></td><td>есть (11+)</td><td>нет</td><td>нет</td></tr>
+        <tr><td><code>FILTER (WHERE ...)</code></td><td>есть</td><td>нет — <code>CASE</code> внутри
+          агрегата</td><td>нет — <code>CASE</code>/<code>IIF</code></td></tr>
+        <tr><td><code>DISTINCT ON</code></td><td>есть</td><td>нет</td><td>нет</td></tr>
+        <tr><td><code>QUALIFY</code> (фильтр по окну без подзапроса)</td><td>нет</td><td>нет</td><td>нет</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Про <code>QUALIFY</code> стоит помнить отдельно: он есть в Snowflake, BigQuery и DuckDB, а в трёх
+      «наших» СУБД его нет — значит, топ-N везде пишется через подзапрос/CTE, как в примерах выше. Это,
+      кстати, хороший ответ на вопрос «как отфильтровать по <code>row_number</code>»: «никак в
+      <code>WHERE</code> — оборачиваю в CTE; <code>QUALIFY</code> есть только в облачных DWH».</p>
+    <div class="box warn">
+      <span class="t">Что не переносится и почему</span>
+      <ul>
+        <li><strong><code>::</code> и <code>LIMIT</code></strong> — только PostgreSQL. В MySQL тоже
+          <code>LIMIT</code>, в SQL Server — <code>TOP</code> или <code>OFFSET ... FETCH</code>.</li>
+        <li><strong><code>DISTINCT ON</code></strong> — замена в других СУБД: <code>ROW_NUMBER</code> в
+          подзапросе (универсально) или <code>CROSS APPLY</code> в SQL Server.</li>
+        <li><strong>Сортировка <code>NULL</code>.</strong> В PostgreSQL <code>DESC</code> по умолчанию ставит
+          <code>NULL</code> первыми, <code>ASC</code> — последними; в MySQL наоборот (<code>NULL</code> всегда
+          первыми при <code>ASC</code>). Поэтому в переносимом коде пишут <code>NULLS LAST</code> явно, а в
+          MySQL — эмуляцию <code>ORDER BY col IS NULL, col</code>.</li>
+        <li><strong><code>WITH</code> в SQL Server</strong> требует точки с запятой перед ним, если предыдущий
+          оператор не закрыт; рекурсию ограничивает <code>OPTION (MAXRECURSION 100)</code> по умолчанию.</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что спросят и как отвечать</span>
+      <ol>
+        <li><strong>«Чем оконная функция отличается от <code>GROUP BY</code>?»</strong> — <code>GROUP BY</code>
+          схлопывает строки в группы, окно считает по группе, но оставляет каждую строку. Внутри окно считается
+          после <code>WHERE</code>/<code>GROUP BY</code> и до <code>ORDER BY</code>/<code>LIMIT</code>, поэтому
+          в <code>WHERE</code> его не поставить.</li>
+        <li><strong>«<code>ROW_NUMBER</code>, <code>RANK</code> или <code>DENSE_RANK</code>?»</strong> —
+          <code>ROW_NUMBER</code> даёт уникальные номера (нужен, когда из группы берут одну строку),
+          <code>RANK</code> — места с пропусками после ничьих, <code>DENSE_RANK</code> — без пропусков. И
+          добавить: без тай-брейкера <code>ROW_NUMBER</code> недетерминирован.</li>
+        <li><strong>«Как достать топ-3 в каждой категории?»</strong> — <code>ROW_NUMBER() OVER (PARTITION BY
+          category ORDER BY value DESC)</code> в CTE, снаружи <code>WHERE rn &lt;= 3</code>. Порог по
+          <code>RANK</code>, если нужно «все, кто делит третье место».</li>
+        <li><strong>«Что такое рамка?»</strong> — набор строк окна относительно текущей: <code>ROWS</code> — по
+          физическим строкам, <code>RANGE</code> — по значениям ключа. Без рамки с <code>ORDER BY</code>
+          действует <code>RANGE ... CURRENT ROW</code>, из-за чего на ничьих накопительный итог «прыгает».</li>
+        <li><strong>«Почему запрос с окном тормозит?»</strong> — окно требует сортировки по <code>PARTITION
+          BY</code>/<code>ORDER BY</code>: либо индекс с нужным порядком, либо <code>Sort</code> (и
+          <code>external merge</code>, если не влезло в <code>work_mem</code>). Смотреть
+          <code>EXPLAIN (ANALYZE, BUFFERS)</code> на <code>WindowAgg</code> и на узел под ним.</li>
+      </ol>
+    </div>
+
+    <div class="pager">
+      <a href="sql33-monitoring.html">← <span class="sp">Глава 33. Мониторинг и эксплуатация</span></a>
+      <a href="sql35-cte.html"><span class="sp">Глава 35. CTE: WITH, рекурсия и материализация</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
+
+
+
