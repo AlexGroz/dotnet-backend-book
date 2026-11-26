@@ -19,7 +19,7 @@
   <div class="chapter">
     <div class="part">.NET · Часть VI · Данные и интеграции</div>
     <h1>Глава 24. ORM и EF Core эффективно</h1>
-    <p class="sublead">Tracking, проекции, N+1, массовые операции</p>
+    <p class="sublead">Tracking, проекции, N+1, массовые операции — и жизненный цикл схемы: Code First, Database First и миграции</p>
     <p><span class="tag core">основная глава</span></p>
     <h2>Что делает EF Core (и за что вы платите)</h2>
     <p>EF Core — это посредник между объектами C# и таблицами: он строит SQL из LINQ, отслеживает изменения
@@ -357,6 +357,343 @@ var last = await db.Orders
       <li><strong><code>EXPLAIN (ANALYZE, BUFFERS)</code></strong> для горячих запросов: проверяем, что индексы
         действительно применяются (глава 21 и SQL-раздел).</li>
     </ul>
+
+    <h2>Схема и код: кто кого порождает</h2>
+    <table>
+      <thead><tr><th>Режим</th><th>Направление</th><th>Инструмент</th><th>Когда</th></tr></thead>
+      <tbody>
+        <tr><td>Code First</td><td>классы → БД</td><td><code>dotnet ef migrations add</code> +
+          <code>database update</code></td><td>новый проект, схемой владеет команда</td></tr>
+        <tr><td>Database First</td><td>БД → классы</td><td><code>dotnet ef dbcontext scaffold</code></td>
+          <td>legacy-БД, схему меняет другой отдел/вендор</td></tr>
+        <tr><td>«Миграции поверх готовой схемы»</td><td>смешанный</td><td>scaffold один раз, дальше — миграции</td>
+          <td>переход с ручной схемы на управляемую</td></tr>
+      </tbody>
+    </table>
+    <p>Ниже — весь цикл на реальном проекте: console-приложение, EF Core 8.0.11, Npgsql, PostgreSQL 16 в
+      контейнере. Все команды и тексты ошибок — из этого запуска.</p>
+
+    <h2>Code First: от модели до таблиц</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public class Order
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+    public Customer? Customer { get; set; }
+    public decimal Total { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class AppDb(DbContextOptions&lt;AppDb&gt; options) : DbContext(options)
+{
+    public DbSet&lt;Customer&gt; Customers =&gt; Set&lt;Customer&gt;();
+    public DbSet&lt;Order&gt; Orders =&gt; Set&lt;Order&gt;();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity&lt;Order&gt;(e =&gt;
+        {
+            e.Property(o =&gt; o.Total).HasPrecision(18, 2);            // numeric(18,2)
+            e.HasOne(o =&gt; o.Customer).WithMany(c =&gt; c.Orders)
+             .HasForeignKey(o =&gt; o.CustomerId);
+        });
+    }
+}
+
+// design-time фабрика: dotnet ef не умеет поднимать ваш Program.cs с DI «из коробки»
+public class AppDbFactory : IDesignTimeDbContextFactory&lt;AppDb&gt;
+{
+    public AppDb CreateDbContext(string[] args) =&gt; new(new DbContextOptionsBuilder&lt;AppDb&gt;()
+        .UseNpgsql(Environment.GetEnvironmentVariable("PGCONN") ?? "Host=127.0.0.1;...;Database=efdemo")
+        .Options);
+}</code></pre>
+      <pre><code class="language-bash">$ dotnet ef migrations add Initial
+Build started...
+Build succeeded.
+Done. To undo this action, use 'ef migrations remove'
+
+$ dotnet ef database update
+Build started...
+Build succeeded.
+Applying migration '20261126183513_Initial'.
+Done.</code></pre>
+    </div>
+    <p>Что появилось в БД (вывод <code>information_schema</code> и <code>\d "Orders"</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">таблица: Customers
+таблица: Orders
+таблица: __EFMigrationsHistory
+
+      MigrationId       | ProductVersion
+------------------------+----------------
+ 20261126183513_Initial | 8.0.11
+
+   Column   |           Type           | Nullable
+------------+--------------------------+----------
+ Id         | integer                  | not null
+ CustomerId | integer                  | not null
+ Total      | numeric(18,2)            | not null
+ CreatedAt  | timestamp with time zone | not null
+Indexes:
+    "PK_Orders" PRIMARY KEY, btree ("Id")
+    "IX_Orders_CustomerId" btree ("CustomerId")
+Foreign-key constraints:
+    "FK_Orders_Customers_CustomerId" FOREIGN KEY ("CustomerId") REFERENCES "Customers"("Id") ON DELETE CASCADE</code></pre>
+    </div>
+    <p>Три вещи, которые видны сразу: EF создал <strong>таблицу истории</strong> (<code>__EFMigrationsHistory</code>) —
+      именно поэтому он знает, что применено; <code>HasPrecision(18,2)</code> превратился в
+      <code>numeric(18,2)</code>; связь <code>Order → Customer</code> дала индекс
+      <code>IX_Orders_CustomerId</code> и <code>ON DELETE CASCADE</code> (поведение по умолчанию для обязательного
+      FK — если каскад не нужен, это указывают явно).</p>
+
+    <h2>Что внутри миграции</h2>
+    <p>Команда <code>migrations add</code> создаёт три файла: саму миграцию (<code>Up</code>/<code>Down</code>),
+      её <code>.Designer.cs</code> (снимок модели на момент миграции) и <code>AppDbModelSnapshot.cs</code> — снимок
+      <em>текущей</em> модели. Именно по нему EF вычисляет разницу для следующей миграции, поэтому snapshot
+      коммитится в git вместе с миграцией: без него следующий разработчик получит «фантомные» изменения.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">protected override void Up(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.CreateTable(
+        name: "Customers",
+        columns: table =&gt; new
+        {
+            Id = table.Column&lt;int&gt;(type: "integer", nullable: false)
+                .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+            Name = table.Column&lt;string&gt;(type: "character varying(200)", maxLength: 200, nullable: false)
+        },
+        constraints: table =&gt; { table.PrimaryKey("PK_Customers", x =&gt; x.Id); });
+    // ... Orders, индекс, внешний ключ
+}
+
+protected override void Down(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.DropTable(name: "Orders");
+    migrationBuilder.DropTable(name: "Customers");
+}</code></pre>
+    </div>
+    <p><code>Up</code>/<code>Down</code> — обычный C# с <code>MigrationBuilder</code>: можно добавить свои
+      <code>migrationBuilder.Sql("...")</code>, но нельзя «подправить уже применённую» миграцию. Если миграция
+      ушла в общую ветку или в прод, её меняют <em>следующей</em> миграцией: у всех остальных в
+      <code>__EFMigrationsHistory</code> лежит её идентификатор, и снимок модели разъедется с реальной схемой.</p>
+
+    <h2>Изменение схемы: новая колонка и откат</h2>
+    <p>Добавили в модель <code>public string? Sku { get; set; }</code>. Прежде чем генерировать миграцию, полезно
+      проверить, что модель действительно изменилась — в CI это гейт:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ dotnet ef migrations has-pending-model-changes
+Build started...
+Build succeeded.
+Changes have been made to the model since the last migration. Add a new migration.
+$ echo $?
+1</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// Migrations/20261126183636_AddSku.cs
+protected override void Up(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.AddColumn&lt;string&gt;(
+        name: "Sku",
+        table: "Orders",
+        type: "text",
+        nullable: true);
+}
+
+protected override void Down(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.DropColumn(name: "Sku", table: "Orders");
+}</code></pre>
+      <pre><code class="language-bash">$ dotnet ef database update
+Applying migration '20261126183636_AddSku'.
+Done.
+$ psql -c 'select column_name from information_schema.columns where table_name = ''Orders'';'
+ Id, CustomerId, Total, CreatedAt, Sku        # 5 колонок, Sku nullable
+
+$ dotnet ef database update Initial             # откат к первой миграции
+Reverting migration '20261126183636_AddSku'.
+Done.
+$ psql -c '...'                                 # снова 4 колонки: Id, CustomerId, Total, CreatedAt</code></pre>
+    </div>
+    <p>Откат сработал, потому что <code>Down</code> существует и написан вручную. <strong>Данные при этом
+      теряются</strong>: <code>DropColumn</code> удаляет значения, а не «прячет» их. Для опасных изменений
+      (переименование, сужение типа) в миграции пишут перенос данных явно и проверяют на копии прод-базы.</p>
+
+    <h2>Выкладка в прод: SQL-скрипт, а не «приложение само мигрирует»</h2>
+    <p><code>dotnet ef migrations script --idempotent</code> выдаёт SQL, который можно применять сколько угодно раз:
+      каждая миграция обёрнута в проверку по таблице истории.</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ dotnet ef migrations script --idempotent -o all.sql
+Build started...
+Build succeeded.</code></pre>
+      <pre><code class="language-sql">CREATE TABLE IF NOT EXISTS "__EFMigrationsHistory" (
+    "MigrationId" character varying(150) NOT NULL,
+    "ProductVersion" character varying(32) NOT NULL,
+    CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
+);
+
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261126183513_Initial') THEN
+    CREATE TABLE "Customers" ( ... );
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261126183636_AddSku') THEN
+    ALTER TABLE "Orders" ADD "Sku" text;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261126183636_AddSku') THEN
+    INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20261126183636_AddSku', '8.0.11');
+    END IF;
+END $EF$;
+COMMIT;</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Способ</th><th>Плюсы</th><th>Минусы</th></tr></thead>
+      <tbody>
+        <tr><td><code>db.Database.Migrate()</code> при старте</td><td>просто, удобно локально и в тестах</td>
+          <td>несколько реплик мигрируют одновременно; нет контроля момента; DDL-блокировки на большом столе
+          неожиданно тормозят запуск</td></tr>
+        <tr><td>Скрипт в CI/CD (<code>script --idempotent</code>)</td><td>миграция — отдельный шаг пайплайна,
+          видно, что и когда применилось</td><td>нужен доступ к БД из пайплайна и порядок «сначала схема, потом
+          код»</td></tr>
+        <tr><td><code>dotnet ef migrations bundle</code></td><td>самодостаточный исполняемый файл, не нужен SDK и
+          исходники</td><td>ещё один артефакт в релизе</td></tr>
+      </tbody>
+    </table>
+    <p>Правило, которое снимает половину проблем: <strong>код должен работать со старой и новой схемой
+      одновременно</strong> (expand/contract: сначала добавить nullable-колонку, выкатить код, который пишет в обе,
+      потом удалить старую). Иначе миграция и деплой приложений обязаны идти строго вместе, а при откате релиза
+      схема уже не откатится.</p>
+
+    <h2>EnsureCreated и миграции несовместимы</h2>
+    <p>Частая история: в тестах или на стенде база создана через <code>EnsureCreated()</code>, а потом к ней
+      пытаются применить миграции. Замерено на отдельной базе <code>efensure</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">EnsureCreated: True
+таблица: Customers
+таблица: Orders                     # таблицы есть, __EFMigrationsHistory — НЕТ
+
+$ dotnet ef database update
+Npgsql.PostgresException (0x80004005): 42P07: relation "Customers" already exists
+    SqlState: 42P07
+    MessageText: relation "Customers" already exists</code></pre>
+    </div>
+    <p><code>EnsureCreated</code> создаёт схему по модели, но <em>не</em> ведёт историю миграций — EF считает базу
+      пустой и пытается создать таблицы заново. Правильный выбор один: либо <code>EnsureCreated</code> (только
+      для быстрых тестов и in-memory), либо миграции. Для интеграционных тестов с реальной БД —
+      <code>Migrate()</code> или Testcontainers с прогоном скрипта.</p>
+
+    <h2>Database First: классы из существующей схемы</h2>
+    <p>Обратное направление — из базы в код. Команда принимает строку подключения, провайдер и папку:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ dotnet ef dbcontext scaffold 'Host=127.0.0.1;Port=55434;Username=postgres;Password=postgres;Database=efdemo' \
+      Npgsql.EntityFrameworkCore.PostgreSQL -o Scaffold --context ScaffoldedDb --no-onconfiguring
+Build started...
+Build succeeded.
+$ ls Scaffold
+Customer.cs  Order.cs  ScaffoldedDb.cs</code></pre>
+    </div>
+    <p>Что получилось (фрагменты сгенерированного кода, после <code>--force</code> — то есть при повторном
+      скаффолде, когда в БД уже есть колонка <code>Sku</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public partial class Order
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+    public decimal Total { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public string? Sku { get; set; }                          // появилось после обновления схемы
+
+    public virtual Customer Customer { get; set; } = null!;
+}
+
+public partial class ScaffoldedDb : DbContext
+{
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity&lt;Order&gt;(entity =&gt;
+        {
+            entity.HasIndex(e =&gt; e.CustomerId, "IX_Orders_CustomerId");
+            entity.Property(e =&gt; e.Total).HasPrecision(18, 2);
+            entity.HasOne(d =&gt; d.Customer).WithMany(p =&gt; p.Orders).HasForeignKey(d =&gt; d.CustomerId);
+        });
+
+        OnModelCreatingPartial(modelBuilder);
+    }
+
+    partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
+}</code></pre>
+    </div>
+    <p>Детали, которые важно знать про scaffold:</p>
+    <ul>
+      <li>Классы <code>partial</code>, навигации <code>virtual</code> — можно дописать свои файлы и не потерять их
+        при повторной генерации; <code>--force</code> перезаписывает только сгенерированные файлы.</li>
+      <li>Обязательные навигации получают <code>= null!;</code> — с включёнными NRT это единственный способ
+        сгенерировать «не null, но заполнит EF».</li>
+      <li>Схема читается из БД, поэтому в модели появляются индексы и точности, которых нет в коде Code First;
+        наоборот, доменных правил (валидация, value objects) scaffold не создаёт — их пишут руками поверх
+        <code>partial</code>.</li>
+      <li>Повторный scaffold не является миграцией: он не меняет БД и не переносит данные. Живая схема при этом
+        остаётся источником истины, а классы — производными.</li>
+    </ul>
+
+    <h2>Два DbContext в проекте: неоднозначность</h2>
+    <p>После scaffold в проекте оказались <code>AppDb</code> и <code>ScaffoldedDb</code>. Следующая же
+      EF-команда это заметила:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">$ dotnet ef database update
+More than one DbContext was found. Specify which one to use. Use the '-Context' parameter for
+PowerShell commands and the '--context' parameter for dotnet commands.
+
+$ dotnet ef database update --context AppDb
+Applying migration '20261126183636_AddSku'.
+Done.</code></pre>
+    </div>
+    <p>В большом решении (несколько bounded context’ов) это постоянная ситуация: <code>--context</code> указывают
+      всегда, а миграции раскладывают по папкам через <code>--output-dir</code> и
+      <code>MigrationsAssembly</code>, чтобы не смешивать истории двух контекстов.</p>
+
+
+
+
+    <div class="box warn">
+      <span class="t">Пять ошибок, которые ломают схему</span>
+      <ul>
+        <li><strong>Правка применённой миграции.</strong> У коллег и в проде её идентификатор уже в истории —
+          snapshot разъедется, следующая миграция сгенерируется «не от той» схемы.</li>
+        <li><strong>Смешивание <code>EnsureCreated</code> и миграций.</strong> Получаем <code>42P07</code> и базу без
+          истории (см. выше).</li>
+        <li><strong><code>Migrate()</code> на всех репликах.</strong> Два пода стартуют одновременно — один падает
+          на конфликте DDL или ждёт блокировку; миграцию выносят в отдельный шаг.</li>
+        <li><strong>Тяжёлый DDL на большой таблице.</strong> <code>ALTER TABLE ... SET NOT NULL</code> с проверкой
+          всех строк держит блокировку; в PostgreSQL для этого есть безопасные шаги (добавить nullable, заполнить
+          батчами, добавить constraint <code>NOT VALID</code>, затем <code>VALIDATE</code>).</li>
+        <li><strong>Нет бэкапа перед миграцией.</strong> <code>Down</code> не спасает от потери данных: он удаляет
+          колонку вместе со значениями.</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Миграции: чек-лист</span>
+      <ol>
+        <li>Snapshot и все файлы миграции — в git; применённые миграции не редактируются.</li>
+        <li><code>dotnet ef migrations has-pending-model-changes</code> в CI: модель и миграции не разъехались.</li>
+        <li>В прод — идемпотентный скрипт или bundle отдельным шагом пайплайна, не <code>Migrate()</code> на
+          каждой реплике.</li>
+        <li>Изменения схемы совместимы со старой и новой версией кода (expand/contract).</li>
+        <li>Опасные изменения проверены на копии прод-базы и с замером блокировок.</li>
+        <li>В одном решении несколько контекстов — всегда <code>--context</code> и отдельные папки миграций.</li>
+      </ol>
+    </div>
 
     <div class="box gold">
       <span class="t">★ Что запомнить из главы</span>
