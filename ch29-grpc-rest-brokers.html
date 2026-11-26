@@ -21,7 +21,8 @@
     <div class="part">.NET · Часть VIII · Интеграция и API</div>
     <h1>Глава 29. REST, gRPC и брокеры сообщений: что когда выбирать</h1>
     <p class="sublead">REST с JSON удобен, но не всегда оптимален: текст и сериализация стоят ресурсов.
-      Разберём, когда остаться на REST, а когда перейти на gRPC или брокер сообщений.</p>
+      Разберём, когда остаться на REST, а когда перейти на gRPC или брокер сообщений, — и как выглядит
+      контракт REST на практике: версии, OpenAPI, пагинация, фильтрация и сортировка (с замерами).</p>
 
     <h2>В чём суть вопроса</h2>
     <p>REST поверх HTTP передаёт данные в <strong>текстовом</strong> виде (JSON). Это удобно для человека, но
@@ -361,7 +362,270 @@ Bump#2 = 1</code></pre>
       </ul>
     </div>
 
+    <h2>Контракт REST: версии, документ, пагинация</h2>
+    <p>Выбрать REST — половина дела. Вторая половина — <strong>контракт</strong>, который переживёт пару лет:
+      что считается версией API, где лежит его описание, как листать список и как сортировать. Ниже — замеры на
+      minimal API (.NET 8, порт 5085) и PostgreSQL 16 с 200 000 строк.</p>
+
+    <h3>Версионирование: URL, заголовок или media type</h3>
+    <p>Самое дешёвое и самое наглядное — версия в пути. Два маршрута, две формы ответа:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.MapGet("/api/v1/orders", () =&gt; Results.Ok(new[] { new { id = 1, total = 1500m } }));
+
+app.MapGet("/api/v2/orders", () =&gt; Results.Ok(new[]
+{
+    new { id = 1, total = 1500m, currency = "RUB", customerId = 42 }   // + новые поля
+}));</code></pre>
+      <pre><code class="language-bash">$ curl -s http://127.0.0.1:5085/api/v1/orders
+[{"id":1,"total":1500}] [200]
+$ curl -s http://127.0.0.1:5085/api/v2/orders
+[{"id":1,"total":1500,"currency":"RUB","customerId":42}] [200]</code></pre>
+    </div>
+    <p>Версия в заголовке оставляет «красивый» URL, но добавляет состояние вне URL: кэши, логи и браузер должны
+      передавать заголовок. Ручной вариант выглядит так — и без заголовка обязан быть отказ, а не «version 1 по
+      умолчанию»:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.MapGet("/api/orders", ([FromHeader(Name = "api-version")] string? apiVersion) =&gt; apiVersion switch
+{
+    null =&gt; Results.Problem(statusCode: 400, title: "api-version обязателен",
+        detail: "Поддерживаются 1 и 2"),
+    "1" =&gt; Results.Ok(new[] { new { id = 1, total = 1500m } }),
+    "2" =&gt; Results.Ok(new[] { new { id = 1, total = 1500m, currency = "RUB", customerId = 42 } }),
+    _ =&gt; Results.Problem(statusCode: 400, title: $"api-version={apiVersion} не поддерживается")
+});</code></pre>
+      <pre><code class="language-bash">$ curl -s http://127.0.0.1:5085/api/orders
+{"type":"https://tools.ietf.org/html/rfc9110#section-15.5.1","title":"api-version обязателен",
+ "status":400,"detail":"Поддерживаются 1 и 2"} [400]
+
+$ curl -s -H 'api-version: 2' http://127.0.0.1:5085/api/orders
+[{"id":1,"total":1500,"currency":"RUB","customerId":42}] [200]
+
+$ curl -s -H 'api-version: 3' http://127.0.0.1:5085/api/orders
+{"type":"https://tools.ietf.org/html/rfc9110#section-15.5.1","title":"api-version=3 не поддерживается",
+ "status":400} [400]</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Способ</th><th>Плюсы</th><th>Минусы</th></tr></thead>
+      <tbody>
+        <tr><td><code>/api/v1/orders</code></td><td>видно в логах, кэше, curl и документации; легко роутить на
+          прокси</td><td>две версии — два маршрута в коде и в OpenAPI</td></tr>
+        <tr><td><code>api-version: 2</code></td><td>URL стабилен; удобно для «одного ресурса»</td><td>заголовок
+          легко потерять; кэши по URL смешают версии, если не добавить <code>Vary</code></td></tr>
+        <tr><td>Media type (<code>application/vnd.orders.v2+json</code>)</td><td>«идеологически чисто»</td>
+          <td>редко понимают клиенты и прокси; сложнее документация</td></tr>
+      </tbody>
+    </table>
+    <p>Практическое правило: <strong>мажорная версия — в URL</strong>, обратно совместимые изменения (новые
+      необязательные поля, новые эндпоинты) — <em>без</em> новой версии. Если библиотека версий нужна «по-взрослому»
+      (несколько читателей версии, заголовок, media type, deprecation-политика), берут
+      <code>Asp.Versioning.Http</code>/<code>Asp.Versioning.Mvc</code> — но для одного-двух публичных API
+      хватает сегмента в пути.</p>
+    <div class="box warn">
+      <span class="t">Что ломает совместимость</span>
+      <p>Удаление или переименование поля, смена типа (<code>total</code> из числа в строку), изменение смысла
+        (<code>total</code> с НДС вместо без), смена кода ответа (200 → 204), обязательный новый параметр, смена
+        формата даты. Всё это — новая мажорная версия. Добавление необязательного поля и нового эндпоинта —
+        совместимо.</p>
+    </div>
+
+    <h3>OpenAPI: документ как артефакт сборки</h3>
+    <p>Описание API не должно жить в вики: его генерирует код. В .NET 8 это Swashbuckle/NSwag (в .NET 9 появился
+      встроенный <code>AddOpenApi</code>), а документ доступен как JSON и используется для клиентов, тестов и
+      ревью контракта.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+app.UseSwagger();          // /swagger/v1/swagger.json (+ UI на /swagger)</code></pre>
+      <pre><code class="language-bash">$ curl -s http://127.0.0.1:5085/swagger/v1/swagger.json -o swagger.json
+$ wc -c swagger.json
+2183 swagger.json
+$ python3 -c "import json;d=json.load(open('swagger.json'));print(len(d['paths']))"
+5
+
+/api/orders            ['get']
+/api/v1/orders/page    ['get']
+/api/v1/orders/keyset  ['get']
+/api/v1/orders         ['get']
+/api/v2/orders         ['get']</code></pre>
+    </div>
+    <p>Видно и слабое место URL-версионирования: в документе обе версии лежат рядом, как разные ресурсы. Для
+      потребителя это плюс (видно всё), для «одного API» — минус (нужен отдельный документ на версию, обычно через
+      группы Swagger/NSwag). Полезные практики вокруг документа:</p>
+    <ul>
+      <li><strong>Генерировать клиента из документа</strong> (<code>openapi-generator</code>, NSwag, Kiota), а не
+        писать HTTP-обёртки руками: тогда изменение контракта ломает сборку клиента, а не прод.</li>
+      <li><strong>Держать документ в CI</strong>: сравнение с предыдущей версией показывает удалённые поля и
+        изменённые типы — это и есть проверка обратной совместимости.</li>
+      <li><strong>Описывать коды ответов и модели ошибок</strong>, иначе клиент узнает про 409 из продакшена.</li>
+      <li><strong>Не отдавать документ в проде публично</strong> без необходимости: он описывает поверхность
+        атаки; часто его закрывают авторизацией или отдают только во внутренней сети.</li>
+    </ul>
+    <p>Ошибки лучше отдавать в одном формате — <code>ProblemDetails</code> (RFC 9457). Его же генерирует
+      <code>Results.Problem</code>, и он одинаково выглядит для 400, 403 и 409:</p>
+    <div class="codewrap">
+      <pre><code class="language-json">{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "title": "api-version обязателен",
+  "status": 400,
+  "detail": "Поддерживаются 1 и 2"
+}</code></pre>
+    </div>
+
+    <h3>Пагинация: OFFSET против курсора</h3>
+    <p>Два способа листать список. «Страницы» — привычно для UI; «курсор» (keyset) — единственный, который
+      остаётся быстрым на глубине. Сначала — что генерирует EF Core; это видно без запуска БД, через
+      <code>ToQueryString()</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">db.Orders.OrderBy(o =&gt; o.Id).Skip(150000).Take(20).ToQueryString();
+db.Orders.Where(o =&gt; o.Id &gt; 150000).OrderBy(o =&gt; o.Id).Take(20).ToQueryString();</code></pre>
+      <pre><code class="language-sql">-- OFFSET
+SELECT o."Id", o."CreatedAt", o."CustomerId", o."Sku", o."Total"
+FROM "Orders" AS o
+ORDER BY o."Id"
+LIMIT @__p_1 OFFSET @__p_0          -- 150000, 20
+
+-- KEYSET
+SELECT o."Id", o."CreatedAt", o."CustomerId", o."Sku", o."Total"
+FROM "Orders" AS o
+WHERE o."Id" &gt; 150000
+ORDER BY o."Id"
+LIMIT @__p_0                        -- 20</code></pre>
+    </div>
+    <p>Теперь цена на 200 000 строк (<code>EXPLAIN (ANALYZE, BUFFERS)</code>, таблица <code>orders</code>,
+      первичный ключ по <code>id</code>):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">OFFSET 1000     Execution Time:  0.293 ms
+OFFSET 150000   Execution Time: 27.252 ms   rows=150020  Buffers: shared hit=1516
+OFFSET 199980   Execution Time: 38.004 ms
+KEYSET (id &gt; 150000)  Execution Time: 0.118 ms   Buffers: shared hit=8</code></pre>
+    </div>
+    <p>OFFSET не «прыгает» в нужное место: PostgreSQL честно читает и выбрасывает все предыдущие строки
+      (<code>rows=150020</code> при <code>LIMIT 20</code>) — отсюда 1516 буферов против 8 и разница в ~230 раз.
+      Чем глубже страница, тем хуже, и индексом это не лечится.</p>
+    <p>Второй, менее очевидный дефект OFFSET — <strong>дубликаты и пропуски на стыке страниц</strong>: клиент,
+      прочитавший страницы 1–2 и остановившийся, теряет строку, а одну видит дважды. Проверено на том же стенде:
+      читаем первые две страницы по 3 строки, между ними добавляем одну запись.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">-- до вставки
+страница 1 (LIMIT 3):            200000, 199999, 199998
+страница 2 (LIMIT 3 OFFSET 3):   199997, 199996, 199995
+
+INSERT INTO orders ...            -- новая строка id=200001
+
+страница 1:                      200001, 200000, 199999
+страница 2:                      199998, 199997, 199996
+                                 ^ 199999 уже была на странице 1 (дубликат),
+                                   а 199995 сдвинулась на страницу 3</code></pre>
+    </div>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// keyset: клиент запоминает последний id, а не номер страницы
+app.MapGet("/api/v1/orders/keyset", (int? after, int limit = 3) =&gt; Results.Ok(new
+{
+    after,
+    limit,
+    next = $"/api/v1/orders/keyset?after={after}&amp;limit={limit}"
+}));</code></pre>
+    </div>
+    <p>Курсор должен быть <strong>уникальным и упорядоченным</strong>: <code>id</code>, пара
+      <code>(created_at, id)</code> для сортировки по времени, составной ключ для партиционированных таблиц. Ответ
+      отдаёт <code>next_cursor</code> (или <code>Link: rel="next"</code>); «перейти на страницу 42» при курсорной
+      пагинации не поддерживается — это осознанный размен.</p>
+    <table>
+      <thead><tr><th></th><th>Страницы (offset/limit)</th><th>Курсор (keyset)</th></tr></thead>
+      <tbody>
+        <tr><td>Глубина</td><td>деградирует линейно</td><td>константа</td></tr>
+        <tr><td>Стабильность</td><td>дубликаты и пропуски при вставках</td><td>стабильно при уникальном
+          ключе</td></tr>
+        <tr><td>UI «страница №»</td><td>есть</td><td>нет (только «дальше»)</td></tr>
+        <tr><td>Общее число страниц</td><td>нужен отдельный <code>count(*)</code></td><td>не требуется</td></tr>
+        <tr><td>Когда выбирать</td><td>админки, небольшие и редко меняющиеся списки</td><td>ленты, журналы,
+          выгрузки, публичные API</td></tr>
+      </tbody>
+    </table>
+    <p>Компромисс, который часто устраивает всех: <strong>первые N страниц — offset, дальше — курсор</strong>, либо
+      жёсткий лимит глубины (<code>max page = 100</code>) плюс требование сузить фильтр.</p>
+
+    <h3>Фильтрация и сортировка: белый список, а не «что прислали»</h3>
+    <p>Имена полей для сортировки нельзя подставлять в SQL из строки запроса. Рабочий приём — словарь
+      разрешённых выражений: неизвестное поле даёт 400, а не 500 и не инъекцию.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static readonly Dictionary&lt;string, Expression&lt;Func&lt;Order, object&gt;&gt;&gt; Sortable = new()
+{
+    ["id"] = o =&gt; o.Id,
+    ["total"] = o =&gt; o.Total,
+    ["createdAt"] = o =&gt; o.CreatedAt
+};
+
+if (!Sortable.TryGetValue(sort ?? "id", out var key))
+    return Results.Problem(statusCode: 400, title: $"Сортировка по '{sort}' не поддерживается");
+
+var query = db.Orders.OrderBy(key);          // EF превратит в ORDER BY нужного столбца
+var page = await query.Skip((page - 1) * size).Take(Math.Clamp(size, 1, 100)).ToListAsync();</code></pre>
+    </div>
+    <p>Сортировка стоит денег, если не попадает в индекс. Замер на тех же 200 000 строках:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">-- индекса по created_at нет
+Sort  (actual time=26.462..26.464 rows=20)
+      Sort Method: top-N heapsort  Memory: 26kB
+Execution Time: 35.708 ms
+
+-- CREATE INDEX ix_orders_created_at ON orders(created_at DESC); ANALYZE;
+Index Scan using ix_orders_created_at on orders  (actual time=0.062..0.065 rows=20)
+Execution Time: 0.117 ms</code></pre>
+    </div>
+    <p>35.7 мс против 0.117 мс — на пустой таблице разница не видна, на проде это разница между «быстро» и
+      «таймаут под нагрузкой». Поэтому сортировки в API выбирают из набора, под который есть индексы, а
+      произвольные комбинации фильтров закрывают отдельными индексами — или принимают, что такие запросы медленные,
+      и ограничивают их правами.</p>
+    <div class="box warn">
+      <span class="t">Ограничивайте всё, что приходит из запроса</span>
+      <ul>
+        <li><code>limit</code>/<code>size</code> — <code>Clamp(1, 100)</code>; иначе <code>?size=1000000</code>
+          роняет сервис.</li>
+        <li>Глубина offset — максимум страниц или обязательный фильтр.</li>
+        <li>Число фильтров и длина <code>IN</code>-списка — тоже лимит: <code>IN (10 000 значений)</code> дороже,
+          чем кажется.</li>
+        <li>Строки поиска — в <code>ILIKE '%...%'</code> индексы btree не работают; нужен trigram/GIN или
+          полнотекстовый поиск (SQL-раздел).</li>
+      </ul>
+    </div>
+
+    <h3>GraphQL и SOAP — коротко</h3>
+    <table>
+      <thead><tr><th>Стиль</th><th>Когда уместен</th><th>Цена</th></tr></thead>
+      <tbody>
+        <tr><td>REST + OpenAPI</td><td>стандартная интеграция, публичный API, кэширование по URL</td>
+          <td>несколько запросов на сложный экран</td></tr>
+        <tr><td>GraphQL (Hot Chocolate в .NET)</td><td>много разных клиентов с разными наборами полей; агрегация
+          нескольких источников</td><td>сложность кэша и авторизации по полям, риск «N+1» на резолверах, нужен
+          лимит глубины и сложности запроса</td></tr>
+        <tr><td>gRPC</td><td>внутренние синхронные вызовы, стриминг, контракт в <code>.proto</code></td>
+          <td>не для браузера напрямую, бинарный формат</td></tr>
+        <tr><td>SOAP/WCF</td><td>legacy-интеграции (банки, госуслуги), где контракт уже согласован</td>
+          <td>тяжёлые конверты XML, сложные инструменты; для нового API не выбирают</td></tr>
+      </tbody>
+    </table>
+    <p>GraphQL не отменяет REST целиком: часто публичный REST остаётся, а GraphQL-слой агрегирует его для
+      мобильного клиента. SOAP жив там, где его навязывает внешняя система: с ним работают через
+      <code>dotnet-svcutil</code> (клиент по WSDL) или <code>CoreWCF</code>, если нужно поднять сервер.</p>
+
+    <div class="box gold">
+      <span class="t">★ Контракт REST: чек-лист</span>
+      <ol>
+        <li>Версия — мажорная и явная; несовместимое изменение = новая версия, совместимое — без неё.</li>
+        <li>OpenAPI генерируется из кода и лежит в CI; клиенты генерируются из него же.</li>
+        <li>Все ошибки — <code>ProblemDetails</code> с <code>status</code>, <code>title</code>,
+          <code>detail</code>.</li>
+        <li>Списки — с лимитом; на глубине — курсор, а не OFFSET.</li>
+        <li>Сортировка и фильтры — по белому списку полей с индексами под них.</li>
+        <li>Ответы с пагинацией содержат ссылку/курсор на следующую страницу, а не «догадайся сам».</li>
+      </ol>
+    </div>
+
     <h2>Сравнение</h2>
+
     <table>
       <thead><tr><th></th><th>REST</th><th>gRPC</th><th>Брокер сообщений</th></tr></thead>
       <tbody>
