@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 25 · Паттерны сопоставления: switch-выражения, property и list-паттерны</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="cs26-nullable-reference-types.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть IV · Современный C#: паттерны и nullability</div>
+    <h1>Глава 25. Паттерны сопоставления: switch-выражения, property и list-паттерны</h1>
+    <p class="sublead">Паттерн — это проверка формы значения вместе с извлечением данных из него. Разбираем
+      реляционные, логические, property-, type- и list-паттерны, порядок ветвей и то, что всё это стоит в рантайме.
+      Все выводы и замеры — с запуска на .NET 8 (Release).</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Что умеет паттерн</h2>
+    <table>
+      <thead><tr><th>Паттерн</th><th>Пример</th><th>Что делает</th></tr></thead>
+      <tbody>
+        <tr><td>Константа</td><td><code>0</code>, <code>"orders"</code>, <code>null</code></td><td>сравнение с
+          константой; для <code>null</code> — без вызова перегруженного <code>==</code></td></tr>
+        <tr><td>Тип</td><td><code>int n</code></td><td>проверка типа и сразу приведение в переменную</td></tr>
+        <tr><td>Реляционный</td><td><code>&gt; 1000</code>, <code>&lt;= 0</code></td><td>сравнение значения</td></tr>
+        <tr><td>Логический</td><td><code>&gt; 0 and &lt;= 1000</code>, <code>not null</code></td><td>комбинирование
+          паттернов</td></tr>
+        <tr><td>Свойства</td><td><code>{ Total: &gt; 100_000, Lines: &gt; 5 }</code></td><td>проверка свойств без
+          ручных <code>if</code></td></tr>
+        <tr><td>Позиционный</td><td><code>Point(var x, var y)</code></td><td>деконструкция через
+          <code>Deconstruct</code> (глава 6)</td></tr>
+        <tr><td><code>var</code> / discard</td><td><code>var rest</code>, <code>_</code></td><td>захват значения или
+          «мне не важно»</td></tr>
+        <tr><td>Список и срез</td><td><code>["orders", var id, .. var rest]</code></td><td>форма массива или
+          <code>Span</code>: длина, элементы, хвост</td></tr>
+      </tbody>
+    </table>
+    <p>Один и тот же паттерн работает в <code>is</code>, в <code>switch</code>-выражении и в
+      <code>switch</code>-инструкции; разница — в том, что выражение возвращает значение, а инструкция допускает
+      <code>break</code> и <code>goto case</code>.</p>
+
+    <h2>Реляционные и логические паттерны вместо лестницы if</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static decimal Shipping(int weight) =&gt; weight switch
+{
+    &lt; 0 =&gt; throw new ArgumentOutOfRangeException(nameof(weight)),
+    0 =&gt; 0m,
+    &gt; 0 and &lt;= 1000 =&gt; 350m,
+    &gt; 1000 and &lt;= 5000 =&gt; 700m,
+    _ =&gt; 1500m
+};</code></pre>
+      <pre><code class="language-text">вес     0 г -&gt; доставка 0 руб.
+вес   500 г -&gt; доставка 350 руб.
+вес  1000 г -&gt; доставка 350 руб.
+вес  1001 г -&gt; доставка 700 руб.
+вес  5000 г -&gt; доставка 700 руб.
+вес  5001 г -&gt; доставка 1500 руб.</code></pre>
+    </div>
+    <p>Границы включительны так, как написано: <code>1000</code> попадает в первую ветвь
+      (<code>&gt; 0 and &lt;= 1000</code>), <code>1001</code> — во вторую. Ошибка «на единицу» здесь видна сразу,
+      потому что условие одно, а не размазано по <code>if</code>/<code>else if</code>. Исключение в
+      <code>=&gt;</code> — обычное выражение, оно бросается только при совпадении ветви.</p>
+
+    <h2>Property-паттерны: правила вместо вложенных if</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">record Order(string Customer, decimal Total, bool IsPaid, int Lines);
+
+static string Describe(Order? order) =&gt; order switch
+{
+    null =&gt; "нет заказа",
+    { IsPaid: false } =&gt; "не оплачен",
+    { Total: 0 } =&gt; "пустой заказ",
+    { Total: &gt; 100_000 } o =&gt; $"крупный заказ на {o.Total:N0}",
+    { Total: &gt; 10_000, Lines: &gt; 5 } o =&gt; $"средний заказ, много позиций ({o.Lines})",
+    { Total: &gt; 10_000 } =&gt; "средний заказ",
+    _ =&gt; "мелкий заказ"
+};</code></pre>
+      <pre><code class="language-text">нет заказа
+не оплачен
+средний заказ
+крупный заказ на 250,000
+пустой заказ</code></pre>
+    </div>
+    <p>Разбор по строкам вывода:</p>
+    <ul>
+      <li><code>null</code> — отдельная ветвь: компилятор с nullable-контекстом требует её, если параметр
+        <code>Order?</code> (глава 26).</li>
+      <li>Заказ <code>bob</code> на 45 000 с тремя позициями попал в <code>{ Total: &gt; 10_000 }</code>:
+        ветвь с <code>Lines: &gt; 5</code> не совпала, и это правильно — <strong>порядок ветвей и есть
+        приоритет</strong>.</li>
+      <li><code>{ Total: 0 }</code> стоит <em>после</em> проверки оплаты: неоплаченный пустой заказ будет назван
+        «не оплачен». Поменяете ветви местами — поменяется бизнес-смысл.</li>
+      <li><code>o</code> после паттерна — designator: совпавшую часть можно использовать в выражении ветви.</li>
+    </ul>
+    <div class="box note">
+      <span class="t">Геттеры вызываются на каждую проверяемую ветвь</span>
+      <p>Геттеры в property-паттерне вызываются по одному разу на проверяемое свойство в каждой ветви. Если
+        геттер дорогой (ходит в БД, считает), лучше сначала положить значение в локальную переменную — иначе
+        <code>{ Total: &gt; 100_000 }</code> и <code>{ Total: &gt; 10_000 }</code> вызовут его дважды.</p>
+    </div>
+
+    <h2>Порядок ветвей: два предупреждения компилятора</h2>
+    <p>Компилятор проверяет и «лишние», и «недостающие» ветви. Оба случая проверены на стенде.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static string Describe(int x) =&gt; x switch
+{
+    _ =&gt; "всё остальное",
+    &gt; 10 =&gt; "больше десяти"          // никогда не выполнится
+};</code></pre>
+      <pre><code class="language-text">error CS8510: The pattern is unreachable. It has already been handled by a previous arm
+of the switch expression or it is impossible to match.</code></pre>
+      <p class="cap">Неполное покрытие enum — предупреждение, а не ошибка: код соберётся и упадёт в рантайме</p>
+      <pre><code class="language-csharp">public enum Mode { Fast, Safe, Custom }
+
+public static string Describe(Mode mode) =&gt; mode switch
+{
+    Mode.Fast =&gt; "быстро",
+    Mode.Safe =&gt; "безопасно"
+};</code></pre>
+      <pre><code class="language-text">warning CS8509: The switch expression does not handle all possible values of its input type
+(it is not exhaustive). For example, the pattern 'Mode.Custom' is not covered.</code></pre>
+      <p class="cap">Что происходит в рантайме, если такую ветвь всё-таки вызвать</p>
+      <pre><code class="language-text">исключение: System.Runtime.CompilerServices.SwitchExpressionException
+сообщение: Non-exhaustive switch expression failed to match its input.
+Unmatched value was Custom.</code></pre>
+    </div>
+    <p>Отсюда практика: <code>_</code> ставят последним и осознанно; для enum и закрытых иерархий
+      <code>_</code> лучше не писать вовсе, чтобы добавление нового значения давало CS8509 на сборке, а не
+      <code>SwitchExpressionException</code> в проде. Если проект собирается с
+      <code>&lt;TreatWarningsAsErrors&gt;</code>, CS8509 становится ошибкой сборки — самый дешёвый способ поймать
+      забытую ветвь.</p>
+
+    <h2>List-паттерны: разбор пути без индексов</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static string Route(string[] path) =&gt; path switch
+{
+    [] =&gt; "корень",
+    ["orders"] =&gt; "список заказов",
+    ["orders", var id] =&gt; $"заказ {id}",
+    ["orders", var id, "items", .. var rest] =&gt; $"заказ {id}, остаток пути: [{string.Join(", ", rest)}]",
+    [.., "health"] =&gt; "health в конце пути",
+    _ =&gt; "не найдено"
+};</code></pre>
+      <pre><code class="language-text">/ -&gt; корень
+/orders -&gt; список заказов
+/orders/42 -&gt; заказ 42
+/orders/42/items/1/2 -&gt; заказ 42, остаток пути: [1, 2]
+/internal/health -&gt; health в конце пути
+/unknown/x -&gt; не найдено</code></pre>
+    </div>
+    <p><code>.. var rest</code> — срез: он забирает «сколько осталось». Важная деталь, которую проверили замером:
+      на <strong>массиве</strong> срез создаёт новый массив, а на <code>Span</code> — нет.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var arr = new[] { "orders", "42", "items", "1", "2" };
+var span = arr.AsSpan();
+
+// 1 000 000 разборов одного и того же пути
+if (arr is ["orders", var id, "items", .. var rest]) ...
+if (span is ["orders", var id, "items", .. var rest]) ...</code></pre>
+      <pre><code class="language-text">массив: 40000000 Б на 1000000 разборов, sink=8000000
+span:   0 Б на 1000000 разборов, sink=8000000</code></pre>
+    </div>
+    <p>40 МБ на миллион разборов — это 40 байт на вызов: ровно новый двухэлементный массив для
+      <code>rest</code>. С <code>ReadOnlySpan&lt;string&gt;</code> (или <code>Span&lt;char&gt;</code> для
+      строки) аллокаций ноль. Поэтому в горячем пути (разбор пути запроса, парсинг протокола) срез берут на
+      спане. И про порядок: <code>[.., "health"]</code> должен стоять последним, иначе он перехватит более
+      специфичные маршруты.</p>
+
+    <h2>Type-паттерны и null</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">static string Show(object? value) =&gt; value switch
+{
+    null =&gt; "null",
+    int n when n &lt; 0 =&gt; $"отрицательное число {n}",
+    int n =&gt; $"число {n}",
+    string { Length: 0 } =&gt; "пустая строка",
+    string s =&gt; $"строка из {s.Length} символов",
+    Order { Total: 0 } =&gt; "заказ без суммы",
+    Order o =&gt; $"заказ {o.Customer}",
+    IEnumerable&lt;int&gt; seq =&gt; $"последовательность из {seq.Count()} элементов",
+    _ =&gt; value.GetType().Name
+};</code></pre>
+      <pre><code class="language-text">null                         | null
+отрицательное число -5       | Int32
+число 42                     | Int32
+пустая строка                | String
+строка из 5 символов         | String
+заказ без суммы              | Order
+последовательность из 3 элементов | Int32[]
+Double                       | Double</code></pre>
+    </div>
+    <p>Для <code>double</code> не нашлось ветви — сработал <code>_</code> и вернул имя типа. Порядок важен и
+      здесь: <code>Order</code> проверяется до <code>IEnumerable&lt;int&gt;</code>, хотя формально заказ не
+      реализует <code>IEnumerable</code>; а если бы реализовал — ветвь <code>Order</code> должна стоять выше,
+      иначе её перехватит интерфейс. <code>when</code> добавляет условие, которое не выражается паттерном
+      (обратите внимание: <code>int n</code> с <code>when</code> и без — две отдельные ветви).</p>
+
+    <h2><code>is null</code> против <code>== null</code></h2>
+    <p>Паттерн <code>null</code> не вызывает перегруженный <code>operator ==</code>. Проверено на классе, у
+      которого <code>==</code> всегда возвращает <code>true</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var v = new AlwaysEqual();
+Console.WriteLine($"v == null: {v == null}");
+Console.WriteLine($"v is null: {v is null}");</code></pre>
+      <pre><code class="language-text">v == null: True
+v is null: False
+v is not null: True
+(object?)v is null: False</code></pre>
+    </div>
+    <p>Отсюда правило: в проверках на <code>null</code> пишите <code>is null</code>/<code>is not null</code>.
+      Это единственный вариант, который гарантированно смотрит на ссылку, а не на чужую логику сравнения (и не
+      падает на перегрузке, которая сама разыменовывает аргумент).</p>
+
+    <h2>Сколько это стоит</h2>
+    <p>Паттерны не аллоцируют: это проверки типов и сравнения. Замер — 5 000 000 объектов четырёх видов в
+      случайном порядке, Release, один и тот же результат <code>sum</code> во всех трёх вариантах:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var arr = new object[5_000_000];
+for (var i = 0; i &lt; arr.Length; i++) arr[i] = data[rnd.Next(data.Length)];
+
+var a0 = GC.GetAllocatedBytesForCurrentThread();
+foreach (var o in arr)
+{
+    if (o is int n) sum1 += n;
+    else if (o is string s) sum1 += s.Length;
+}
+var alloc1 = GC.GetAllocatedBytesForCurrentThread() - a0;</code></pre>
+      <pre><code class="language-text">is-паттерны:           56 мс, сумма 10832149, выделено 0 Б
+as + null:            57 мс, сумма 10832149, выделено 0 Б
+switch expression:    71 мс, сумма 10832149, выделено 0 Б</code></pre>
+    </div>
+    <p>Выводы: (1) ни один вариант не выделяет память — боксинга нет, потому что значения уже в
+      <code>object</code>; (2) разница 56 и 57 мс — шум; (3) <code>switch</code>-выражение в отдельном методе
+      оказалось на ~25% медленнее — это цена вызова, который не заинлайнился, а не паттернов. В горячем коде
+      порядок действий такой: сначала правильность и читаемость, затем профилировщик, и только потом
+      «переписать switch на if» — если он вообще окажется в профиле.</p>
+
+    <h2>Где паттерны действительно нужны</h2>
+    <ul>
+      <li><strong>Разбор внешних данных</strong> — форма JSON-узла, путь запроса, набор заголовков; в связке с
+        <code>JsonNode</code> и <code>Utf8JsonReader</code>.</li>
+      <li><strong>Отображение результатов</strong> — <code>Result</code>/<code>OneOf</code> в домене: один
+        <code>switch</code> вместо пачки <code>if (result.IsSuccess)</code>.</li>
+      <li><strong>Маппинг исключений и кодов</strong> — тип исключения и его свойства → HTTP-код и
+        <code>ProblemDetails</code>.</li>
+      <li><strong>Проверки в тестах</strong> — <code>Assert.That(x, Is.InstanceOf&lt;...&gt;())</code> часто
+        заменяется сравнением формы объекта.</li>
+      <li><strong>Горячие пути</strong> — только со спанами и с замером: см. аллокации среза выше.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">Три ловушки</span>
+      <ul>
+        <li><strong>Порядок важнее полноты.</strong> CS8509 — предупреждение; забытая ветвь всплывёт в рантайме
+          как <code>SwitchExpressionException</code>. Не глушите его <code>_</code> ради «чтобы собралось».</li>
+        <li><strong>Побочные эффекты в паттернах.</strong> <code>when</code> и геттеры выполняются в момент
+          проверки ветви, а не «один раз». Логирование внутри геттера превратит матчинг в непредсказуемый лог.</li>
+        <li><strong>Паттерны не валидируют вход.</strong> Паттерн, совпавший «хоть с чем-то» через
+          <code>_</code>, — это не проверка; валидация живёт отдельно (глава 30 в разделе .NET).</li>
+      </ul>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Чек-лист</span>
+      <ol>
+        <li>Проверка на <code>null</code> — <code>is null</code>, не <code>== null</code>.</li>
+        <li>Для enum и закрытых иерархий — без <code>_</code>, чтобы CS8509 ловил новые значения.</li>
+        <li>Специфичные ветви — выше общих; <code>_</code> — последним.</li>
+        <li>Дорогие геттеры — в локальную переменную до <code>switch</code>.</li>
+        <li>Срез на массиве — аллокация; в горячем пути — <code>Span</code>.</li>
+        <li>Тесты на «форму» данных дешевле и читаемее, чем цепочки <code>Assert</code> по полям.</li>
+      </ol>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что спросят и как отвечать</span>
+      <ol>
+        <li><strong>«Чем <code>switch</code>-выражение отличается от инструкции?»</strong> — выражение
+          возвращает значение и должно быть полным; инструкция допускает <code>break</code>/<code>goto</code> и
+          не требует полноты.</li>
+        <li><strong>«Что будет, если ветвь не совпала?»</strong> — <code>SwitchExpressionException</code> в
+          рантайме; компилятор предупредит CS8509, если видит неполноту.</li>
+        <li><strong>«Паттерны медленнее if?»</strong> — на замере 5 млн объектов: 56 мс против 57 мс, аллокаций
+          ноль; разница в пределах шума.</li>
+        <li><strong>«Почему <code>is null</code> лучше?»</strong> — не вызывает перегруженный <code>==</code>;
+          на стенде объект с <code>==</code>, всегда возвращающим <code>true</code>, дал
+          <code>v == null: True</code> и <code>v is null: False</code>.</li>
+        <li><strong>«List-паттерны аллоцируют?»</strong> — сам матчинг нет, но срез на массиве создаёт новый
+          массив: 40 байт на разбор; на <code>Span</code> — ноль.</li>
+      </ol>
+    </div>
+
+    <div class="pager">
+      <a href="cs24-json-sourcegen-aot.html">← <span class="sp">Глава 24. Сериализация без рефлексии: System.Text.Json, source generators и AOT</span></a>
+      <a href="cs26-nullable-reference-types.html"><span class="sp">Глава 26. Nullable reference types: контракт, который проверяет компилятор</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+

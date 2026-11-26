@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 26 · Nullable reference types: контракт, который проверяет компилятор</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="csharp.html">← Оглавление</a>
+  <span class="booktitle">C#: язык и типы</span>
+  <a href="csharp.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">C# · Часть IV · Современный C#: паттерны и nullability</div>
+    <h1>Глава 26. Nullable reference types: контракт, который проверяет компилятор</h1>
+    <p class="sublead">NRT не запрещает <code>null</code> в рантайме — они переносят договорённость «здесь null
+      возможен / невозможен» в сигнатуру и заставляют компилятор следить за ней. Разбираем, какие предупреждения
+      он выдаёт, что из этого реально защищает, а что создаёт ложное чувство безопасности. Проект с намеренными
+      ошибками собран и запущен на .NET 8.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Как включить</h2>
+    <div class="codewrap">
+      <pre><code class="language-xml">&lt;PropertyGroup&gt;
+  &lt;Nullable&gt;enable&lt;/Nullable&gt;   &lt;!-- аннотации + предупреждения --&gt;
+&lt;/PropertyGroup&gt;</code></pre>
+    </div>
+    <p>У настройки три режима: <code>enable</code> (аннотации и предупреждения), <code>annotations</code>
+      (аннотации видны в метаданных, предупреждений нет), <code>warnings</code> (предупреждения есть, но
+      собственные аннотации не пишутся), <code>disable</code>. Локально контекст переключают директивами
+      <code>#nullable enable</code> / <code>#nullable restore</code> — так включают NRT в одном файле legacy-кода,
+      не трогая остальные.</p>
+
+    <h2>Какие предупреждения выдаёт компилятор</h2>
+    <p>Один файл с типичными ошибками, <code>Nullable=enable</code>, сборка <code>dotnet build</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">Console.WriteLine(default(string?) is null);   // компилятор знает: всегда true
+var maybe = repo.FindHonest("dave");           // объявлено как string?
+Console.WriteLine(maybe.Length);               // разыменование возможно null
+string name2 = maybe;                          // null в non-nullable переменную
+PrintUserName(maybe);                          // возможно null в аргументе
+
+class LegacyCache { public string Key { get; set; } }        // не инициализировано
+class DerivedLoader : BaseLoader { public override string? Load() =&gt; null; }</code></pre>
+      <pre><code class="language-text">warning CS8520: The given expression always matches the provided constant.
+warning CS8602: Dereference of a possibly null reference.
+warning CS8600: Converting null literal or possible null value to non-nullable type.
+warning CS8604: Possible null reference argument for parameter 'value' in 'void PrintUserName(string value)'.
+warning CS8618: Non-nullable property 'Key' must contain a non-null value when exiting constructor.
+               Consider declaring the property as nullable.
+warning CS8764: Nullability of return type doesn't match overridden member (possibly because of nullability attributes).</code></pre>
+    </div>
+    <table>
+      <thead><tr><th>Код</th><th>О чём</th><th>Что делать</th></tr></thead>
+      <tbody>
+        <tr><td>CS8602</td><td>разыменование того, что может быть <code>null</code></td><td>проверка,
+          <code>?.</code>, <code>??</code> или <code>[NotNullWhen]</code> в источнике</td></tr>
+        <tr><td>CS8600 / CS8604</td><td><code>null</code> течёт в переменную или аргумент, объявленные
+          non-nullable</td><td>честная аннотация <code>string?</code> или обработка <code>null</code></td></tr>
+        <tr><td>CS8618</td><td>non-nullable свойство/поле не получило значение к концу конструктора</td>
+          <td>инициализатор, <code>required</code>, <code>[MemberNotNull]</code> или <code>string?</code></td></tr>
+        <tr><td>CS8764 / CS8765</td><td>nullability в override/реализации интерфейса не совпадает с базой</td>
+          <td>привести сигнатуру к базовой или пометить атрибутами</td></tr>
+        <tr><td>CS8520</td><td>выражение всегда совпадает с константой</td><td>признак того, что компилятор
+          «знает» про <code>null</code> больше вас</td></tr>
+      </tbody>
+    </table>
+    <p>Предупреждения ничего не стоят в рантайме — и ничего не гарантируют. Тот же проект запущен, и <code>null</code>
+      спокойно дошёл до разыменования:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">default(string?) is null: True
+5
+
+рантайм: NullReferenceException
+рантайм: NullReferenceException
+(null)
+?? подставил: 3
+рантайм без предупреждения: NullReferenceException
+рантайм: NullReferenceException
+TryFind: 5 символов
+Settings.ApiKey = k-123</code></pre>
+    </div>
+    <p>Строка «рантайм без предупреждения» — самая важная: метод был объявлен как возвращающий
+      <code>string</code>, внутри стояло <code>null!</code>, компилятор промолчал, приложение упало. NRT — это
+      утверждение разработчика, и если утверждение ложное, компилятор не поможет.</p>
+
+    <h2>Аннотации — только метаданные</h2>
+    <p><code>string</code> и <code>string?</code> — один и тот же тип CLR. Это видно по трём проверкам:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">public void Print(string s) =&gt; ...
+public void Print(string? s) =&gt; ...          // перегрузка невозможна
+
+var t = typeof(string?);                     // оператор запрещён
+
+if (default(string?) is null) ...            // компилятор: всегда true</code></pre>
+      <pre><code class="language-text">error CS0111: Type 'Formatter' already defines a member called 'Print' with the same parameter types
+error CS8639: The typeof operator cannot be used on a nullable reference type
+warning CS8520: The given expression always matches the provided constant.</code></pre>
+    </div>
+    <p>Отсюда следствия: аннотации <strong>не проверяются в рантайме</strong>; <code>null</code> из JSON,
+      БД, кэша или рефлексии проходит сквозь любую сигнатуру; сериализатор, построенный на рефлексии, видит
+      <code>string</code> независимо от <code>?</code>. Поэтому проверки на <code>null</code> на границах
+      (вход API, ответ БД, десериализация) остаются обязательными.</p>
+
+    <h2>Как писать так, чтобы предупреждений не было честно</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// 1) связь «bool == true ⇒ out не null» описывается атрибутом
+public bool TryFind(string id, [NotNullWhen(true)] out User? user) =&gt; _users.TryGetValue(id, out user);
+
+if (repo.TryFind("alice", out var found))
+    Console.WriteLine(found.Name.Length);        // предупреждения нет — компилятор понял
+
+// 2) обязательное свойство: объект нельзя создать без него
+class Settings
+{
+    public required string ApiKey { get; init; }
+    public string Endpoint { get; init; } = "https://api.example.com";
+}
+
+// 3) инициализация в методе: атрибут объясняет компилятору, что после вызова поле не null
+class ConnectionHolder
+{
+    private string _connection;
+
+    [MemberNotNull(nameof(_connection))]
+    private void Init() =&gt; _connection = "Host=localhost";
+
+    public ConnectionHolder() =&gt; Init();
+    public string Connection =&gt; _connection;
+}</code></pre>
+      <pre><code class="language-text">TryFind: 5 символов
+Settings.ApiKey = k-123</code></pre>
+      <p class="cap">Ни одного предупреждения при сборке этого файла</p>
+    </div>
+    <table>
+      <thead><tr><th>Инструмент</th><th>Что делает</th><th>Когда применять</th></tr></thead>
+      <tbody>
+        <tr><td><code>?</code> в сигнатуре</td><td>«здесь <code>null</code> допустим»</td><td>результаты поиска,
+          необязательные параметры, DTO</td></tr>
+        <tr><td><code>is null</code> / <code>is not null</code></td><td>проверка, которую понимает анализ
+          потока</td><td>вместо <code>== null</code> (глава 25)</td></tr>
+        <tr><td><code>??</code>, <code>??=</code>, <code>?.</code></td><td>значение по умолчанию и безопасный
+          доступ</td><td>локально, без раздувания ветвлений</td></tr>
+        <tr><td><code>!</code></td><td>«я знаю, что не null» — снимает предупреждение, <strong>ничего не
+          проверяя</strong></td><td>только когда инвариант доказан рядом (например, после проверки выше)</td></tr>
+        <tr><td><code>required</code></td><td>компилятор требует инициализации при создании объекта</td>
+          <td>DTO конфигурации, обязательные поля модели</td></tr>
+        <tr><td><code>[NotNullWhen]</code>, <code>[MaybeNullWhen]</code>, <code>[MemberNotNull]</code></td>
+          <td>передают компилятору связь между результатом и nullability</td><td><code>Try*</code>-методы,
+          фабрики, ленивая инициализация</td></tr>
+        <tr><td><code>[AllowNull]</code>, <code>[NotNull]</code></td><td>свойство принимает <code>null</code>, но
+          отдаёт не <code>null</code> (или наоборот)</td><td>кэши, ленивые вычисления</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Где NRT создаёт ложное чувство безопасности</h2>
+    <ul>
+      <li><strong><code>null!</code> как заглушка.</strong> Самая частая причина падений: «поле придёт из БД, зачем
+        проверять». На стенде такой метод дал <code>NullReferenceException</code> без единого предупреждения.</li>
+      <li><strong>Границы системы.</strong> JSON без поля, <code>LEFT JOIN</code> в SQL, <code>null</code> в
+        кэше — всё это приходит как «не null» по сигнатуре. Проверять обязательно.</li>
+      <li><strong><code>#nullable disable</code> в legacy-файлах.</strong> Проверено: файл с такой директивой
+        собрался без предупреждений, хотя содержал <code>public string Get() =&gt; null;</code> и
+        <code>s.Length</code> без проверки.</li>
+      <li><strong>Рефлексия и динамическая загрузка.</strong> Аннотации не видны <code>Activator</code> и
+        <code>JsonSerializer</code> без явной поддержки — тип один и тот же.</li>
+    </ul>
+    <div class="box warn">
+      <span class="t">NRT не заменяет валидацию</span>
+      <p>Nullability — про форму кода, а не про данные. Обязательность полей в API задаётся атрибутами и
+        валидацией (глава 30 раздела .NET), проверки в домене — инвариантами, а на границах БД — ограничениями
+        <code>NOT NULL</code>. Компилятор ловит только те <code>null</code>, которые вы сами «протащили» в коде,
+        и только если вы не соврали ему <code>!</code>.</p>
+    </div>
+
+    <h2>Как включать в существующем проекте</h2>
+    <ol>
+      <li><strong>Начать с <code>annotations</code></strong> на весь solution: аннотации появляются в метаданных,
+        сборка не завалена предупреждениями, другие проекты получают корректные сигнатуры.</li>
+      <li><strong>Затем <code>warnings</code> по проектам</strong>, начиная с новых: библиотеки, новые сервисы.
+        Legacy — по файлу через <code>#nullable enable</code>.</li>
+      <li><strong>Сделать CS86xx ошибками в CI</strong>:
+        <code>&lt;WarningsAsErrors&gt;CS8600;CS8602;CS8603;CS8604;CS8618&lt;/WarningsAsErrors&gt;</code> — иначе
+        предупреждения просто не читают.</li>
+      <li><strong>Вычистить <code>null!</code></strong> в критичных местах: заменить на явную проверку или на
+        <code>?</code> в сигнатуре с обработкой на вызывающей стороне.</li>
+      <li><strong>Не отключать предупреждения точечно без причины.</strong> <code>#pragma warning disable CS8618</code>
+        в конструкторе EF-сущности — нормально; в бизнес-коде — почти всегда спрятанный баг.</li>
+    </ol>
+    <div class="box note">
+      <span class="t">NRT и EF Core</span>
+      <p>EF Core понимает nullability: non-nullable свойство сущности по умолчанию мапится на <code>NOT NULL</code>,
+        <code>string?</code> — на nullable-колонку. Поэтому «<code>!</code> в сущности» часто превращается в
+        ошибку вставки в рантайме вместо понятного предупреждения на этапе модели. Правильнее сделать свойство
+        nullable и обработать это в запросе (глава 24 раздела .NET).</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Чек-лист</span>
+      <ol>
+        <li><code>&lt;Nullable&gt;enable&lt;/Nullable&gt;</code> в новых проектах; в legacy — <code>annotations</code>,
+          затем <code>warnings</code>.</li>
+        <li>CS86xx — ошибки в CI, а не «шум в логе сборки».</li>
+        <li><code>null!</code> только там, где инвариант доказан рядом; каждый случай объяснён комментарием.</li>
+        <li>На границах (JSON, БД, кэш, рефлексия) — явные проверки, независимо от сигнатуры.</li>
+        <li><code>Try*</code>-методы — с <code>[NotNullWhen(true)]</code>, а не с <code>null!</code> внутри.</li>
+        <li>Обязательные поля — <code>required</code> или валидация, а не «доверимся DTO».</li>
+      </ol>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что спросят и как отвечать</span>
+      <ol>
+        <li><strong>«NRT защищает от NullReferenceException?»</strong> — нет, это compile-time анализ: аннотации
+          стираются, <code>null</code> из внешних источников проходит. Он защищает от тех <code>null</code>,
+          которые вы сами вносите в код.</li>
+        <li><strong>«Чем <code>string?</code> отличается от <code>Nullable&lt;int&gt;</code>?»</strong> —
+          <code>Nullable&lt;T&gt;</code> — реальный тип-обёртка для value-типов, <code>string?</code> — только
+          аннотация: типы CLR одинаковые (CS0111 при попытке перегрузки).</li>
+        <li><strong>«Почему CS8618?»</strong> — non-nullable поле/свойство не инициализировано в конструкторе;
+          лечится инициализатором, <code>required</code>, <code>[MemberNotNull]</code> или <code>?</code>.</li>
+        <li><strong>«Зачем <code>[NotNullWhen(true)]</code>?»</strong> — чтобы после
+          <code>if (TryGet(..., out var v))</code> компилятор не считал <code>v</code> возможно-null; иначе
+          придётся писать <code>v!</code> и терять проверку.</li>
+        <li><strong>«Что такое <code>!</code> и когда он опасен?»</strong> — подавление предупреждения без
+          проверки; опасен как заглушка: код компилируется, падает в рантайме (проверено на стенде).</li>
+      </ol>
+    </div>
+
+    <div class="pager">
+      <a href="cs25-pattern-matching.html">← <span class="sp">Глава 25. Паттерны сопоставления: switch-выражения, property и list-паттерны</span></a>
+      <a href="csharp.html"><span class="sp">Оглавление раздела</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
