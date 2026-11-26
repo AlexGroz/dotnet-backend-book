@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 36 · OWASP Top 10 в .NET: что реально делать</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="net.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch37-interview.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">.NET · Часть X · Безопасность</div>
+    <h1>Глава 36. OWASP Top 10 в .NET: что реально делать</h1>
+    <p class="sublead">Десять категорий риска — и конкретные механизмы .NET, которые их закрывают. Все уязвимости
+      в главе воспроизведены на стенде: minimal API, PostgreSQL 16, Newtonsoft.Json, консольные проверки
+      криптографии.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Карта: категория → механизм</h2>
+    <table>
+      <thead><tr><th>OWASP 2021</th><th>Как выглядит в .NET</th><th>Чем закрывать</th></tr></thead>
+      <tbody>
+        <tr><td>A01 Broken Access Control</td><td>чужой заказ по id, забытый <code>RequireAuthorization</code></td>
+          <td>политики, resource-handler, <code>FallbackPolicy</code> (глава 35)</td></tr>
+        <tr><td>A02 Cryptographic Failures</td><td>MD5/SHA1 для паролей, «свой» шифр, HTTP</td>
+          <td><code>Rfc2898DeriveBytes.Pbkdf2</code>, AES-GCM, TLS, <code>FixedTimeEquals</code></td></tr>
+        <tr><td>A03 Injection</td><td>склейка SQL, сырой HTML, <code>Process.Start</code> с вводом</td>
+          <td>параметры, <code>FromSqlInterpolated</code>, <code>HtmlEncoder</code></td></tr>
+        <tr><td>A04 Insecure Design</td><td>нет лимитов, «доверяем сумме из запроса»</td>
+          <td>rate limiting (глава 28), серверная валидация бизнес-правил</td></tr>
+        <tr><td>A05 Security Misconfiguration</td><td>секрет в <code>appsettings.json</code>, нет заголовков,
+          подробные ошибки</td><td>user-secrets/env/vault, security headers, ProblemDetails</td></tr>
+        <tr><td>A06 Vulnerable Components</td><td>старый пакет с CVE</td><td><code>dotnet list package
+          --vulnerable</code>, Dependabot/Renovate</td></tr>
+        <tr><td>A07 Identification Failures</td><td>слабые пароли, нет блокировки перебора</td><td>глава 34 +
+          lockout, MFA</td></tr>
+        <tr><td>A08 Deserialization</td><td><code>TypeNameHandling.All</code> в Newtonsoft</td>
+          <td><code>System.Text.Json</code>, запрет полиморфизма по имени типа</td></tr>
+        <tr><td>A09 Logging Failures</td><td>токены и пароли в логах, нет аудита</td><td>редактирование логов,
+          структурные события, аудит доступа</td></tr>
+        <tr><td>A10 SSRF</td><td>сервер ходит по URL из запроса</td><td>allowlist доменов, блок частных
+          диапазонов и metadata-эндпоинта</td></tr>
+      </tbody>
+    </table>
+    <p>Дальше — только те пункты, где есть что показать кодом и выводом. A01 и A07 подробно разобраны в главах
+      35 и 34: дублировать их здесь смысла нет, но в чек-листе они остаются.</p>
+
+    <h2>A02. Криптография: пароли, целостность, ключи</h2>
+    <p>Пароли не шифруют и не хешируют «просто SHA256»: нужна медленная функция с солью. В .NET это PBKDF2
+      (<code>Rfc2898DeriveBytes.Pbkdf2</code>) — встроенный, без пакетов. Замер на этой машине:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var salt = RandomNumberGenerator.GetBytes(16);                  // соль на пользователя
+
+var hash = Rfc2898DeriveBytes.Pbkdf2(
+    password: "correct horse battery staple",
+    salt: salt,
+    iterations: 210_000,                                        // рекомендация OWASP для SHA256
+    hashAlgorithm: HashAlgorithmName.SHA256,
+    outputLength: 32);
+
+// проверка — за постоянное время, без короткого замыкания
+var ok = CryptographicOperations.FixedTimeEquals(stored, candidate);</code></pre>
+      <pre><code class="language-text">PBKDF2-SHA256,  100000 итераций:   19 мс, хеш 93D89F64A2C7FA30…
+PBKDF2-SHA256,  210000 итераций:   39 мс, хеш D7D9B21ED7180D41…
+PBKDF2-SHA256,  600000 итераций:  112 мс, хеш B46175684E906067…
+FixedTimeEquals (верный пароль): True
+FixedTimeEquals (неверный пароль): False</code></pre>
+    </div>
+    <p>39 мс на проверку — незаметно для пользователя и смертельно для перебора: миллион попыток это больше
+      десяти часов на одном ядре. Число итераций хранят рядом с хешем (например,
+      <code>pbkdf2$210000$salt$hash</code>), чтобы его можно было поднять без сброса всех паролей. Ещё лучше —
+      Argon2id (пакет <code>Konscious.Security.Cryptography.Argon2</code>), если он доступен.</p>
+    <p>Для данных, которые надо именно <em>шифровать</em>, берут аутентифицированное шифрование — AES-GCM: оно
+      ловит и подмену байта шифротекста, и подмену тега.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using var aes = new AesGcm(key, tagSizeInBytes: 16);
+aes.Encrypt(nonce, plaintext, cipher, tag);
+
+// попытка расшифровать изменённый шифротекст
+aes.Decrypt(nonce, tampered, tag, restored);</code></pre>
+      <pre><code class="language-text">AES-GCM: шифротекст 41 байт, тег 4024F04602C599E7…
+AES-GCM с изменённым байтом: AuthenticationTagMismatchException</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Чего не делать никогда</span>
+      <ul>
+        <li>MD5/SHA1/SHA256 без соли и растяжения — для паролей.</li>
+        <li>Свой «шифр» из XOR/Base64: Base64 — это кодирование, а не защита.</li>
+        <li>Один AES-ключ на всё приложение, без KMS/vault и ротации.</li>
+        <li>Сравнение секретов через <code>==</code> — только <code>FixedTimeEquals</code>.</li>
+        <li>HTTP внутри периметра: TLS везде, включая сервис-сервис.</li>
+      </ul>
+    </div>
+
+    <h2>A03. Инъекции: SQL</h2>
+    <p>Стенд: PostgreSQL 16 в контейнере, таблица <code>app_users</code> из трёх строк
+      (<code>alice</code>, <code>bob</code>, <code>root</code> с ролью <code>admin</code>). Запрос собирается
+      склейкой строк — так, как это обычно и появляется в коде «для отчёта».</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var injected = "' OR '1'='1' --";
+var sql = $"SELECT id, email, role FROM app_users WHERE email = '{injected}'";</code></pre>
+      <pre><code class="language-text">SQL: SELECT id, email, role FROM app_users WHERE email = '' OR '1'='1' --'
+склейка + вредоносный ввод: 3 строк
+   id=1 email=alice@example.com role=user
+   id=2 email=bob@example.com role=user
+   id=3 email=root@example.com role=admin
+склейка + обычный ввод: 1 строк
+   id=1 email=alice@example.com role=user
+склейка + апостроф в данных: 42601 syntax error at or near "brien"
+параметр + вредоносный ввод: 0 строк</code></pre>
+    </div>
+    <p>Четыре вывода из одного запуска:</p>
+    <ul>
+      <li>Инъекция вернула <strong>все</strong> строки, включая администратора, — типичная утечка через
+        авторизацию/логин.</li>
+      <li>Тот же код с нормальным e-mail работает «правильно» — поэтому баг и живёт незамеченным.</li>
+      <li>Обычный апостроф в данных (<code>o'brien@example.com</code>) ломает запрос с ошибкой <code>42601</code>:
+        если приложение показывает текст ошибки, оно ещё и рассказывает структуру запроса.</li>
+      <li>Параметризованный запрос с тем же вредоносным вводом вернул <strong>0 строк</strong>: значение ушло
+        отдельно от текста SQL.</li>
+    </ul>
+    <div class="codewrap">
+      <pre><code class="language-csharp">// EF Core: интерполяция в FromSqlRaw — это склейка, а не параметр
+var bad = db.Users.FromSqlRaw($"SELECT id, email, role FROM app_users WHERE email = '{injected}'").ToList();
+
+// FromSqlInterpolated превращает интерполяцию в параметры
+var good = db.Users.FromSqlInterpolated($"SELECT id, email, role FROM app_users WHERE email = {injected}").ToList();</code></pre>
+      <pre><code class="language-text">EF FromSqlRaw со склейкой: 3 строк
+   id=1 email=alice@example.com role=user
+   id=2 email=bob@example.com role=user
+   id=3 email=root@example.com role=admin
+EF FromSqlInterpolated: 0 строк</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Почему анализатор ругается на <code>FromSqlRaw</code></span>
+      <p><code>FromSqlRaw</code> принимает строку — если в неё попала интерполяция, она уже склеена до вызова, и EF
+        не может ничего параметризовать. Отсюда предупреждение <strong>EF1002</strong> («possible SQL injection»)
+        и правило: либо <code>FromSqlInterpolated</code>/<code>FromSql</code>, либо <code>FromSqlRaw</code> с
+        явными <code>NpgsqlParameter</code>. Динамические части — имена таблиц, направление сортировки, список
+        колонок — параметрами не передать: их сверяют с белым списком.</p>
+    </div>
+
+    <h2>A03. Инъекции: HTML и XSS</h2>
+    <p>Razor и <code>HtmlEncoder</code> экранируют по умолчанию — уязвимость появляется там, где экранирование
+      обошли руками (<code>Html.Raw</code>, <code>@((MarkupString)…)</code>, конкатенация HTML в
+      <code>ContentResult</code>). Вывод стенда с одной и той же строкой <code>&lt;script&gt;alert(1)&lt;/script&gt;</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">### B2: сырой HTML (уязвимо)
+&lt;p&gt;Привет, &lt;script&gt;alert(1)&lt;/script&gt;&lt;/p&gt;
+### B3: HTML-кодирование
+&lt;p&gt;Привет, &amp;lt;script&amp;gt;alert(1)&amp;lt;/script&amp;gt;&lt;/p&gt;
+### B4: JSON (экранирование внутри JSON)
+{"message":"&lt;script&gt;alert(1)&lt;/script&gt;"}</code></pre>
+    </div>
+    <p>JSON-ответ вернул строку как есть: <code>System.Text.Json</code> по умолчанию экранирует только то, что
+      обязательно для JSON (кавычки, управляющие символы), но не <code>&lt;</code>. Это нормально и правильно —
+      <strong>экранировать должен тот, кто вставляет данные в HTML</strong>; React это делает сам, а
+      <code>dangerouslySetInnerHTML</code> — нет. Отдельный риск — CSP и заголовки (ниже), которые ловят XSS, если
+      экранирование где-то пропустили.</p>
+
+    <h2>CSRF: почему cookie-аутентификации нужен токен</h2>
+    <p>Cookie браузер прикладывает к запросу автоматически, в том числе к запросу с чужого сайта. Защита —
+      antiforgery: сервер выдаёт cookie и требует тот же токен в заголовке (двойная отправка). Проверка на стенде
+      с эндпоинтом перевода:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddAntiforgery(o =&gt; o.HeaderName = "X-CSRF-TOKEN");
+app.UseAntiforgery();
+
+app.MapPost("/transfer", (HttpContext ctx) =&gt; "перевод выполнен").RequireAntiforgery();</code></pre>
+      <pre><code class="language-text">### B5: POST без CSRF-токена, но с cookie
+"CSRF: The required antiforgery header value \"X-CSRF-TOKEN\" is not present."  [400]
+### B6: POST с заголовком X-CSRF-TOKEN
+"перевод выполнен"  [200]
+### B7: POST с чужим токеном
+"CSRF: The antiforgery token could not be decrypted."  [400]</code></pre>
+    </div>
+    <p>Cookie сама по себе запрос не пропускает (B5), подделанный токен не расшифровывается (B7) — чужой сайт не
+      может прочитать токен из вашего домена. Если API аутентифицирует по <code>Authorization: Bearer</code>, CSRF
+      ему не страшен: браузер не добавляет заголовок автоматически. Именно поэтому «JWT в заголовке» и
+      «antiforgery» — альтернативы, а не «оба на всякий случай».</p>
+
+    <h2>A05. Неверная конфигурация: заголовки и секреты</h2>
+    <p>Минимальный набор заголовков, который отдавал стенд после добавления middleware:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.Use(async (ctx, next) =&gt;
+{
+    var h = ctx.Response.Headers;
+    h["X-Content-Type-Options"] = "nosniff";            // не угадывать MIME
+    h["X-Frame-Options"] = "DENY";                      // запрет встраивания в iframe
+    h["Referrer-Policy"] = "no-referrer";               // не утекает URL с токеном
+    h["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'";
+    await next();
+});</code></pre>
+      <pre><code class="language-text">### B1: заголовки безопасности
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: no-referrer
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'</code></pre>
+    </div>
+    <p>CSP <code>default-src 'none'</code> — это заголовок для API (HTML тут не отдаётся). Для страниц политика
+      мягче и подбирается под фронтенд: <code>script-src 'self'</code>, без <code>'unsafe-inline'</code>. Часть
+      заголовков умеет ставить <code>app.UseHsts()</code> и <code>UseHttpsRedirection()</code>, но CSP и
+      <code>X-Frame-Options</code> обычно добавляют явно или на прокси.</p>
+    <p>Секреты. На стенде в <code>appsettings.json</code> ключа <code>Jwt</code> не было вовсе; проверялись два
+      штатных источника:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ grep -c 'Jwt' appsettings.json
+0
+$ dotnet user-secrets init
+Set UserSecretsId to '81501c06-b9d3-4a8d-92e2-7d1b7691a915' for MSBuild project 'web.csproj'.
+$ dotnet user-secrets set 'Jwt:Key' 'super-secret-from-user-secrets-123456'
+Successfully saved Jwt:Key = super-secret-from-user-secrets-123456 to the secret store.
+
+$ grep -n 'UserSecretsId' web.csproj
+7:    &lt;UserSecretsId&gt;81501c06-b9d3-4a8d-92e2-7d1b7691a915&lt;/UserSecretsId&gt;
+
+$ curl -s http://127.0.0.1:5082/secret
+env=Development; Jwt:Key=super-secret…</code></pre>
+    </div>
+    <p>Файл секретов лежит вне репозитория (<code>~/.microsoft/usersecrets/&lt;id&gt;/secrets.json</code>) и
+      подключается только в <code>Development</code>. В контейнере тот же ключ приходит переменной окружения с
+      двойным подчёркиванием вместо двоеточия:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ Jwt__Key=from-environment-variable-abcdef dotnet run --no-build
+$ curl -s http://127.0.0.1:5082/secret
+env=Development; Jwt:Key=from-environ…</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Секрет в <code>appsettings.json</code> — это уже утечка</span>
+      <p>Файл попадает в git, в образ, в логи сборки и в бэкапы. Правило: в <code>appsettings.json</code> — только
+        несекретные значения и пустые заготовки; локально — user-secrets; в Kubernetes/проде — переменные окружения
+        из Secret’ов или внешний vault. И помните про порядок источников конфигурации: переменная окружения
+        перекрывает <code>appsettings.json</code>, поэтому «почему в проде не тот ключ» обычно объясняется именно
+        этим.</p>
+    </div>
+
+    <h2>A08. Небезопасная десериализация</h2>
+    <p>Классика — <code>TypeNameHandling.All</code> в Newtonsoft.Json: JSON может указать, какой тип создать, и
+      сериализатор создаст его вместе с конструктором. На стенде «полезная нагрузка» указывала на класс с побочным
+      эффектом в конструкторе:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var settings = new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.All };
+var money = JsonConvert.DeserializeObject&lt;Money&gt;(attackerJson, settings);</code></pre>
+      <pre><code class="language-text">файл до разбора: False
+TypeNameHandling.All: создан SideEffect
+файл после разбора: True
+без TypeNameHandling: Money, amount = 0
+System.Text.Json: Money, amount = 0
+--- содержимое файла ---
+конструктор выполнен</code></pre>
+    </div>
+    <p>Один разбор JSON — и выполнился чужой конструктор; в реальной атаке там оказывается цепочка известных
+      типов, приводящая к запуску процесса. Те же данные без <code>TypeNameHandling</code> и в
+      <code>System.Text.Json</code> остались безобидным объектом: <code>$type</code> игнорируется, потому что
+      полиморфизм по имени типа там не включён по умолчанию.</p>
+    <div class="box warn">
+      <span class="t">Правила для десериализации</span>
+      <ul>
+        <li><code>TypeNameHandling.All/Auto/Objects</code> — запрещены для данных извне; если очень нужно —
+          <code>SerializationBinder</code> с белым списком типов.</li>
+        <li><code>System.Text.Json</code> + <code>[JsonPolymorphic]</code> с явными
+          <code>[JsonDerivedType]</code> — полиморфизм только по разрешённым типам (глава 24).</li>
+        <li>Ограничивайте размер тела запроса и глубину вложенности: «JSON-бомба» роняет процесс по памяти.</li>
+        <li>Не десериализуйте в типы с побочными эффектами в конструкторах и сеттерах.</li>
+      </ul>
+    </div>
+
+    <h2>A06, A09, A10: зависимости, логи, SSRF</h2>
+    <p><strong>A06.</strong> Уязвимые зависимости ищут командой, а не глазами:</p>
+    <div class="codewrap">
+      <pre><code class="language-bash">$ dotnet list package --vulnerable --include-transitive
+The following sources were used:
+   https://api.nuget.org/v3/index.json
+
+The given project `api` has no vulnerable packages given the current sources.</code></pre>
+    </div>
+    <p>На стенде — пусто. Команда смотрит в те же фиды, откуда ставятся пакеты (приватный фид добавляют флагом
+      <code>--source</code>), и её стоит запускать в CI, а не «раз в год»: она же проверяет транзитивные
+      зависимости, которые вы сами не выбирали.</p>
+    <p><strong>A09.</strong> Логи — тоже канал утечки. Токен в строке запроса попадает в логи прокси, историю
+      браузера и <code>Referer</code>; тело запроса с паролем — в трейс исключения. Что делать: токены только в
+      заголовке, в логах — идентификаторы (<code>sub</code>, <code>jti</code>) вместо значений, редактор для
+      чувствительных полей, отдельный аудит-лог на доступ к чужим данным (кто, что, когда, с какого IP).</p>
+    <p><strong>A10.</strong> SSRF — когда сервер сам идёт по URL из запроса: «загрузите аватар по ссылке».
+      Минимум защиты:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">var uri = new Uri(requestedUrl);
+if (uri.Scheme is not ("http" or "https")) return Results.BadRequest();
+if (!allowedHosts.Contains(uri.Host)) return Results.BadRequest();          // белый список
+
+var ip = (await Dns.GetHostAddressesAsync(uri.Host)).First();
+if (IPAddress.IsLoopback(ip) || ip.IsIPv6LinkLocal) return Results.BadRequest();
+// плюс запрет 10/8, 172.16/12, 192.168/16, 169.254.169.254 (cloud metadata)</code></pre>
+    </div>
+    <p>Проверка «по строке» недостаточна: DNS может вернуть внутренний адрес, а редирект — увести на
+      <code>169.254.169.254</code>. Надёжнее — резолвить имя и проверять <em>адрес</em>, запрещать редиректы
+      (<code>AllowAutoRedirect = false</code>) и ходить через прокси с политикой egress.</p>
+
+    <div class="box gold">
+      <span class="t">★ Чек-лист: 10 пунктов на ревью</span>
+      <ol>
+        <li>Все SQL-запросы параметризованы; <code>FromSqlRaw</code> — только с явными параметрами; динамические
+          имена — по белому списку.</li>
+        <li>Пароли — PBKDF2 (≥210 000 итераций) или Argon2id; сравнение — <code>FixedTimeEquals</code>.</li>
+        <li>Для шифрования — AES-GCM; ключи в vault/KMS, с ротацией.</li>
+        <li>HTML собирается шаблонизатором; <code>Html.Raw</code>/<code>dangerouslySetInnerHTML</code> — под
+          ревью и только с санитайзером.</li>
+        <li>Cookie-аутентификация — с antiforgery; Bearer-аутентификация — без CSRF, но с CSP.</li>
+        <li>Заголовки <code>nosniff</code>, <code>X-Frame-Options</code>, <code>Referrer-Policy</code>, CSP
+          включены.</li>
+        <li>Секретов нет в <code>appsettings.json</code> и в git; локально — user-secrets, в проде — env/Secrets.</li>
+        <li><code>dotnet list package --vulnerable --include-transitive</code> в CI; обновления не реже раза в
+          месяц.</li>
+        <li>Десериализация — <code>System.Text.Json</code>; <code>TypeNameHandling</code> запрещён, размер тела
+          ограничен.</li>
+        <li>Исходящие запросы по пользовательскому URL — белый список хостов, проверка IP, без авторедиректов.</li>
+      </ol>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что спросят и как отвечать</span>
+      <ol>
+        <li><strong>«Как защититься от SQL-инъекций?»</strong> — параметры вместо склейки; в EF —
+          <code>FromSqlInterpolated</code>/LINQ; плюс минимальные права пользователя БД.</li>
+        <li><strong>«XSS: где экранировать?»</strong> — на выходе, в контексте HTML; Razor/React делают это по
+          умолчанию, ломают — <code>Raw</code>/<code>dangerouslySetInnerHTML</code>; CSP — вторая линия.</li>
+        <li><strong>«Зачем antiforgery, если есть JWT?»</strong> — при Bearer-токене не нужен; нужен при cookie,
+          потому что браузер прикладывает cookie к чужим запросам.</li>
+        <li><strong>«Чем опасен <code>TypeNameHandling.All</code>?»</strong> — JSON выбирает тип, создаётся объект
+          с побочными эффектами в конструкторе → RCE; на стенде файл создался при разборе.</li>
+        <li><strong>«Как хранить секреты?»</strong> — user-secrets локально, переменные окружения/Secrets в проде,
+          vault для критичных; <code>appsettings.json</code> — только несекретное.</li>
+        <li><strong>«Как понять, что зависимость уязвима?»</strong> —
+          <code>dotnet list package --vulnerable --include-transitive</code> и автоматические PR от
+          Dependabot/Renovate.</li>
+      </ol>
+    </div>
+
+    <div class="pager">
+      <a href="ch35-authorization.html">← <span class="sp">Глава 35. Авторизация: роли, claims, политики и ресурсы</span></a>
+      <a href="ch37-interview.html"><span class="sp">Глава 37. Как отвечать на интервью</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
+
+
+

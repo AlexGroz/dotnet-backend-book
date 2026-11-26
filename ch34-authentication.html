@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 34 · Аутентификация: JWT, OAuth 2.0 и OpenID Connect</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="net.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch35-authorization.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">.NET · Часть X · Безопасность</div>
+    <h1>Глава 34. Аутентификация: JWT, OAuth 2.0 и OpenID Connect</h1>
+    <p class="sublead">Кто ты: токен, его подпись, срок жизни и ключи — и как это выглядит в ASP.NET Core.
+      Все ответы, заголовки и тексты ошибок в главе получены запуском minimal API на .NET 8.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Два разных вопроса</h2>
+    <table>
+      <thead><tr><th></th><th>Аутентификация</th><th>Авторизация</th></tr></thead>
+      <tbody>
+        <tr><td>Вопрос</td><td>«Кто ты?»</td><td>«Что тебе можно?»</td></tr>
+        <tr><td>Делает</td><td>проверяет токен/куки/сертификат и создаёт <code>ClaimsPrincipal</code></td>
+          <td>сравнивает claims с требованиями политики</td></tr>
+        <tr><td>Ответ при отказе</td><td><strong>401 Unauthorized</strong> — «не представился»</td>
+          <td><strong>403 Forbidden</strong> — «представился, но нельзя»</td></tr>
+        <tr><td>Где в конвейере</td><td><code>UseAuthentication()</code></td><td><code>UseAuthorization()</code></td></tr>
+        <tr><td>Глава</td><td>эта</td><td>35</td></tr>
+      </tbody>
+    </table>
+    <p>Путаница между 401 и 403 — самая частая мелочь на ревью: 401 без <code>WWW-Authenticate</code> ломает
+      клиентов, а 403 вместо 401 (и наоборот) сбивает с толку и мониторинг, и фронтенд. Порядок вызовов тоже
+      важен: <code>UseAuthentication</code> обязан идти до <code>UseAuthorization</code>, иначе политики увидят
+      анонимного пользователя.</p>
+
+    <h2>Из чего состоит JWT</h2>
+    <p>Компактный токен — три части через точку: <code>header.payload.signature</code>. Ниже — реальный токен,
+      выпущенный тестовым эндпоинтом (261 символ):</p>
+    <div class="codewrap">
+      <pre><code class="language-text">eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZSIsInJvbGUiOiJ1c2VyIiwic2NvcGUiOiJvcmRlcnMucmVhZCIsIm5iZiI6MTc5NTcxMzM0MywiZXhwIjoxNzk1NzE3MDAzLCJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwiYXVkIjoib3JkZXJzLWFwaSJ9.9Z0m…</code></pre>
+      <p class="cap">Заголовок (<code>alg</code> — алгоритм подписи) и полезная нагрузка — это base64url, а не
+        шифрование</p>
+      <pre><code class="language-text">{"alg":"HS256","typ":"JWT"}
+
+{
+  "sub": "alice",
+  "role": "user",
+  "scope": "orders.read",
+  "nbf": 1795713343,
+  "exp": 1795717003,
+  "iss": "https://issuer.example",
+  "aud": "orders-api"
+}</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Payload читается кем угодно</span>
+      <p>Любой, у кого есть токен, декодирует payload одной строкой (в главе он так и получен). Подпись
+        гарантирует <em>неизменность</em>, но не секретность: пароли, номера карт, ИНН и «внутренние» флаги в
+        claims класть нельзя. Если данные нужны клиенту и не должны читаться посторонними — это уже не JWT, а
+        зашифрованный токен (JWE) или обычный серверный сеанс.</p>
+    </div>
+    <table>
+      <thead><tr><th>Claim</th><th>Смысл</th><th>Кто проверяет</th></tr></thead>
+      <tbody>
+        <tr><td><code>iss</code></td><td>кто выпустил токен</td><td><code>ValidIssuer</code></td></tr>
+        <tr><td><code>aud</code></td><td>для какого API он предназначен</td><td><code>ValidAudience</code></td></tr>
+        <tr><td><code>exp</code></td><td>до какого времени действует</td><td>lifetime-валидация (+ <code>ClockSkew</code>)</td></tr>
+        <tr><td><code>nbf</code></td><td>с какого времени действует</td><td>lifetime-валидация</td></tr>
+        <tr><td><code>sub</code></td><td>кто пользователь</td><td>приложение (<code>NameClaimType</code>)</td></tr>
+        <tr><td><code>role</code>, <code>scope</code></td><td>права</td><td>политики авторизации (глава 35)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Подключение в ASP.NET Core</h2>
+    <p>Минимум, который нужен API, чтобы принимать токены от известного издателя:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =&gt;
+    {
+        o.MapInboundClaims = false;              // имена claims остаются как в JWT
+        o.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidIssuer = "https://issuer.example",
+            ValidAudience = "orders-api",
+            IssuerSigningKey = new SymmetricSecurityKey(key),
+            ValidateIssuerSigningKey = true,
+            NameClaimType = "sub",
+            RoleClaimType = "role",
+            ClockSkew = TimeSpan.Zero            // по умолчанию 5 минут «запаса»
+        };
+    });
+
+var app = builder.Build();
+app.UseAuthentication();                         // кто ты
+app.UseAuthorization();                          // что можно
+
+app.MapGet("/me", (ClaimsPrincipal user) =&gt; new
+{
+    name = user.Identity?.Name,
+    sub = user.FindFirst("sub")?.Value,
+    role = user.FindFirst("role")?.Value,
+    isAdmin = user.IsInRole("admin")
+}).RequireAuthorization();</code></pre>
+    </div>
+    <p>Рабочий ответ этого эндпоинта с валидным токеном:</p>
+    <div class="codewrap">
+      <pre><code class="language-text">{"name":"alice","sub":"alice","role":"user","scope":"orders.read","isAdmin":false,
+ "authType":"AuthenticationTypes.Federation"}</code></pre>
+    </div>
+
+    <h2>Что именно проверяется и как это выглядит при отказе</h2>
+    <p>Каждая строка таблицы — реальный ответ стенда: запрос с «неправильным» токеном и заголовок
+      <code>WWW-Authenticate</code>, по которому клиент понимает причину.</p>
+    <table>
+      <thead><tr><th>Ситуация</th><th>Код</th><th><code>WWW-Authenticate</code></th></tr></thead>
+      <tbody>
+        <tr><td>Токена нет</td><td>401</td><td><code>Bearer</code> (без описания)</td></tr>
+        <tr><td>Подпись чужим ключом</td><td>401</td>
+          <td><code>Bearer error="invalid_token", error_description="The signature key was not found"</code></td></tr>
+        <tr><td>Чужая audience</td><td>401</td>
+          <td><code>... "The audience 'other-api' is invalid"</code></td></tr>
+        <tr><td>Истёк срок</td><td>401</td>
+          <td><code>... "The token expired at '11/26/2026 16:48:25'"</code></td></tr>
+        <tr><td>Ещё не действует (<code>nbf</code>)</td><td>401</td>
+          <td><code>... "The token is not valid before '11/26/2026 18:18:25'"</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box note">
+      <span class="t"><code>ClockSkew</code> — тихая настройка на 5 минут</span>
+      <p>По умолчанию <code>TokenValidationParameters.ClockSkew</code> равно пяти минутам: токен, истёкший минуту
+        назад, всё ещё принимается — это компенсация расхождения часов между серверами. Для тестов и для
+        «строгой» безопасности ставят <code>TimeSpan.Zero</code>, иначе проверка «токен просрочен» на стенде
+        проходит не так, как ожидается. Обратная сторона: без запаса любой дрейф часов у издателя начинает
+        валить легитимные запросы.</p>
+    </div>
+
+    <h2>Claims и ловушка с их именами</h2>
+    <p>По умолчанию <code>JwtSecurityTokenHandler</code> <em>переименовывает</em> claims в длинные имена
+      .NET: <code>sub</code> → <code>ClaimTypes.NameIdentifier</code>, <code>role</code> →
+      <code>ClaimTypes.Role</code>. Из-за этого код <code>user.FindFirst("sub")</code> возвращает
+      <code>null</code>, хотя claim в токене есть — мы это увидели на стенде: до установки
+      <code>MapInboundClaims = false</code> вывод был <code>sub = </code> (пусто), после — <code>sub = alice</code>.</p>
+    <table>
+      <thead><tr><th>Настройка</th><th>Что делает</th><th>Когда нужна</th></tr></thead>
+      <tbody>
+        <tr><td><code>MapInboundClaims = false</code></td><td>оставляет имена как в токене</td><td>код читает
+          <code>"sub"</code>, <code>"role"</code>, <code>"scope"</code> напрямую</td></tr>
+        <tr><td><code>NameClaimType</code></td><td>какой claim считать именем пользователя
+          (<code>Identity.Name</code>)</td><td>обычно <code>sub</code> или <code>preferred_username</code></td></tr>
+        <tr><td><code>RoleClaimType</code></td><td>какой claim использовать в <code>IsInRole</code> и
+          <code>RequireRole</code></td><td>если роль лежит не в <code>ClaimTypes.Role</code>, а в
+          <code>role</code>/<code>roles</code></td></tr>
+      </tbody>
+    </table>
+    <p>Если этого не сделать, «не работает <code>IsInRole</code>» и «claim есть, а <code>FindFirst</code> его не
+      находит» — одна и та же причина. Правило простое: <strong>посмотрите, что реально лежит в
+      <code>User.Claims</code></strong>, прежде чем искать баг в политике.</p>
+
+    <h2>HS256 против RS256: у кого есть право выпускать токены</h2>
+    <p>Симметричная подпись (<code>HS256</code>) означает: один и тот же секрет и подписывает, и проверяет. Значит,
+      <strong>любой сервис, который умеет проверять токен, умеет и выпустить себе любой токен</strong> — включая
+      <code>role: admin</code>. Проверено на стенде: проверяющая сторона, зная секрет, выпустила себе
+      администраторский токен и успешно его провалидировала.</p>
+    <div class="codewrap">
+      <pre><code class="language-text">HS256: проверяющая сторона знает секрет и может выпустить свой токен, role = admin</code></pre>
+    </div>
+    <p>Асимметричная подпись (<code>RS256</code>) делит роли: приватный ключ есть только у издателя, публичный —
+      у всех, кто проверяет. Приватный ключ нельзя «вычитать» из публичного, поэтому проверяющая сторона не может
+      подделать токен.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">using var rsa = RSA.Create(2048);
+var privateKey = new RsaSecurityKey(rsa) { KeyId = "kid-2026-11" };   // у издателя
+var publicKey  = new RsaSecurityKey(rsa.ExportParameters(false)) { KeyId = "kid-2026-11" }; // у API
+
+var token = new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(
+    issuer: "https://issuer.example",
+    audience: "orders-api",
+    claims: new[] { new Claim("sub", "alice"), new Claim("role", "user") },
+    expires: DateTime.UtcNow.AddMinutes(5),
+    signingCredentials: new SigningCredentials(privateKey, SecurityAlgorithms.RsaSha256)));</code></pre>
+      <p class="cap">Вывод стенда: что видно в токене и какие проверки срабатывают</p>
+      <pre><code class="language-text">алгоритм в заголовке: {"alg":"RS256","kid":"kid-2026-11","typ":"JWT"}
+длина токена: 535
+проверка публичным ключом: sub = alice, alg = RS256
+чужой публичный ключ: SecurityTokenSignatureKeyNotFoundException
+подмена payload: SecurityTokenInvalidSignatureException
+alg = none: SecurityTokenInvalidSignatureException
+HS256: проверяющая сторона знает секрет и может выпустить свой токен, role = admin</code></pre>
+    </div>
+    <table>
+      <thead><tr><th></th><th><code>HS256</code></th><th><code>RS256</code></th></tr></thead>
+      <tbody>
+        <tr><td>Ключ для проверки</td><td>тот же секрет, что для подписи</td><td>публичный ключ</td></tr>
+        <tr><td>Кто может подделать токен</td><td>любой, кто проверяет (у него есть секрет)</td><td>только
+          владелец приватного ключа</td></tr>
+        <tr><td>Размер токена</td><td>261 символ</td><td>535 символов</td></tr>
+        <tr><td>Когда подходит</td><td>один монолит, где издатель и потребитель — один процесс</td><td>несколько
+          сервисов, внешние клиенты, сторонний IdP</td></tr>
+      </tbody>
+    </table>
+    <p>Для «взрослой» схемы ключи не хранят в коде: API берёт их из <code>jwks_uri</code> провайдера, кэширует и
+      выбирает по <code>kid</code> из заголовка — именно поэтому <code>kid</code> в примере выставлен. Ротация
+      тогда выглядит так: издатель добавляет новый ключ в JWKS, старые токены живут до <code>exp</code>, потом
+      старый ключ убирают. Без <code>kid</code> смена ключа означает, что все выданные токены разом невалидны.</p>
+
+    <h2>OAuth 2.0 и OpenID Connect: кто есть кто</h2>
+    <table>
+      <thead><tr><th>Участник</th><th>Роль</th><th>Пример</th></tr></thead>
+      <tbody>
+        <tr><td>Resource owner</td><td>пользователь, чьи данные защищаются</td><td>клиент банка</td></tr>
+        <tr><td>Client</td><td>приложение, которое просит доступ</td><td>SPA, мобильное, ваш сервис</td></tr>
+        <tr><td>Authorization server</td><td>выдаёт токены, проверяет пользователя</td><td>Keycloak, Entra ID, Duende,
+          Auth0</td></tr>
+        <tr><td>Resource server</td><td>API, который принимает access token</td><td>ваш ASP.NET Core сервис</td></tr>
+      </tbody>
+    </table>
+    <p><strong>OAuth 2.0</strong> — про <em>делегированный доступ</em> (access token: «этому клиенту можно читать
+      заказы»). <strong>OpenID Connect</strong> — надстройка над OAuth, которая добавляет <em>аутентификацию</em>:
+      <code>id_token</code> (JWT с данными о пользователе), эндпоинт <code>/userinfo</code> и документ
+      обнаружения <code>/.well-known/openid-configuration</code>, где перечислены все адреса, включая
+      <code>jwks_uri</code>.</p>
+    <table>
+      <thead><tr><th>Поток</th><th>Кто использует</th><th>Особенность</th></tr></thead>
+      <tbody>
+        <tr><td>Authorization Code + PKCE</td><td>SPA, мобильные, серверные веб-приложения</td><td>основной
+          рекомендованный поток; PKCE защищает код от перехвата</td></tr>
+        <tr><td>Client Credentials</td><td>сервис-сервис, без пользователя</td><td>клиент получает токен на себя,
+          в claims — <code>client_id</code>/<code>scope</code></td></tr>
+        <tr><td>Device Code</td><td>телевизоры, CLI, устройства без браузера</td><td>пользователь вводит код на
+          другом устройстве</td></tr>
+        <tr><td>Implicit, ROPC (пароль)</td><td>устаревшие</td><td>в OAuth 2.1 исключены: токен утекает через
+          историю браузера или приложение хранит пароль</td></tr>
+      </tbody>
+    </table>
+    <table>
+      <thead><tr><th>Токен</th><th>Кому</th><th>Срок</th><th>Где хранить</th></tr></thead>
+      <tbody>
+        <tr><td>Access token</td><td>ресурсному серверу (API)</td><td>5–15 минут</td><td>в памяти клиента; для
+          SPA — не в <code>localStorage</code></td></tr>
+        <tr><td>ID token</td><td>клиенту (кто пользователь)</td><td>как access</td><td>только для отображения;
+          <strong>не</strong> для вызовов API</td></tr>
+        <tr><td>Refresh token</td><td>только серверу авторизации</td><td>дни-недели</td><td>httpOnly cookie или
+          защищённое хранилище; обязательна ротация</td></tr>
+      </tbody>
+    </table>
+    <p>В .NET против реального провайдера конфигурация короче, чем в учебном примере: вместо самодельного ключа
+      указывают <code>Authority</code>, и компонент сам скачивает метаданные и ключи, кэширует их и обновляет по
+      <code>kid</code>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =&gt;
+    {
+        o.Authority = "https://login.example.com/realms/orders";  // OIDC-провайдер
+        o.Audience = "orders-api";                                // ожидаемая aud
+        o.TokenValidationParameters.ValidAudience = "orders-api";
+    });</code></pre>
+    </div>
+    <div class="box warn">
+      <span class="t">Как JWT мешает «разлогинить» пользователя</span>
+      <p>Access token валиден, пока не истёк <code>exp</code>: отозвать его нельзя — API проверяет только подпись и
+        срок. Отсюда три рабочих приёма: <strong>короткий TTL</strong> (5–15 минут) плюс refresh-токен с ротацией;
+        <strong>список отозванных</strong> <code>jti</code> в Redis с TTL до <code>exp</code> (глава про Redis и
+        Lua); <strong>версия сессии/пользователя</strong> в claim, которую API сверяет с БД или кэшем. Если
+        требуется мгновенный logout «как в монолите» — JWT не тот инструмент, нужен серверный сеанс.</p>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Чек-лист аутентификации для API</span>
+      <ol>
+        <li>Токен проверяется по <code>iss</code>, <code>aud</code>, подписи и сроку — все четыре проверки
+          включены, ни одна не отключена «чтобы работало».</li>
+        <li>Ключи — из JWKS провайдера, с <code>kid</code> и ротацией; приватный ключ не лежит в репозитории и не
+          попадает в образ.</li>
+        <li>Секреты — user-secrets локально, переменные окружения или vault в проде (глава 36).</li>
+        <li>Access token — 5–15 минут; refresh — с ротацией и отзывом.</li>
+        <li>401 отдаётся с <code>WWW-Authenticate</code>, 403 — только после успешной аутентификации.</li>
+        <li>В логах нет токенов, в URL нет токенов (query string попадает в логи прокси и в историю).</li>
+        <li><code>ClockSkew</code> выбран осознанно; в тестах — <code>Zero</code>.</li>
+      </ol>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что спросят и как отвечать</span>
+      <ol>
+        <li><strong>«JWT — это шифрование?»</strong> — нет, подпись и base64url: payload читается кем угодно,
+          меняться не может. Секреты и PII в claims не кладут.</li>
+        <li><strong>«Чем access token отличается от id token?»</strong> — access нужен API и содержит права
+          (<code>scope</code>), id нужен клиенту и говорит, кто пользователь; отправлять id token в API — ошибка.</li>
+        <li><strong>«Почему не HS256 между сервисами?»</strong> — потому что каждый проверяющий получает право
+          выпускать токены; для нескольких сервисов — RS256/ES256 и публичные ключи.</li>
+        <li><strong>«Как отозвать JWT?»</strong> — никак, если он уже выдан: короткий TTL, refresh с ротацией,
+          blacklist по <code>jti</code> или версия сессии.</li>
+        <li><strong>«Что проверяет <code>ValidateAudience</code> и зачем?»</strong> — что токен выписан именно
+          этому API; без проверки токен, украденный у соседнего сервиса, подходит и к вашему.</li>
+      </ol>
+    </div>
+
+    <div class="pager">
+      <a href="ch33-migration.html">← <span class="sp">Глава 33. Миграция legacy: .NET Framework → .NET Core</span></a>
+      <a href="ch35-authorization.html"><span class="sp">Глава 35. Авторизация: роли, claims, политики и ресурсы</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
+
+
+

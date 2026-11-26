@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глава 35 · Авторизация: роли, claims, политики и ресурсы</title>
+<link rel="stylesheet" href="book.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/csharp.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a href="net.html">← Оглавление</a>
+  <span class="booktitle">Backend на .NET</span>
+  <a href="ch36-owasp.html">Далее →</a>
+</div></div>
+<div class="container">
+  <div class="chapter">
+    <div class="part">.NET · Часть X · Безопасность</div>
+    <h1>Глава 35. Авторизация: роли, claims, политики и ресурсы</h1>
+    <p class="sublead">Аутентификация ответила «кто ты». Теперь — «что тебе можно»: от ролей до проверки прав на
+      конкретный объект. Все коды ответов в главе — из запуска minimal API на .NET 8 с JWT.</p>
+    <p><span class="tag core">основная глава</span></p>
+
+    <h2>Четыре уровня, и все четыре нужны</h2>
+    <table>
+      <thead><tr><th>Уровень</th><th>Вопрос</th><th>Инструмент</th></tr></thead>
+      <tbody>
+        <tr><td>Аутентификация</td><td>валиден ли токен</td><td><code>UseAuthentication</code>,
+          <code>RequireAuthorization()</code></td></tr>
+        <tr><td>Роль / scope</td><td>этот класс пользователей вообще ходит сюда</td><td><code>RequireRole</code>,
+          <code>RequireClaim("scope", …)</code></td></tr>
+        <tr><td>Политика</td><td>набор условий из claims</td><td><code>AddPolicy</code>,
+          <code>RequireAssertion</code></td></tr>
+        <tr><td>Ресурс</td><td>можно ли <em>этому</em> пользователю <em>этот</em> заказ</td>
+          <td><code>IAuthorizationService.AuthorizeAsync(user, resource, policy)</code></td></tr>
+      </tbody>
+    </table>
+    <p>Типичная ошибка — остановиться на первом уровне: «эндпоинт закрыт, значит безопасно». Ниже мы на стенде
+      получим 403 на чужой заказ и увидим, почему одной роли <code>user</code> для этого мало.</p>
+
+    <h2>Роли</h2>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.MapGet("/admin", () =&gt; "админка")
+   .RequireAuthorization(p =&gt; p.RequireRole("admin"));</code></pre>
+      <pre><code class="language-text">### A13: /admin с ролью user и с ролью admin
+403 200</code></pre>
+    </div>
+    <p><code>RequireRole</code> читает claim, указанный в <code>RoleClaimType</code> (в нашем стенде —
+      <code>"role"</code>). Если эту настройку забыть, роли «не работают»: claim лежит в <code>role</code>, а
+      проверка ищет <code>ClaimTypes.Role</code>. Можно требовать несколько ролей сразу —
+      <code>RequireRole("admin", "manager")</code> означает «любая из».</p>
+
+    <h2>Политика из claims</h2>
+    <p>Как только правило перестаёт быть «одна роль», его выносят в политику. Здесь доступ к отчёту требует
+      одновременно: отдел <code>finance</code> <strong>и</strong> не гость.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddAuthorization(o =&gt;
+{
+    o.AddPolicy("finance", p =&gt; p
+        .RequireClaim("department", "finance")
+        .RequireAssertion(c =&gt; !c.User.IsInRole("guest")));
+});
+
+app.MapGet("/reports", () =&gt; "финансовый отчёт")
+   .RequireAuthorization("finance");</code></pre>
+      <pre><code class="language-text">### A10: /reports с department=finance
+финансовый отчёт  [200]
+### A11: /reports без finance
+403
+### A12: /reports с finance, но роль guest
+403</code></pre>
+    </div>
+    <p>Три вещи, которые показывают эти строки:</p>
+    <ul>
+      <li><code>RequireClaim</code> проверяет <em>наличие</em> claim с нужным значением; список допустимых значений
+        задаётся вторым параметром (<code>RequireClaim("department", "finance", "audit")</code>).</li>
+      <li><code>RequireAssertion</code> — «запасной выход» для правил, которые не выразить готовыми методами:
+        здесь — запрет для гостя даже при правильном отделе (A12). Это лямбда, поэтому её легко превратить в
+        нечитаемое условие — держите такие проверки маленькими и с именем политики.</li>
+      <li>Отказ политики — это <strong>403</strong>, а не 401: пользователь аутентифицирован, ему просто нельзя.</li>
+    </ul>
+
+    <h2>Права на конкретный объект</h2>
+    <p>Самое частое место уязвимостей: <code>/orders/43</code> доступен любому аутентифицированному пользователю,
+      если проверять только «залогинен ли он». Правильный шаблон — политика, которая получает <em>ресурс</em>:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">class OrderOwnerRequirement : IAuthorizationRequirement { }
+
+class OrderOwnerHandler : AuthorizationHandler&lt;OrderOwnerRequirement, Order&gt;
+{
+    protected override Task HandleRequirementAsync(AuthorizationHandlerContext context,
+        OrderOwnerRequirement requirement, Order resource)
+    {
+        if (context.User.IsInRole("admin") ||
+            context.User.FindFirst("sub")?.Value == resource.OwnerSub)
+            context.Succeed(requirement);
+        return Task.CompletedTask;
+    }
+}
+
+builder.Services.AddSingleton&lt;IAuthorizationHandler, OrderOwnerHandler&gt;();
+builder.Services.AddAuthorization(o =&gt;
+    o.AddPolicy("owner-or-admin", p =&gt; p.AddRequirements(new OrderOwnerRequirement())));
+
+app.MapGet("/orders/{id:int}", async (int id, ClaimsPrincipal user, IAuthorizationService authz) =&gt;
+{
+    if (!orders.TryGetValue(id, out var order)) return Results.NotFound();
+    var result = await authz.AuthorizeAsync(user, order, "owner-or-admin");
+    return result.Succeeded ? Results.Ok(order) : Results.Forbid();
+});</code></pre>
+      <pre><code class="language-text">### A4: /orders/42 — alice владелец
+{"id":42,"amount":1500,"user":"alice"}  [200]
+### A5: /orders/43 — alice не владелец
+403
+### A6: /orders/43 — bob владелец
+{"id":43,"amount":900,"user":"bob"}  [200]
+### A7: /orders/43 — admin не владелец, но админ
+{"id":43,"amount":900,"user":"root"}  [200]</code></pre>
+    </div>
+    <div class="box note">
+      <span class="t">Почему handler, а не <code>if</code> в эндпоинте</span>
+      <p>Логику «владелец или админ» можно написать прямо в обработчике — и она разъедется по пяти эндпоинтам с
+        разными вариациями. <code>IAuthorizationHandler</code> даёт: одно место правки, тестируемость без HTTP,
+        повторное использование в <code>[Authorize]</code> через <code>IAuthorizationService</code> и явную
+        семантику «политика + ресурс». Регистрировать handler нужно как <code>Singleton</code> (или
+        <code>Scoped</code>, если он ходит в БД), и он не должен бросать исключения — только
+        <code>Succeed</code>/ничего.</p>
+    </div>
+
+    <h2>403 или 404: не рассказывать лишнего</h2>
+    <p>403 на чужой объект сам по себе — утечка: он подтверждает, что заказ <code>43</code> существует (иначе был
+      бы 404). Если существование объекта само по себе чувствительно (медкарта, чужой договор, счёт), принято
+      «маскировать» отказ под 404:</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">app.MapGet("/orders/{id:int}/masked", async (int id, ClaimsPrincipal user, IAuthorizationService authz) =&gt;
+{
+    if (!orders.TryGetValue(id, out var order)) return Results.NotFound();
+    var result = await authz.AuthorizeAsync(user, order, "owner-or-admin");
+    return result.Succeeded ? Results.Ok(order) : Results.NotFound();   // 404 вместо 403
+});</code></pre>
+      <pre><code class="language-text">### A8: /orders/43/masked — чужой заказ
+404
+### A9: /orders/99 — не существует
+404</code></pre>
+    </div>
+    <p>Клиент теперь не может отличить «нет такого» от «есть, но не твой». Цена — менее понятные ошибки для
+      поддержки и логи, поэтому решение принимают для каждого ресурса отдельно: для публичного каталога 403
+      информативнее, для персональных данных — 404.</p>
+
+    <h2>Безопасно по умолчанию: <code>FallbackPolicy</code></h2>
+    <p>Забытый <code>RequireAuthorization()</code> на новом эндпоинте — классическая дыра. <code>FallbackPolicy</code>
+      переворачивает логику: <em>всё</em> требует аутентификации, а открытые эндпоинты помечаются явно.</p>
+    <div class="codewrap">
+      <pre><code class="language-csharp">builder.Services.AddAuthorization(o =&gt;
+    o.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());
+
+app.MapGet("/public", () =&gt; "открытый эндпоинт").AllowAnonymous();</code></pre>
+      <pre><code class="language-text">### A1: /public без токена (AllowAnonymous при fallback-политике)
+открытый эндпоинт  [200]
+### A2: /profile без токена (fallback-политика закрыла всё по умолчанию)
+401</code></pre>
+    </div>
+    <p>На этом же стенде всплыла и обратная сторона: эндпоинт выдачи тестовых токенов <code>/dev/token</code> тоже
+      попал под fallback и отвечал 401 — пока его не пометили <code>AllowAnonymous()</code>. Это ровно то
+      поведение, которое нужно: новое «забытое» API закрыто, а не открыто.</p>
+    <div class="box warn">
+      <span class="t">Что ломается чаще всего</span>
+      <ul>
+        <li><strong>Проверка прав на клиенте.</strong> Скрытая кнопка в React — удобство, не защита: запрос можно
+          отправить curl’ом. Права проверяются на сервере, всегда.</li>
+        <li><strong>IDOR.</strong> «Взял id из URL и отдал объект» — ровно A5 выше. Каждый доступ к объекту по
+          идентификатору обязан проверять владельца/арендатора, а не только факт логина.</li>
+        <li><strong>Устаревшие роли в токене.</strong> Роль сняли в БД, а в токене она живёт до <code>exp</code>.
+          Либо короткий TTL, либо проверка критичных прав по БД/кэшу на каждый запрос.</li>
+        <li><strong>Права только в контроллере.</strong> Внутренний сервис, вызванный из другого места, уже не
+          проходит через атрибут — критичные проверки дублируют в слое приложения.</li>
+        <li><strong>Одна роль «admin» на всё.</strong> Она неизбежно выдаётся слишком широко; права лучше дробить
+          по областям (<code>orders.write</code>, <code>reports.finance</code>).</li>
+      </ul>
+    </div>
+
+    <h2>Что выбрать: сравнение подходов</h2>
+    <table>
+      <thead><tr><th>Подход</th><th>Хорошо</th><th>Плохо</th><th>Пример</th></tr></thead>
+      <tbody>
+        <tr><td>Роль</td><td>просто, понятно бизнесу, есть в токене</td><td>роли «толстеют», не выражают правила
+          «свой объект»</td><td><code>RequireRole("admin")</code></td></tr>
+        <tr><td>Claim</td><td>гибко: отдел, регион, тариф</td><td>значения приходят извне — нужна валидация
+          источника</td><td><code>RequireClaim("department", "finance")</code></td></tr>
+        <tr><td>Scope (OAuth)</td><td>делегирование клиенту: что разрешил пользователь</td><td>scope — про клиента,
+          а не про конкретные данные</td><td><code>RequireClaim("scope", "orders.read")</code></td></tr>
+        <tr><td>Политика</td><td>одно место, комбинируем условия, тестируется</td><td>нужна дисциплина
+          именования</td><td><code>AddPolicy("finance", …)</code></td></tr>
+        <tr><td>Политика + ресурс</td><td>единственный корректный способ для «своих» объектов</td><td>требует
+          загрузить объект до проверки</td><td><code>AuthorizeAsync(user, order, "owner-or-admin")</code></td></tr>
+      </tbody>
+    </table>
+    <p>Практическое правило: <strong>роль</strong> — «может ли этот человек в принципе открыть раздел»,
+      <strong>политика</strong> — «условия доступа к функции», <strong>ресурс</strong> — «этот конкретный
+      объект». Проверка прав на объект никогда не заменяется проверкой роли, и наоборот.</p>
+
+    <div class="box gold">
+      <span class="t">★ Чек-лист авторизации для API</span>
+      <ol>
+        <li><code>FallbackPolicy</code> = требует аутентификации; открытые эндпоинты помечены
+          <code>AllowAnonymous</code> осознанно.</li>
+        <li>Каждый доступ к объекту по id проверяет владельца через <code>IAuthorizationService</code>, а не только
+          факт логина.</li>
+        <li>Отказ на «не своё» — 403 или замаскированный 404, выбрано для ресурса явно.</li>
+        <li>Критичные правила живут в политиках/handler’ах, а не размазаны по эндпоинтам.</li>
+        <li>Роли/права в токене не считаются «вечными»: TTL токена и/или проверка по БД для критичных операций.</li>
+        <li>Есть тесты на отказ: без токена, чужая роль, чужой объект, несуществующий id — все четыре случая.</li>
+      </ol>
+    </div>
+
+    <div class="box gold">
+      <span class="t">★ Что спросят и как отвечать</span>
+      <ol>
+        <li><strong>«Чем 401 отличается от 403?»</strong> — 401: не аутентифицирован (нужен токен), 403:
+          аутентифицирован, но политика не пропустила.</li>
+        <li><strong>«Как проверить, что пользователь не читает чужой заказ?»</strong> — загрузить заказ и вызвать
+          <code>AuthorizeAsync(user, order, policy)</code>; проверять <code>sub</code> против владельца или
+          арендатора.</li>
+        <li><strong>«Зачем <code>FallbackPolicy</code>?»</strong> — чтобы новый эндпоинт по умолчанию был закрыт:
+          забыть <code>RequireAuthorization</code> проще, чем забыть <code>AllowAnonymous</code>.</li>
+        <li><strong>«Почему 404 вместо 403?»</strong> — чтобы не подтверждать существование чужого объекта;
+          выбирается для каждого ресурса.</li>
+        <li><strong>«Где хранить права: в токене или в БД?»</strong> — в токене быстрее, но устаревает; в БД
+          актуальнее, но дороже. Обычно: в токене — роли/scope, в БД/кэше — права на объекты и критичные
+          флаги.</li>
+      </ol>
+    </div>
+
+    <div class="pager">
+      <a href="ch34-authentication.html">← <span class="sp">Глава 34. Аутентификация: JWT, OAuth 2.0 и OpenID Connect</span></a>
+      <a href="ch36-owasp.html"><span class="sp">Глава 36. OWASP Top 10 в .NET: что реально делать</span> →</a>
+    </div>
+  </div>
+</div>
+<script>if (window.hljs) hljs.highlightAll();</script>
+</body>
+</html>
+
+
+
